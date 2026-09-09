@@ -3,8 +3,11 @@ name = "migratory"
 version = "0.0.1"
 edition = "2024"
 authors = ["Samuel Marks"]
+description = "An open-source, 100% compatible replica of Vagrant."
 license = "CC0 OR MIT OR Apache-2.0"
 repository = "https://github.com/SamuelMarks/migratory"
+keywords = ["vagrant", "virtualization", "devops", "reproducible", "hypervisor"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }

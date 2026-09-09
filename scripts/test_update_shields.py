@@ -97,10 +97,14 @@ class TestUpdateShields(unittest.TestCase):
             filepath.unlink()
 
     @patch("update_shields.update_readme")
+    @patch("update_shields.get_doc_coverage")
     @patch("update_shields.get_test_coverage")
-    def test_main(self, mock_get_cov: MagicMock, mock_update: MagicMock) -> None:
+    def test_main(
+        self, mock_get_cov: MagicMock, mock_get_doc: MagicMock, mock_update: MagicMock
+    ) -> None:
         """Test the main entry point function."""
         mock_get_cov.return_value = "80%"
+        mock_get_doc.return_value = "100%"
         update_shields.main()
         mock_update.assert_called_once_with(Path("README.md"), "100%", "80%")
 

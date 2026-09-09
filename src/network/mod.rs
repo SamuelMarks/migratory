@@ -208,8 +208,6 @@ pub fn generate_guest_network_script(configs: &[NetworkConfig]) -> String {
                 script.push_str(&format!("ip link set eth{} up\n", eth_index));
                 eth_index += 1;
             }
-
-            NetworkConfig::PrivateNetwork { ip: None, .. } => {}
             NetworkConfig::PublicNetwork { .. } => {
                 script.push_str(&format!("dhclient eth{}\n", eth_index));
                 eth_index += 1;

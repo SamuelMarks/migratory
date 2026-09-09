@@ -556,12 +556,12 @@ port = ARGV[1]
 begin
   require gem_name
 rescue LoadError => e
-  s = TCPSocket.new('localhost', port.to_i)
+  s = TCPSocket.new('127.0.0.1', port.to_i)
   s.puts("ERROR: #{e.message}")
   s.close
   exit 1
 end
-s = TCPSocket.new('localhost', port.to_i)
+s = TCPSocket.new('127.0.0.1', port.to_i)
 s.puts("OK")
 STDIN.read
 s.close

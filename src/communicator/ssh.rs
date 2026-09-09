@@ -674,20 +674,14 @@ impl Communicator for SshCommunicator {
         let sleep_duration = Duration::from_secs(2);
 
         while start.elapsed() < timeout {
-            match self.connect() {
-                Ok(session) => {
-                    if let Ok(mut channel) = session.channel_session()
-                        && channel.exec("echo ok").is_ok()
-                    {
-                        let mut s = String::new();
-                        let _ = channel.read_to_string(&mut s);
-                        if s.trim() == "ok" {
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(_) => {
-                    // fall through and sleep
+            if let Ok(session) = self.connect()
+                && let Ok(mut channel) = session.channel_session()
+                && channel.exec("echo ok").is_ok()
+            {
+                let mut s = String::new();
+                let _ = channel.read_to_string(&mut s);
+                if s.trim() == "ok" {
+                    return Ok(());
                 }
             }
             std::thread::sleep(sleep_duration);

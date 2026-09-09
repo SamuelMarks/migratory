@@ -3,7 +3,57 @@
 //!
 //! This is the main executable module that initializes tracing, parses CLI arguments,
 //! and routes execution to the appropriate command handlers.
+
 #![deny(missing_docs)]
+#![deny(clippy::all)]
+#![deny(clippy::correctness)]
+#![deny(clippy::suspicious)]
+#![deny(clippy::complexity)]
+#![deny(clippy::perf)]
+#![deny(clippy::style)]
+#![deny(clippy::cargo)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+#![deny(clippy::todo)]
+#![deny(clippy::unimplemented)]
+#![deny(clippy::dbg_macro)]
+#![deny(clippy::clone_on_ref_ptr)]
+#![deny(clippy::empty_line_after_outer_attr)]
+#![deny(clippy::explicit_into_iter_loop)]
+#![deny(clippy::flat_map_option)]
+#![deny(clippy::manual_assert)]
+#![deny(clippy::match_same_arms)]
+#![deny(clippy::needless_borrow)]
+#![deny(clippy::redundant_closure)]
+#![deny(clippy::redundant_static_lifetimes)]
+#![deny(clippy::semicolon_if_nothing_returned)]
+#![deny(clippy::single_match_else)]
+#![deny(clippy::unused_async)]
+#![deny(clippy::cast_lossless)]
+#![deny(clippy::checked_conversions)]
+#![deny(clippy::cloned_instead_of_copied)]
+#![deny(clippy::default_trait_access)]
+#![deny(clippy::expl_impl_clone_on_copy)]
+#![deny(clippy::filter_map_next)]
+#![deny(clippy::fn_params_excessive_bools)]
+#![deny(clippy::if_then_some_else_none)]
+#![deny(clippy::inefficient_to_string)]
+#![deny(clippy::macro_use_imports)]
+#![deny(clippy::manual_is_ascii_check)]
+#![deny(clippy::match_bool)]
+#![deny(clippy::mut_mut)]
+#![deny(clippy::naive_bytecount)]
+#![deny(clippy::needless_bitwise_bool)]
+#![deny(clippy::range_minus_one)]
+#![deny(clippy::range_plus_one)]
+#![deny(clippy::same_functions_in_if_condition)]
+#![deny(clippy::str_split_at_newline)]
+#![deny(clippy::string_add_assign)]
+#![deny(clippy::unnecessary_join)]
+#![deny(clippy::zero_sized_map_values)]
+#![allow(clippy::multiple_crate_versions)]
 
 use migratory::cli::{self, Commands};
 use migratory::error::MigratoryError;
@@ -51,10 +101,10 @@ fn main() {
             .from_env_lossy(),
     );
 
-    if !with_time {
-        builder.without_time().with_target(false).init();
-    } else {
+    if with_time {
         builder.init();
+    } else {
+        builder.without_time().with_target(false).init();
     }
 
     if is_debug {
@@ -62,7 +112,7 @@ fn main() {
     }
 
     if let Err(e) = run(cli) {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }

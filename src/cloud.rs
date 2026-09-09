@@ -972,11 +972,11 @@ mod tests {
     #[test]
     fn test_create_version() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(POST).path("/api/v1/boxes/user/box/versions");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(POST).path("/api/v1/boxes/user/box2/versions");
             then.status(500);
         });
@@ -995,11 +995,11 @@ mod tests {
     #[test]
     fn test_update_version() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(PUT).path("/api/v1/boxes/user/box/versions/1.0");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box2/versions/1.0");
             then.status(500);
@@ -1019,12 +1019,12 @@ mod tests {
     #[test]
     fn test_delete_version() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/api/v1/boxes/user/box/versions/1.0");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/api/v1/boxes/user/box2/versions/1.0");
             then.status(500);
@@ -1040,12 +1040,12 @@ mod tests {
     #[test]
     fn test_release_version() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box/versions/1.0/release");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box2/versions/1.0/release");
             then.status(500);
@@ -1061,12 +1061,12 @@ mod tests {
     #[test]
     fn test_revoke_version() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box/versions/1.0/revoke");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box2/versions/1.0/revoke");
             then.status(500);
@@ -1082,12 +1082,12 @@ mod tests {
     #[test]
     fn test_create_provider() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(POST)
                 .path("/api/v1/boxes/user/box/versions/1.0/providers");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(POST)
                 .path("/api/v1/boxes/user/box2/versions/1.0/providers");
             then.status(500);
@@ -1111,12 +1111,12 @@ mod tests {
     #[test]
     fn test_update_provider() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box/versions/1.0/providers/virtualbox");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box2/versions/1.0/providers/virtualbox");
             then.status(500);
@@ -1140,12 +1140,12 @@ mod tests {
     #[test]
     fn test_delete_provider() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/api/v1/boxes/user/box/versions/1.0/providers/virtualbox");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/api/v1/boxes/user/box2/versions/1.0/providers/virtualbox");
             then.status(500);
@@ -1169,17 +1169,17 @@ mod tests {
     #[test]
     fn test_get_upload_url() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(GET)
                 .path("/api/v1/boxes/user/box/versions/1.0/providers/virtualbox/upload");
             then.status(200).body(r#"{"upload_path":"http://upload"}"#);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(GET)
                 .path("/api/v1/boxes/user/box2/versions/1.0/providers/virtualbox/upload");
             then.status(500);
         });
-        let mock_bad_json = server.mock(|when, then| {
+        let _mock_bad_json = server.mock(|when, then| {
             when.method(GET)
                 .path("/api/v1/boxes/user/box3/versions/1.0/providers/virtualbox/upload");
             then.status(200)
@@ -1210,11 +1210,11 @@ mod tests {
     fn test_upload_file() {
         use std::io::Write;
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(PUT).path("/upload");
             then.status(200);
         });
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(PUT).path("/upload_err");
             then.status(500);
         });
@@ -1242,7 +1242,7 @@ mod tests {
     #[test]
     fn test_update_provider_with_checksum_type() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v1/boxes/user/box/versions/1.0/providers/virtualbox");
             then.status(200);
@@ -1260,7 +1260,7 @@ mod tests {
     #[test]
     fn test_search_boxes_error() {
         let server = MockServer::start();
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(GET).path("/api/v1/search");
             then.status(500);
         });
@@ -1323,7 +1323,7 @@ mod tests {
         assert!(client.search_boxes("query").is_err());
         assert!(client.authenticate("user", "pass", None).is_err());
 
-        let mut temp_file = tempfile::NamedTempFile::new().expect("operation should succeed");
+        let temp_file = tempfile::NamedTempFile::new().expect("operation should succeed");
         assert!(
             client
                 .upload_file("http://127.0.0.1:0/upload", temp_file.path())
@@ -1392,12 +1392,12 @@ mod tests {
     #[test]
     fn test_search_boxes_success_and_json_error() {
         let server = MockServer::start();
-        let mock_ok = server.mock(|when, then| {
+        let _mock_ok = server.mock(|when, then| {
             when.method(GET).path("/api/v1/search").query_param("q", "query");
             then.status(200).body(r#"{"boxes": [{"name": "user/box", "description_markdown": "", "short_description": "", "versions": []}]}"#);
         });
 
-        let mock_err = server.mock(|when, then| {
+        let _mock_err = server.mock(|when, then| {
             when.method(GET)
                 .path("/api/v1/search")
                 .query_param("q", "bad");

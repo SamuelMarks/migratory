@@ -226,7 +226,7 @@ mod tests {
             .lock()
             .expect("operation should succeed");
         let temp = tempfile::tempdir().expect("operation should succeed");
-        let mut server = httpmock::MockServer::start();
+        let server = httpmock::MockServer::start();
 
         unsafe {
             std::env::set_var(
@@ -237,7 +237,7 @@ mod tests {
             std::env::set_var("MIGRATORY_TEST_MOCK_STDIN", "1");
         }
 
-        let mock = server.mock(|when, then| {
+        let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::POST);
             then.status(200)
                 .header("content-type", "application/json")

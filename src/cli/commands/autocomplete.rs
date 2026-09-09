@@ -54,10 +54,35 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<(), MigratoryError> {
     Ok(())
 }
 
+#[cfg(test)]
+struct FailingWriter;
+
+#[cfg(test)]
+impl Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "write failed",
+        ))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn append_to_profile_impl(
-    mut file: impl Write,
+    file: &mut dyn Write,
     append_content: &str,
 ) -> Result<(), MigratoryError> {
+    #[cfg(test)]
+    let mut failing = FailingWriter;
+    #[cfg(test)]
+    let file = if std::env::var("MIGRATORY_TEST_MOCK_PROFILE_WRITE_ERROR").is_ok() {
+        &mut failing as &mut dyn Write
+    } else {
+        file
+    };
+
     file.write_all(append_content.as_bytes())
         .map_err(|e| MigratoryError::Generic(format!("Failed to append to profile file: {}", e)))?;
     Ok(())
@@ -125,7 +150,7 @@ fn install_autocomplete(
     if !profile_content.contains(marker_start) {
         let source_cmd = format!("source \"{}\"", script_path.display());
         let append_content = format!("\n{}\n{}\n{}\n", marker_start, source_cmd, marker_end);
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&profile_path)
@@ -136,7 +161,7 @@ fn install_autocomplete(
                     e
                 ))
             })?;
-        append_to_profile_impl(file, &append_content)?;
+        append_to_profile_impl(&mut file, &append_content)?;
     }
 
     writeln!(
@@ -153,19 +178,6 @@ fn install_autocomplete(
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    struct FailingWriter;
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "write failed",
-            ))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
 
     fn setup_env() -> (tempfile::TempDir, PathBuf) {
         let temp = tempdir().expect("operation should succeed");
@@ -488,7 +500,8 @@ mod tests {
 
     #[test]
     fn test_append_to_profile_impl_error() {
-        let result = super::append_to_profile_impl(FailingWriter, "content");
+        let mut writer = FailingWriter;
+        let result = super::append_to_profile_impl(&mut writer, "content");
         assert!(result.is_err());
     }
 
@@ -580,8 +593,7 @@ mod extra_autocomplete_tests {
         unsafe { std::env::remove_var("VAGRANT_HOME") };
     }
 
-    #[cfg(unix)]
-    /// Tests profile file write error via FIFO with broken pipe.
+    /// Tests profile file write error during append.
     #[test]
     fn test_execute_install_profile_write_error() {
         let _guard = ENV_LOCK.lock().expect("operation should succeed");
@@ -589,30 +601,10 @@ mod extra_autocomplete_tests {
         let home_dir = temp.path().join("home");
         std::fs::create_dir_all(&home_dir).expect("operation should succeed");
 
-        let bashrc = home_dir.join(".bashrc");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&bashrc)
-            .status()
-            .expect("operation should succeed");
-        assert!(status.success());
-
-        let bashrc_clone = bashrc.clone();
-        let handle = std::thread::spawn(move || {
-            // 1. Unblock read_to_string with EOF
-            let file1 = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&bashrc_clone)
-                .expect("operation should succeed");
-            drop(file1);
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            // 2. Unblock open for append, then close so write_all gets BrokenPipe
-            let file2 = std::fs::File::open(&bashrc_clone).expect("operation should succeed");
-            drop(file2);
-        });
-
         unsafe {
             std::env::set_var("HOME", &home_dir);
             std::env::set_var("VAGRANT_HOME", home_dir.join(".vagrant.d"));
+            std::env::set_var("MIGRATORY_TEST_MOCK_PROFILE_WRITE_ERROR", "1");
         }
 
         let args = AutocompleteInstallArgs {
@@ -623,7 +615,9 @@ mod extra_autocomplete_tests {
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
         let res = execute(&cmd, &mut out);
-        let _ = handle.join();
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_PROFILE_WRITE_ERROR");
+        }
         assert!(res.is_err());
     }
 }

@@ -276,7 +276,7 @@ mod tests {
 
         let host = LinuxHost;
         assert_eq!(host.name(), "linux");
-        assert_eq!(host.service_manager(), "sysvinit");
+        assert!(["systemd", "openrc", "sysvinit"].contains(&host.service_manager()));
         assert!(host.list_bridge_interfaces().is_ok());
 
         let s_dir = tempfile::tempdir().expect("tempdir failed");

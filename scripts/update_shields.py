@@ -81,7 +81,9 @@ def update_readme(readme_path: Path, doc_cov: str, test_cov: str) -> None:
             elif "![Test Coverage]" in line:
                 lines[i] = test_badge
 
-    readme_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    new_content = "\n".join(lines) + "\n"
+    if new_content != content:
+        readme_path.write_text(new_content, encoding="utf-8")
 
 
 def get_doc_coverage() -> str:
