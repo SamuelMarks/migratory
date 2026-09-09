@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    - name: Check Formatting
+      run: cargo fmt -- --check
+    - name: Clippy
+      run: cargo clippy -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+    - name: Install cargo-tarpaulin
+      run: cargo install cargo-tarpaulin
+    - name: Run Tests & Coverage
+      run: cargo tarpaulin --out Xml --fail-under 100 --engine llvm
+    - name: Doc tests
+      run: cargo rustdoc -- -D warnings -D missing_docs

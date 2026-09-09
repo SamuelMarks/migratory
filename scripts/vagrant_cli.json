@@ -1,0 +1,92 @@
+{
+  "autocomplete": {
+    "install": {}
+  },
+  "box": {
+    "add": {},
+    "list": {},
+    "outdated": {},
+    "prune": {},
+    "remove": {},
+    "repackage": {},
+    "update": {}
+  },
+  "cap": {},
+  "cloud": {
+    "auth": {
+      "login": {},
+      "logout": {},
+      "whoami": {}
+    },
+    "box": {
+      "create": {},
+      "delete": {},
+      "show": {},
+      "update": {}
+    },
+    "provider": {
+      "create": {},
+      "delete": {},
+      "update": {},
+      "upload": {}
+    },
+    "publish": {},
+    "search": {},
+    "version": {
+      "create": {},
+      "delete": {},
+      "release": {},
+      "revoke": {},
+      "update": {}
+    }
+  },
+  "destroy": {},
+  "docker-exec": {},
+  "docker-logs": {},
+  "docker-run": {},
+  "global-status": {},
+  "halt": {},
+  "help": {},
+  "init": {},
+  "list-commands": {},
+  "login": {},
+  "mutate": {},
+  "package": {},
+  "plugin": {
+    "expunge": {},
+    "install": {},
+    "license": {},
+    "list": {},
+    "repair": {},
+    "uninstall": {},
+    "update": {}
+  },
+  "port": {},
+  "powershell": {},
+  "provider": {},
+  "provision": {},
+  "push": {},
+  "rdp": {},
+  "reload": {},
+  "resume": {},
+  "rsync": {},
+  "rsync-auto": {},
+  "snapshot": {
+    "delete": {},
+    "list": {},
+    "pop": {},
+    "push": {},
+    "restore": {},
+    "save": {}
+  },
+  "ssh": {},
+  "ssh-config": {},
+  "status": {},
+  "suspend": {},
+  "up": {},
+  "upload": {},
+  "validate": {},
+  "version": {},
+  "winrm": {},
+  "winrm-config": {}
+}

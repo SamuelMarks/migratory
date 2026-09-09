@@ -1,0 +1,51 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: Cargo Format (Fix)
+        entry: cargo fmt
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-fmt-check
+        name: Cargo Format (Check)
+        entry: cargo fmt -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: Cargo Clippy (Lint)
+        entry: cargo clippy -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-build
+        name: Cargo Build
+        entry: cargo build
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-test
+        name: Cargo Test
+        entry: cargo test
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: update-shields
+        name: Update README Coverage Shields
+        entry: python3 scripts/update_shields.py
+        language: system
+        files: ^src/|^tests/|^Cargo\.toml$|^scripts/update_shields\.py$
+        pass_filenames: false
+
+      - id: check-cli
+        name: Check CLI Interface (Anti-Hallucination Grounding)
+        entry: python3 scripts/check_cli.py
+        language: system
+        files: ^src/cli/.*\.rs$|^scripts/check_cli\.py$
+        pass_filenames: false
