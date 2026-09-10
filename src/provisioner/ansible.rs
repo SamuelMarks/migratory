@@ -103,7 +103,7 @@ impl Provisioner for AnsibleProvisioner {
         if self.mode == "guest" || self.mode == "ansible_local" {
             // ansible_local mode
             if self.install {
-                let install_cmd = r#"
+                let install_cmd = "
                 if ! command -v ansible-playbook >/dev/null 2>&1; then
                     echo 'Installing Ansible on guest...'
                     if command -v apt-get >/dev/null 2>&1; then
@@ -116,7 +116,7 @@ impl Provisioner for AnsibleProvisioner {
                         sudo pip3 install ansible
                     fi
                 fi
-                "#;
+                ";
                 comm.execute(install_cmd)?;
             }
 

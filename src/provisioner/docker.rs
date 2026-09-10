@@ -60,7 +60,7 @@ impl Provisioner for DockerProvisioner {
 
     fn provision(&self, comm: &dyn Communicator) -> Result<(), MigratoryError> {
         if self.install {
-            let install_script = r#"
+            let install_script = "
             if ! command -v docker > /dev/null 2>&1; then
                 echo 'Installing Docker...'
                 if command -v curl > /dev/null 2>&1; then
@@ -79,7 +79,7 @@ impl Provisioner for DockerProvisioner {
                 fi
                 sudo usermod -aG docker $USER || true
             fi
-            "#;
+            ";
             comm.execute(install_script)?;
         }
 

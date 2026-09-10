@@ -89,12 +89,12 @@ fn run_docker_exec(cmd_args: &[&str], ui: &ConsoleUi) -> Result<(), MigratoryErr
         .status()
         .map_err(map_docker_error)?;
 
-    check_status(&status, ui);
+    check_status(status, ui);
     Ok(())
 }
 
 #[coverage(off)]
-fn check_status(status: &std::process::ExitStatus, ui: &ConsoleUi) {
+fn check_status(status: std::process::ExitStatus, ui: &ConsoleUi) {
     if !status.success() {
         ui.warn("default", "Docker exec failed.");
     }

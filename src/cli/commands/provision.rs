@@ -113,11 +113,13 @@ pub fn execute(cwd: &Path, args: &ProvisionArgs) -> Result<(), MigratoryError> {
         let communicator = crate::communicator::ssh::SshCommunicator::new(comm_config);
         let mut any_ran = false;
         for provisioner in &machine.vm.provisioners {
-            if let Some(with) = &args.provision_with {
-                let allowed: Vec<&str> = with.split(',').map(|s| s.trim()).collect();
-                if !allowed.contains(&provisioner.name.as_str()) {
-                    continue;
-                }
+            if let Some(with) = &args.provision_with
+                && !with
+                    .split(',')
+                    .map(str::trim)
+                    .any(|x| x == provisioner.name.as_str())
+            {
+                continue;
             }
 
             ui.info(

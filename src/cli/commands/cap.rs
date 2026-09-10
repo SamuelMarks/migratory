@@ -107,12 +107,11 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
             writeln!(writer, "Capability '{}' is supported.", cap_name)
                 .map_err(|e| MigratoryError::Generic(e.to_string()))?;
             return Ok(());
-        } else {
-            return Err(MigratoryError::Generic(format!(
-                "Capability '{}' is NOT supported.",
-                cap_name
-            )));
         }
+        return Err(MigratoryError::Generic(format!(
+            "Capability '{}' is NOT supported.",
+            cap_name
+        )));
     }
 
     if !is_supported {

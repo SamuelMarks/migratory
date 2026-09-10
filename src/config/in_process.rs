@@ -45,7 +45,7 @@ pub fn compare_semver(v1: &str, v2: &str) -> std::cmp::Ordering {
         let seg1 = p1.get(i).copied().unwrap_or(0);
         let seg2 = p2.get(i).copied().unwrap_or(0);
         match seg1.cmp(&seg2) {
-            std::cmp::Ordering::Equal => continue,
+            std::cmp::Ordering::Equal => {}
             other => return other,
         }
     }

@@ -40,10 +40,9 @@ impl QemuProvider {
             match net {
                 NetworkConfig::ForwardedPort {
                     guest,
-                    host: _,
-                    auto_correct: _,
                     protocol,
                     host_ip,
+                    ..
                 } => {
                     let collision_res = network::check_forwarded_port(net, &open_ports)?;
                     let final_host = collision_res.corrected_host_port;
@@ -231,13 +230,11 @@ impl Provider for QemuProvider {
 
         let linked_clone =
             std::env::var("VAGRANT_LIBVIRT_LINKED_CLONE").unwrap_or_default() == "true";
-        let mut qemu_img_cmd = None;
-
-        if linked_clone {
+        let qemu_img_cmd = linked_clone.then(|| {
             // Create a qcow2 backing file first for the clone
             let backing_file = format!("/var/lib/libvirt/images/{}.qcow2", base_machine_id);
             let new_file = format!("/var/lib/libvirt/images/{}.qcow2", vm_name);
-            qemu_img_cmd = Some(vec![
+            vec![
                 "create".to_string(),
                 "-f".to_string(),
                 "qcow2".to_string(),
@@ -246,8 +243,8 @@ impl Provider for QemuProvider {
                 "-b".to_string(),
                 backing_file,
                 new_file,
-            ]);
-        }
+            ]
+        });
 
         if let Some(cmd) = qemu_img_cmd {
             let cmd_refs: Vec<&str> = cmd.iter().map(|s| s.as_str()).collect();
@@ -412,11 +409,11 @@ impl QemuProvider {
         };
 
         let virtio_devices = if opts.virtio {
-            r#"<controller type='virtio-serial' index='0'/>
+            "<controller type='virtio-serial' index='0'/>
     <rng model='virtio'>
       <backend model='random'>/dev/urandom</backend>
     </rng>
-    <memballoon model='virtio'/>"#
+    <memballoon model='virtio'/>"
         } else {
             "<memballoon model='none'/>"
         };

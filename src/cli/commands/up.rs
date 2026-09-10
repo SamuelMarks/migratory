@@ -238,7 +238,7 @@ impl Action for BootMachinesAction {
         if self.parallel {
             std::thread::scope(|s| {
                 let mut handles = vec![];
-                for (name, machine) in machines.iter() {
+                for (name, machine) in machines {
                     handles.push(s.spawn(|| process_machine(name, machine)));
                 }
                 for handle in handles {
@@ -286,7 +286,7 @@ impl Action for MountSyncedFoldersAction {
         let ui = ConsoleUi;
         let state_mgr = provider::StateManager::new(self.cwd.join(".vagrant"));
 
-        for (name, machine) in machines.iter() {
+        for (name, machine) in machines {
             if machine.vm.synced_folders.is_empty() {
                 continue;
             }
@@ -394,7 +394,7 @@ impl Action for ProvisionMachinesAction {
         let ui = ConsoleUi;
         let state_mgr = provider::StateManager::new(self.cwd.join(".vagrant"));
 
-        for (name, machine) in machines.iter() {
+        for (name, machine) in machines {
             let target_provider_name = machine
                 .vm
                 .providers
@@ -449,15 +449,14 @@ impl Action for ProvisionMachinesAction {
 
             let mut any_ran = false;
             for provisioner in &machine.vm.provisioners {
-                if let Some(with) = &self.provision_with {
-                    let allowed: Vec<String> = with
+                if let Some(with) = &self.provision_with
+                    && !with
                         .iter()
                         .flat_map(|w| w.split(','))
-                        .map(|s| s.trim().to_string())
-                        .collect();
-                    if !allowed.contains(&provisioner.name) {
-                        continue;
-                    }
+                        .map(str::trim)
+                        .any(|x| x == provisioner.name)
+                {
+                    continue;
                 }
 
                 ui.info(

@@ -33,7 +33,7 @@ pub fn execute(cwd: &Path, args: &ProviderArgs) -> Result<(), MigratoryError> {
         println!("Usable providers: virtualbox, vmware, hyperv, qemu, docker");
     } else {
         println!("Providers for this environment:");
-        for (machine_name, machine_config) in env_config.machines.iter() {
+        for (machine_name, machine_config) in &env_config.machines {
             let p_name = machine_config
                 .vm
                 .providers

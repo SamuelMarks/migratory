@@ -287,18 +287,24 @@ end
         fs::create_dir_all(&id_dir).expect("operation should succeed");
         fs::write(id_dir.join("id"), "mock_id").expect("operation should succeed");
 
-        let bin = dir.path().join("vboxmanage");
+        let bin_vbox = dir.path().join("VBoxManage");
+        let bin_lower = dir.path().join("vboxmanage");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            std::fs::write(&bin_vbox, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
+            std::fs::set_permissions(&bin_vbox, std::fs::Permissions::from_mode(0o755))
+                .expect("operation should succeed");
+            std::fs::write(&bin_lower, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
+            std::fs::set_permissions(&bin_lower, std::fs::Permissions::from_mode(0o755))
                 .expect("operation should succeed");
         }
         #[cfg(windows)]
         {
-            let bin = dir.path().join("vboxmanage.bat");
+            let bin = dir.path().join("VBoxManage.bat");
             std::fs::write(&bin, "@echo off\nexit 0\n").expect("operation should succeed");
+            let bin_lower = dir.path().join("vboxmanage.bat");
+            std::fs::write(&bin_lower, "@echo off\nexit 0\n").expect("operation should succeed");
         }
 
         let old_path = std::env::var_os("PATH").unwrap_or_default();
@@ -343,18 +349,24 @@ end
         fs::create_dir_all(&id_dir).expect("operation should succeed");
         fs::write(id_dir.join("id"), "mock_id").expect("operation should succeed");
 
-        let bin = dir.path().join("vboxmanage");
+        let bin_vbox = dir.path().join("VBoxManage");
+        let bin_lower = dir.path().join("vboxmanage");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            std::fs::write(&bin_vbox, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
+            std::fs::set_permissions(&bin_vbox, std::fs::Permissions::from_mode(0o755))
+                .expect("operation should succeed");
+            std::fs::write(&bin_lower, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
+            std::fs::set_permissions(&bin_lower, std::fs::Permissions::from_mode(0o755))
                 .expect("operation should succeed");
         }
         #[cfg(windows)]
         {
-            let bin = dir.path().join("vboxmanage.bat");
+            let bin = dir.path().join("VBoxManage.bat");
             std::fs::write(&bin, "@echo off\nexit 0\n").expect("operation should succeed");
+            let bin_lower = dir.path().join("vboxmanage.bat");
+            std::fs::write(&bin_lower, "@echo off\nexit 0\n").expect("operation should succeed");
         }
 
         let old_path = std::env::var_os("PATH").unwrap_or_default();

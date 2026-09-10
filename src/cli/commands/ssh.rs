@@ -67,7 +67,7 @@ pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
     let check_action = crate::action::CheckMachineStateAction {
         expected_states: vec!["running".to_string()],
         machine_name: machine_name.clone(),
-        provider_name: target_provider_name.clone(),
+        provider_name: target_provider_name,
         cwd: cwd.to_path_buf(),
     };
     if !cfg!(test) {

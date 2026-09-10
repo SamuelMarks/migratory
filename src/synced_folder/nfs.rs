@@ -63,10 +63,11 @@ impl SyncedFolder for NfsSyncedFolder {
         // Vagrant dynamically resolves this. We'll use a mocked host IP.
         let host_ip = "10.0.2.2";
 
-        let mut proto = "udp";
-        if options.mount_options.iter().any(|o| o.contains("tcp")) {
-            proto = "tcp";
-        }
+        let proto = if options.mount_options.iter().any(|o| o.contains("tcp")) {
+            "tcp"
+        } else {
+            "udp"
+        };
 
         let mut mount_opts = format!("vers=3,{},nolock,rw", proto); // Typical defaults
         for opt in &options.mount_options {

@@ -691,9 +691,9 @@ impl Communicator for SshCommunicator {
     }
 }
 
+/// Mock SSH implementation for unit testing.
 #[cfg(test)]
-#[allow(missing_docs)]
-pub mod mock_ssh {
+pub(crate) mod mock_ssh {
     use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
     use std::net::TcpStream;
     use std::path::Path;
@@ -1209,6 +1209,8 @@ mod tests {
         assert!(spawn_fail.is_err());
 
         // Call flush directly to cover it
+        let stat = mock_ssh::FileStat { size: 0 };
+        assert_eq!(stat.size, 0);
         let mut file = mock_ssh::File { fail_io: false };
         use std::io::Write;
         assert!(file.flush().is_ok());
@@ -1668,6 +1670,9 @@ mod tests {
 
     #[test]
     fn test_is_insecure_key_and_replace() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock");
         reset_mock();
         let port = spawn_dummy_server();
         let config = SshConfig {
@@ -1702,7 +1707,7 @@ mod tests {
         }
         let _ = SshCommunicator::generate_keypair();
         unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
+            std::env::remove_var("MIGRATORY_TEST_MOCK");
         }
     }
 
@@ -2023,6 +2028,9 @@ mod tests {
         // 4. execute install_cmd fails
         MOCK_STATE.with(|s| s.borrow_mut().fail_exec = true);
         let res_exec_fail = comm.replace_insecure_key(&temp_dir.path().join("fail_key"));
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK");
+        }
         assert!(res_exec_fail.is_err());
     }
 

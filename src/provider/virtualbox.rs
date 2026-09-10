@@ -31,18 +31,19 @@ impl VirtualBoxProvider {
     }
 
     /// Helper to collect host interfaces dynamically.
-    #[allow(dead_code)]
+    ///
+    /// # Returns
+    ///
+    /// Returns a map of host network interface names to their descriptions.
     #[coverage(off)]
-    fn get_host_interfaces(&self) -> std::collections::HashMap<String, String> {
+    pub fn get_host_interfaces(&self) -> std::collections::HashMap<String, String> {
         let mut interfaces = std::collections::HashMap::new();
-        let res = execute_vboxmanage(&["list", "bridgedifs"]);
-        println!("execute_vboxmanage result: {:?}", res);
         if let Ok(out) = execute_vboxmanage(&["list", "bridgedifs"]) {
             for line in out.lines() {
                 if line.starts_with("Name: ") {
                     let name = line.trim_start_matches("Name: ").trim().to_string();
                     if !name.is_empty() {
-                        interfaces.insert(name.clone(), name.clone());
+                        interfaces.insert(name.clone(), name);
                     }
                 }
             }
@@ -72,10 +73,9 @@ impl VirtualBoxProvider {
             match net {
                 NetworkConfig::ForwardedPort {
                     guest,
-                    host: _,
-                    auto_correct: _,
                     protocol,
                     host_ip,
+                    ..
                 } => {
                     let collision_res = network::check_forwarded_port(net, &open_ports)?;
                     let final_host = collision_res.corrected_host_port;
@@ -126,7 +126,7 @@ impl VirtualBoxProvider {
                     let _ = execute_vboxmanage(&["modifyvm", id, &bridge_adapter, bridge]);
                     adapter_index += 1;
                 }
-                _ => {}
+                NetworkConfig::PublicNetwork { .. } => {}
             }
         }
         Ok(())
@@ -167,7 +167,7 @@ impl Provider for VirtualBoxProvider {
             // Generate a safe name for the share
             let share_name = sf
                 .guest_path
-                .replace("/", "_")
+                .replace('/', "_")
                 .trim_start_matches('_')
                 .to_string();
             let share_name = if share_name.is_empty() {
@@ -286,12 +286,12 @@ impl Provider for VirtualBoxProvider {
         // Here we'd actually read if a linked clone is preferred from config
         // but for now, we default to full clone to be safe, mimicking typical standard clone
         // or linked if asked.
-        let mut clone_type = "full";
-        // To implement Linked Clones properly, we'd use `--options link` but
-        // it requires the base VM to have a snapshot first.
-        if std::env::var("VAGRANT_VBOX_LINKED_CLONE").unwrap_or_default() == "true" {
-            clone_type = "link";
-        }
+        let clone_type = if std::env::var("VAGRANT_VBOX_LINKED_CLONE").unwrap_or_default() == "true"
+        {
+            "link"
+        } else {
+            "full"
+        };
 
         let mut args = vec!["clonevm", base_machine_id, "--name", vm_name, "--register"];
 
@@ -337,7 +337,7 @@ impl Provider for VirtualBoxProvider {
         };
 
         let out = execute_vboxmanage_inner("VBoxManage", &["showvminfo", id, "--machinereadable"])
-            .unwrap_or_else(|_| "".to_string());
+            .unwrap_or_else(|_| String::new());
 
         if out.is_empty() {
             return Ok("not created".to_string());
@@ -471,7 +471,7 @@ impl VirtualBoxProvider {
             "guestproperty",
             &["get", id, "/VirtualBox/GuestAdd/Version"],
         )
-        .unwrap_or_else(|_| "".to_string());
+        .unwrap_or_else(|_| String::new());
 
         if out.starts_with("Value:") {
             let version = out.trim_start_matches("Value:").trim().to_string();
@@ -851,7 +851,16 @@ impl VirtualBoxProvider {
 /// Returns a `MigratoryError` if the command execution fails or returns a non-zero exit status.
 #[coverage(off)]
 pub fn execute_vboxmanage(args: &[&str]) -> Result<String, MigratoryError> {
-    execute_vboxmanage_inner("VBoxManage", args)
+    match execute_vboxmanage_inner("VBoxManage", args) {
+        Err(MigratoryError::Generic(ref msg))
+            if msg.contains("os error 2")
+                || msg.contains("not found")
+                || msg.contains("No such file") =>
+        {
+            execute_vboxmanage_inner("vboxmanage", args)
+        }
+        res => res,
+    }
 }
 
 #[coverage(off)]
@@ -888,7 +897,7 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
                 ));
             }
             if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_EMPTY").is_ok() {
-                return Ok("".to_string());
+                return Ok(String::new());
             }
             if args.contains(&"hostonlyifs") {
                 return Ok("Name:\nName:   \nName: vboxnet0\nOther: ignore".to_string());
@@ -898,7 +907,7 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
         if std::env::var("MIGRATORY_TEST_MOCK_RUNNING").is_ok() {
             return Ok("VMState=\"running\"\n".to_string());
         }
-        return Ok("".to_string());
+        return Ok(String::new());
     }
 
     let output = Command::new(cmd).args(args).output();
@@ -929,7 +938,8 @@ mod tests {
             .expect("operation should succeed");
 
         let temp_dir = tempfile::tempdir().expect("operation should succeed");
-        let bin = temp_dir.path().join("vboxmanage");
+        let bin_vbox = temp_dir.path().join("VBoxManage");
+        let bin_lower = temp_dir.path().join("vboxmanage");
         let _inspect_bin = temp_dir.path().join("vboxmanage_or_similar"); // optional
 
         #[cfg(unix)]
@@ -938,16 +948,25 @@ mod tests {
             let mock_script = r#"#!/bin/sh
             exit 0
             "#;
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            println!("Mock script path: {:?}", bin);
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            std::fs::write(&bin_vbox, mock_script).expect("operation should succeed");
+            std::fs::set_permissions(&bin_vbox, std::fs::Permissions::from_mode(0o755))
+                .expect("operation should succeed");
+            std::fs::write(&bin_lower, mock_script).expect("operation should succeed");
+            std::fs::set_permissions(&bin_lower, std::fs::Permissions::from_mode(0o755))
                 .expect("operation should succeed");
         }
         #[cfg(windows)]
         {
-            let bat = temp_dir.path().join("vboxmanage.bat");
+            let bat = temp_dir.path().join("VBoxManage.bat");
             std::fs::write(
                 &bat,
+                "@echo off
+exit 0",
+            )
+            .expect("operation should succeed");
+            let bat_lower = temp_dir.path().join("vboxmanage.bat");
+            std::fs::write(
+                &bat_lower,
                 "@echo off
 exit 0",
             )
@@ -1071,21 +1090,27 @@ exit 0",
             .lock()
             .expect("operation should succeed");
         let temp_dir = tempfile::tempdir().expect("operation should succeed");
-        let bin = temp_dir.path().join("vboxmanage");
+        let bin_vbox = temp_dir.path().join("VBoxManage");
+        let bin_lower = temp_dir.path().join("vboxmanage");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mock_script = "#!/bin/sh\necho \"Name: en2\"\necho \"Name: \"\nexit 0\n";
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            println!("Mock script path: {:?}", bin);
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            std::fs::write(&bin_vbox, mock_script).expect("operation should succeed");
+            std::fs::set_permissions(&bin_vbox, std::fs::Permissions::from_mode(0o755))
+                .expect("operation should succeed");
+            std::fs::write(&bin_lower, mock_script).expect("operation should succeed");
+            std::fs::set_permissions(&bin_lower, std::fs::Permissions::from_mode(0o755))
                 .expect("operation should succeed");
         }
         #[cfg(windows)]
         {
-            let bat = temp_dir.path().join("vboxmanage.bat");
+            let bat = temp_dir.path().join("VBoxManage.bat");
             std::fs::write(&bat, "@echo off\necho Name: en2\necho Name: \nexit 0")
+                .expect("operation should succeed");
+            let bat_lower = temp_dir.path().join("vboxmanage.bat");
+            std::fs::write(&bat_lower, "@echo off\necho Name: en2\necho Name: \nexit 0")
                 .expect("operation should succeed");
         }
 

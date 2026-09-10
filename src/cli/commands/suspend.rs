@@ -304,6 +304,9 @@ end
 
     #[test]
     fn test_execute_suspend_success_with_mock_provider() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
         use std::env;
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;

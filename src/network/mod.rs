@@ -177,14 +177,14 @@ pub fn configure_public_network(
             }
             if let Some(ui) = ui {
                 let mut choices: Vec<&str> = host_interfaces.keys().map(|k| k.as_str()).collect();
-                choices.sort();
+                choices.sort_unstable();
                 let choice =
                     ui.prompt_choice("network", "Select a host interface for bridging:", &choices)?;
                 Ok(choice)
             } else {
                 // If no UI provided, just pick the first one deterministically
                 let mut choices: Vec<&str> = host_interfaces.keys().map(|k| k.as_str()).collect();
-                choices.sort();
+                choices.sort_unstable();
                 Ok(choices[0].to_string())
             }
         }

@@ -144,7 +144,11 @@ impl Provisioner for ShellProvisioner {
                 .as_deref()
                 .unwrap_or("-ExecutionPolicy Bypass");
 
-            let mut command = if self.powershell || remote_path.ends_with(".ps1") {
+            let is_ps1 = std::path::Path::new(&remote_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"));
+
+            let mut command = if self.powershell || is_ps1 {
                 let args_str = self.args.as_deref().unwrap_or("");
                 format!(
                     "powershell {} -File '{}' {}",
@@ -153,7 +157,7 @@ impl Provisioner for ShellProvisioner {
             } else {
                 format!("chmod +x {} && {}{}", remote_path, env_prefix, exec_cmd)
             };
-            if self.privileged && !self.powershell && !remote_path.ends_with(".ps1") {
+            if self.privileged && !self.powershell && !is_ps1 {
                 command = format!("sudo sh -c '{}'", command.replace('\'', "'\\''"));
             }
             comm.execute(&command)?;

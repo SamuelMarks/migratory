@@ -57,7 +57,7 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
     // Create a vector of pairs to store machine communicators and their respective rsync configurations
     let mut watch_targets = Vec::new();
 
-    for (machine_name, machine) in env_config.machines.iter() {
+    for (machine_name, machine) in &env_config.machines {
         let mut comm_config = machine.ssh.clone();
         comm_config.insert_key = false;
         let communicator = crate::communicator::ssh::SshCommunicator::new(comm_config.clone());

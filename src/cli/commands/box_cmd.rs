@@ -52,7 +52,10 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
             ui.info("box", &format!("Adding box '{}'...", args.name));
 
             // Check if it's a URL or path, if not, treat as HashiCorp Cloud tag
-            let is_url_or_path = args.name.contains("://") || args.name.ends_with(".box");
+            let is_url_or_path = args.name.contains("://")
+                || std::path::Path::new(&args.name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("box"));
 
             let box_mgr = BoxManager::new(global_dir);
 
@@ -172,7 +175,7 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
         }
         BoxCommands::Remove(args) => {
             let manager = BoxManager::new(global_dir);
-            let safe_name = args.name.replace("/", "-VAGRANTSLASH-");
+            let safe_name = args.name.replace('/', "-VAGRANTSLASH-");
             let box_dir = manager.global_boxes_dir.join(safe_name);
 
             if !box_dir.exists() {
@@ -365,10 +368,10 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
     Ok(())
 }
 
+/// Test helpers and synchronization locks for box commands.
 #[cfg(test)]
-#[allow(missing_docs)]
 pub mod tests {
-    #[allow(missing_docs)]
+    /// Global lock used to serialize environment variable mutations during tests.
     pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use super::*;

@@ -794,6 +794,9 @@ mod tests {
 
     #[test]
     fn test_client_init_with_env() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
         unsafe {
             std::env::set_var("VAGRANT_CLOUD_URL", "http://localhost:1234");
         }

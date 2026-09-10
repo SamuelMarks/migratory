@@ -113,7 +113,7 @@ impl Host for DarwinHost {
                 if sf.folder_type.as_deref() == Some("smb") && !sf.disabled {
                     let share_name = sf
                         .guest_path
-                        .replace("/", "_")
+                        .replace('/', "_")
                         .trim_start_matches('_')
                         .to_string();
                     let share_name = if share_name.is_empty() {

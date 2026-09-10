@@ -57,7 +57,7 @@ pub fn execute(cwd: &Path, args: &StatusArgs) -> Result<(), MigratoryError> {
         )));
     }
 
-    for (name, machine_config) in machines.iter() {
+    for (name, machine_config) in &machines {
         if let Some(target) = &args.name
             && name != target
         {

@@ -1104,7 +1104,7 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                     serde_json::Value::String(s) => s.clone(),
                     serde_json::Value::Number(num) => num.to_string(),
                     serde_json::Value::Bool(b) => b.to_string(),
-                    _ => "".to_string(),
+                    _ => String::new(),
                 };
                 options_map.insert(k.clone(), val_str);
             }
@@ -1138,7 +1138,7 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                     serde_json::Value::String(s) => s.clone(),
                     serde_json::Value::Number(num) => num.to_string(),
                     serde_json::Value::Bool(b) => b.to_string(),
-                    _ => "".to_string(),
+                    _ => String::new(),
                 };
                 options_map.insert(k.clone(), val_str);
             }

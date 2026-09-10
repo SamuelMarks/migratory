@@ -33,7 +33,7 @@ pub trait Ui {
 #[cfg(test)]
 thread_local! {
     /// Mock stdin lines for tests
-    pub static MOCK_STDIN: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    pub static MOCK_STDIN: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Helper function to read a line from stdin (or mock in tests).
@@ -48,10 +48,7 @@ pub fn read_stdin(buf: &mut String) -> std::io::Result<usize> {
             } else {
                 let s = m.remove(0);
                 if s == "__IO_ERROR__" {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "mock stdin error",
-                    ));
+                    return Err(std::io::Error::other("mock stdin error"));
                 }
                 buf.push_str(&s);
                 buf.push('\n');
@@ -197,11 +194,13 @@ impl Ui for ConsoleUi {
         read_stdin(&mut input).map_err(crate::error::MigratoryError::Io)?;
         let input = input.trim();
 
-        if let Ok(idx) = input.parse::<usize>() {
-            #[allow(clippy::collapsible_if)]
-            if (1..=choices.len()).contains(&idx) {
-                return Ok(choices[idx - 1].to_string());
-            }
+        if let Some(&choice) = input
+            .parse::<usize>()
+            .ok()
+            .and_then(|idx| idx.checked_sub(1))
+            .and_then(|idx| choices.get(idx))
+        {
+            return Ok(choice.to_string());
         }
         Err(crate::error::MigratoryError::Validation(
             "Invalid choice".to_string(),

@@ -223,9 +223,9 @@ pub enum NetworkConfig {
 /// Holds settings for lifecycle triggers attached to commands or actions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TriggerConfig {
-    /// Stage: "before", "after", or "on_error".
+    /// Stage: `before`, `after`, or `on_error`.
     pub stage: String,
-    /// Actions: e.g. ["up", "halt", "destroy", "provision", "reload", "package", "snapshot"].
+    /// Actions: e.g. `["up", "halt", "destroy", "provision", "reload", "package", "snapshot"]`.
     pub actions: Vec<String>,
     /// Inline command to run on host.
     pub run_inline: Option<String>,
@@ -334,7 +334,7 @@ pub struct VmConfig {
     pub synced_folders: Vec<SyncedFolderConfig>,
     /// Usable port range for automatic port collision resolution (default 2200..2250).
     pub usable_port_range: (u16, u16),
-    /// Allowed synced folder types (e.g., ["rsync", "nfs"]).
+    /// Allowed synced folder types (e.g., `["rsync", "nfs"]`).
     pub allowed_synced_folder_types: Option<Vec<String>>,
     /// Additional disks configured for the VM.
     pub disks: Vec<DiskConfig>,

@@ -62,10 +62,9 @@ fn execute_gem_command(args: &[&str], out: &mut dyn Write) -> Result<(), Migrato
                 "Plugin {} failed with status: {}. Error: {}",
                 args[0], output.status, stderr
             )));
-        } else {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            write!(out, "{}", stdout).map_err(|e| MigratoryError::Generic(e.to_string()))?;
         }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        write!(out, "{}", stdout).map_err(|e| MigratoryError::Generic(e.to_string()))?;
     } else {
         writeln!(out, "Executing gem with args: {:?}", args)
             .map_err(|e| MigratoryError::Generic(e.to_string()))?;
@@ -108,7 +107,10 @@ pub fn execute(cmd: &PluginCommands, out: &mut dyn Write) -> Result<(), Migrator
             execute_gem_command(&gem_args, out)?;
         }
         PluginCommands::Install(args) => {
-            if args.name.ends_with(".wasm") {
+            if std::path::Path::new(&args.name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("wasm"))
+            {
                 writeln!(out, "Installing Rust-native WASM plugin '{}'...", args.name)
                     .map_err(|e| MigratoryError::Generic(e.to_string()))?;
                 // In a real WASM plugin registry, we would copy this file into ~/.vagrant.d/wasm/

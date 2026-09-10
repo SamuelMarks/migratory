@@ -81,8 +81,7 @@ pub fn matches_version_constraint(version_str: &str, constraint_str: &str) -> bo
                 Some(v) => v,
                 None => return false,
             };
-            let parts: Vec<&str> = target_str.split('.').collect();
-            let upper = if parts.len() <= 2 {
+            let upper = if target_str.split('.').count() <= 2 {
                 Version {
                     major: target_ver.major + 1,
                     minor: 0,
@@ -215,7 +214,7 @@ fn verify_checksum(
             "sha512" => to_hex(&Sha512::digest(&bytes)),
             "sha1" => to_hex(&Sha1::digest(&bytes)),
             "md5" => to_hex(&Md5::digest(&bytes)),
-            _ => "".to_string(),
+            _ => String::new(),
         };
 
         if !result.is_empty() && !crate::constant_time_compare(&result, expected) {
@@ -320,7 +319,7 @@ impl BoxManager {
     ) -> Result<(), MigratoryError> {
         // Replace slashes in name for directory structure, e.g. hashicorp/bionic64 -> hashicorp-VAGRANTSLASH-bionic64
         // Vagrant uses `-VAGRANTSLASH-` for namespaced boxes.
-        let safe_name = name.replace("/", "-VAGRANTSLASH-");
+        let safe_name = name.replace('/', "-VAGRANTSLASH-");
         let dest_dir = self
             .global_boxes_dir
             .join(safe_name)
@@ -579,7 +578,7 @@ impl BoxManager {
             return Err(MigratoryError::Generic("Name cannot be empty".to_string()));
         }
 
-        let safe_name = name.replace("/", "-VAGRANTSLASH-");
+        let safe_name = name.replace('/', "-VAGRANTSLASH-");
         let box_dir = self.global_boxes_dir.join(&safe_name);
 
         if !box_dir.exists() {

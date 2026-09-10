@@ -40,10 +40,9 @@ impl HypervProvider {
             match net {
                 NetworkConfig::ForwardedPort {
                     guest,
-                    host: _,
-                    auto_correct: _,
                     protocol,
                     host_ip,
+                    ..
                 } => {
                     let collision_res = network::check_forwarded_port(net, &open_ports)?;
                     let final_host = collision_res.corrected_host_port;
@@ -142,7 +141,7 @@ impl Provider for HypervProvider {
 
             let share_name = sf
                 .guest_path
-                .replace("/", "_")
+                .replace('/', "_")
                 .trim_start_matches('_')
                 .to_string();
             let share_name = if share_name.is_empty() {

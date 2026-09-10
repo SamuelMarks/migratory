@@ -45,7 +45,7 @@ pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
 
     println!("==> default: Uploading file to guest...");
 
-    for (machine_name, machine) in env_config.machines.iter() {
+    for (machine_name, machine) in &env_config.machines {
         let mut comm_config = machine.ssh.clone();
         comm_config.insert_key = false;
         let communicator = crate::communicator::ssh::SshCommunicator::new(comm_config);
