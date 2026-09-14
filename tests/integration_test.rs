@@ -1,3 +1,7 @@
+//! Integration tests for Migratory.
+//!
+//! Verifies end-to-end command execution and lifecycle flows.
+
 use migratory::communicator::{Communicator, ssh::SshCommunicator};
 use migratory::config::SshConfig;
 use migratory::config::evaluate_vagrantfile;
@@ -7,11 +11,11 @@ use migratory::provider::virtualbox::VirtualBoxProvider;
 use assert_cmd::prelude::*;
 
 #[test]
-fn test_login_stdin_coverage() {
-    let mut cmd = std::process::Command::cargo_bin("migratory").unwrap();
+fn test_login_stdin_coverage() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = std::process::Command::cargo_bin("migratory")?;
     cmd.arg("login");
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir()?;
     cmd.env("VAGRANT_HOME", dir.path());
 
     use std::io::Write;
@@ -19,14 +23,14 @@ fn test_login_stdin_coverage() {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+        .spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(b"my_username\nmy_password\n").unwrap();
+        stdin.write_all(b"my_username\nmy_password\n")?;
     }
 
-    let _ = child.wait().unwrap();
+    let _ = child.wait()?;
+    Ok(())
 }
 
 #[test]

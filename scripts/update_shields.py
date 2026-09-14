@@ -19,6 +19,12 @@ def get_test_coverage() -> str:
         return "Unknown"
 
     try:
+        subprocess.run(
+            ["cargo", "llvm-cov", "clean"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         result = subprocess.run(
             ["cargo", "llvm-cov"],
             capture_output=True,
@@ -93,18 +99,18 @@ def get_doc_coverage() -> str:
         str: The documentation coverage percentage, or 'Unknown' if unavailable.
     """
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["cargo", "rustdoc", "--", "-Z", "unstable-options", "--show-coverage"],
             capture_output=True,
             text=True,
             check=False,
         )
+        output = result.stdout or ""
         doc_path = Path("target/doc/migratory.txt")
-        if not doc_path.exists():
-            return "Unknown"
+        if "| Total" not in output and doc_path.exists():
+            output = doc_path.read_text(encoding="utf-8")
 
-        content = doc_path.read_text(encoding="utf-8")
-        for line in reversed(content.splitlines()):
+        for line in reversed(output.splitlines()):
             if line.startswith("| Total"):
                 parts = [p.strip() for p in line.split("|") if p.strip()]
                 if len(parts) >= 3:

@@ -143,7 +143,7 @@ fn execute_box(cmd: &CloudBoxCommands, writer: &mut dyn Write) -> Result<(), Mig
 
 fn execute_provider(
     cmd: &CloudProviderCommands,
-    mut writer: impl Write,
+    writer: &mut dyn Write,
 ) -> Result<(), MigratoryError> {
     let client = crate::cloud::CloudClient::new()?;
     match cmd {
@@ -192,7 +192,7 @@ fn execute_provider(
 
 fn execute_version(
     cmd: &CloudVersionCommands,
-    mut writer: impl Write,
+    writer: &mut dyn Write,
 ) -> Result<(), MigratoryError> {
     let client = crate::cloud::CloudClient::new()?;
     match cmd {

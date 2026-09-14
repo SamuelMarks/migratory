@@ -47,6 +47,19 @@ class TestUpdateShields(unittest.TestCase):
         mock_result.stdout = "TOTAL 1651 306 81.47% 221 55 75.11% 955 176 99.99% 0 0 -"
         mock_run.return_value = mock_result
         self.assertEqual(update_shields.get_test_coverage(), "99.99%")
+        self.assertEqual(mock_run.call_count, 2)
+        mock_run.assert_any_call(
+            ["cargo", "llvm-cov", "clean"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        mock_run.assert_any_call(
+            ["cargo", "llvm-cov"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     @patch("update_shields.shutil.which")
     @patch("update_shields.subprocess.run")
@@ -58,9 +71,46 @@ class TestUpdateShields(unittest.TestCase):
         mock_run.side_effect = Exception("Simulated error")
         self.assertEqual(update_shields.get_test_coverage(), "Unknown")
 
+    @patch("update_shields.subprocess.run")
+    def test_get_doc_coverage_stdout_success(self, mock_run: MagicMock) -> None:
+        """Test get_doc_coverage extracting percentage from stdout."""
+        mock_result = MagicMock()
+        mock_result.stdout = "+-------+\n| Total | 1273 | 100.0% | 0 | 0.0% |\n+-------+"
+        mock_run.return_value = mock_result
+        self.assertEqual(update_shields.get_doc_coverage(), "100.0%")
+
+    @patch("update_shields.Path.exists")
+    @patch("update_shields.Path.read_text")
+    @patch("update_shields.subprocess.run")
+    def test_get_doc_coverage_file_fallback(
+        self, mock_run: MagicMock, mock_read: MagicMock, mock_exists: MagicMock
+    ) -> None:
+        """Test get_doc_coverage extracting percentage from target/doc/migratory.txt when stdout is empty."""
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        mock_run.return_value = mock_result
+        mock_exists.return_value = True
+        mock_read.return_value = (
+            "+-------+\n| Total | 500 | 98.5% | 0 | 0.0% |\n+-------+"
+        )
+        self.assertEqual(update_shields.get_doc_coverage(), "98.5%")
+
+    @patch("update_shields.subprocess.run")
+    def test_get_doc_coverage_no_total(self, mock_run: MagicMock) -> None:
+        """Test get_doc_coverage when output has no total line."""
+        mock_result = MagicMock()
+        mock_result.stdout = "Header line\nNo matching summary"
+        mock_run.return_value = mock_result
+        self.assertEqual(update_shields.get_doc_coverage(), "Unknown")
+
+    @patch("update_shields.subprocess.run")
+    def test_get_doc_coverage_exception(self, mock_run: MagicMock) -> None:
+        """Test get_doc_coverage when an exception is raised."""
+        mock_run.side_effect = Exception("rustdoc error")
+        self.assertEqual(update_shields.get_doc_coverage(), "Unknown")
+
     def test_update_readme_no_file(self) -> None:
         """Test update_readme when README does not exist."""
-        # Should not raise any exceptions
         update_shields.update_readme(Path("does_not_exist_file.md"), "100%", "50%")
 
     def test_update_readme_insert_new(self) -> None:
@@ -90,7 +140,6 @@ class TestUpdateShields(unittest.TestCase):
             content = filepath.read_text(encoding="utf-8")
             self.assertIn("Doc_Coverage-100%25", content)
             self.assertIn("Test_Coverage-90.00%25", content)
-            # Ensure no duplicates
             self.assertEqual(content.count("Doc Coverage"), 1)
             self.assertEqual(content.count("Test Coverage"), 1)
         finally:
