@@ -7,6 +7,25 @@ use crate::error::MigratoryError;
 use std::io::Write;
 use std::process::Command;
 
+/// Resolves the Vagrant home directory from optional VAGRANT_HOME and HOME environment strings.
+///
+/// # Arguments
+///
+/// * `vagrant_home` - The value of the `VAGRANT_HOME` environment variable, if set.
+/// * `home` - The value of the `HOME` environment variable, if set.
+///
+/// # Returns
+///
+/// Returns the resolved directory path string.
+pub fn resolve_vagrant_home(vagrant_home: Option<&str>, home: Option<&str>) -> String {
+    vagrant_home
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| match home {
+            Some(h) => format!("{}/.vagrant.d", h),
+            None => ".vagrant.d".to_string(),
+        })
+}
+
 /// Executes a Ruby gem command.
 ///
 /// # Arguments
@@ -26,11 +45,10 @@ fn execute_gem_command(args: &[&str], out: &mut dyn Write) -> Result<(), Migrato
         let mut cmd = Command::new("gem");
 
         // Setup local Vagrant gem environment
-        let home_dir = std::env::var("VAGRANT_HOME").unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| format!("{}/.vagrant.d", h))
-                .unwrap_or_else(|_| ".vagrant.d".to_string())
-        });
+        let home_dir = resolve_vagrant_home(
+            std::env::var("VAGRANT_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+        );
         let gem_home = format!("{}/gems", home_dir);
 
         cmd.env("GEM_HOME", &gem_home);
@@ -157,13 +175,30 @@ pub fn execute(cmd: &PluginCommands, out: &mut dyn Write) -> Result<(), Migrator
                 args.name, args.license_file
             )
             .map_err(|e| MigratoryError::Generic(e.to_string()))?;
-            // Real vagrant copies the file to a specific plugin directory
-            if std::env::var("MIGRATORY_TEST_MOCK").is_err() {
-                let license_path = std::path::Path::new(&args.license_file);
-                if !license_path.exists() {
-                    return Err(MigratoryError::NotFound(args.license_file.clone()));
-                }
+
+            let license_path = std::path::Path::new(&args.license_file);
+            if std::env::var("MIGRATORY_TEST_MOCK").is_err() && !license_path.exists() {
+                return Err(MigratoryError::NotFound(args.license_file.clone()));
             }
+
+            let home_dir = resolve_vagrant_home(
+                std::env::var("VAGRANT_HOME").ok().as_deref(),
+                std::env::var("HOME").ok().as_deref(),
+            );
+            let license_dir = std::path::PathBuf::from(&home_dir)
+                .join("license")
+                .join(&args.name);
+            if license_path.exists() {
+                std::fs::create_dir_all(&license_dir).map_err(MigratoryError::Io)?;
+                let dest_file = license_dir.join("license.lic");
+                std::fs::copy(license_path, &dest_file).map_err(MigratoryError::Io)?;
+            }
+            writeln!(
+                out,
+                "License installed successfully for plugin '{}'.",
+                args.name
+            )
+            .map_err(|e| MigratoryError::Generic(e.to_string()))?;
         }
         PluginCommands::List(args) => {
             writeln!(out, "Listing plugins...")
@@ -208,6 +243,7 @@ pub fn execute(cmd: &PluginCommands, out: &mut dyn Write) -> Result<(), Migrator
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::cli::*;
@@ -289,6 +325,58 @@ mod tests {
         }
         let out_str = String::from_utf8_lossy(&out);
         assert!(out_str.contains("Installing license for plugin 'test-plugin' from 'LICENSE'..."));
+    }
+
+    #[test]
+    fn test_execute_plugin_license_real_success() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let src_license = dir.path().join("my-license.lic");
+        std::fs::write(&src_license, "SAMPLE_LICENSE_DATA").expect("write failed");
+
+        let vagrant_home = dir.path().join("vagrant_home");
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK");
+            std::env::set_var("VAGRANT_HOME", &vagrant_home);
+        }
+
+        let mut out = Vec::new();
+        let cmd = PluginCommands::License(PluginLicenseArgs {
+            name: "licensed-plugin".to_string(),
+            license_file: src_license.to_string_lossy().to_string(),
+        });
+        let result = execute(&cmd, &mut out);
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+        }
+        assert!(result.is_ok());
+
+        let installed_file = vagrant_home
+            .join("license")
+            .join("licensed-plugin")
+            .join("license.lic");
+        assert!(installed_file.exists());
+        let content = std::fs::read_to_string(installed_file).expect("read failed");
+        assert_eq!(content, "SAMPLE_LICENSE_DATA");
+    }
+
+    #[test]
+    fn test_execute_plugin_license_not_found() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK");
+        }
+        let mut out = Vec::new();
+        let cmd = PluginCommands::License(PluginLicenseArgs {
+            name: "licensed-plugin".to_string(),
+            license_file: "/nonexistent/path/to/missing.lic".to_string(),
+        });
+        let result = execute(&cmd, &mut out);
+        assert!(matches!(result, Err(MigratoryError::NotFound(_))));
     }
 
     #[test]
@@ -449,6 +537,84 @@ mod tests {
                 "flush error",
             ))
         }
+    }
+
+    struct FailOnLicenseInstalledWriter;
+    impl std::io::Write for FailOnLicenseInstalledWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if String::from_utf8_lossy(buf).contains("License installed successfully") {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "write error",
+                ))
+            } else {
+                Ok(buf.len())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_execute_plugin_license_second_write_fail() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let src_license = dir.path().join("my-license.lic");
+        std::fs::write(&src_license, "SAMPLE_LICENSE_DATA").expect("write failed");
+
+        let mut out = FailOnLicenseInstalledWriter;
+        let cmd = PluginCommands::License(PluginLicenseArgs {
+            name: "licensed-plugin".to_string(),
+            license_file: src_license.to_string_lossy().to_string(),
+        });
+        assert!(execute(&cmd, &mut out).is_err());
+    }
+
+    #[test]
+    fn test_execute_plugin_license_copy_failure() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let src_license = dir.path().join("my-license.lic");
+        std::fs::write(&src_license, "SAMPLE_LICENSE_DATA").expect("write failed");
+
+        let vagrant_home = dir.path().join("vagrant_home");
+        let license_dir = vagrant_home.join("license").join("bad-copy-plugin");
+        std::fs::create_dir_all(&license_dir).expect("create_dir failed");
+        // Create license.lic as a directory to make fs::copy fail
+        std::fs::create_dir_all(license_dir.join("license.lic")).expect("create_dir failed");
+
+        unsafe {
+            std::env::set_var("VAGRANT_HOME", &vagrant_home);
+        }
+
+        let mut out = Vec::new();
+        let cmd = PluginCommands::License(PluginLicenseArgs {
+            name: "bad-copy-plugin".to_string(),
+            license_file: src_license.to_string_lossy().to_string(),
+        });
+        assert!(execute(&cmd, &mut out).is_err());
+
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+        }
+    }
+
+    #[test]
+    fn test_resolve_vagrant_home() {
+        assert_eq!(
+            resolve_vagrant_home(Some("/custom/path"), None),
+            "/custom/path"
+        );
+        assert_eq!(
+            resolve_vagrant_home(None, Some("/home/user")),
+            "/home/user/.vagrant.d"
+        );
+        assert_eq!(resolve_vagrant_home(None, None), ".vagrant.d");
     }
 
     #[test]

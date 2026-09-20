@@ -9,6 +9,91 @@ use crate::provider;
 use crate::ui::{ConsoleUi, Ui};
 use std::path::Path;
 
+/// Resolves the global `.vagrant.d` directory from environment paths.
+///
+/// # Arguments
+///
+/// * `vagrant_home` - Optional path from `VAGRANT_HOME`.
+/// * `home` - Optional path from `HOME`.
+///
+/// # Returns
+///
+/// Returns the resolved `PathBuf`.
+fn get_global_vagrant_d_from(vagrant_home: Option<&str>, home: Option<&str>) -> std::path::PathBuf {
+    match vagrant_home {
+        Some(v) => std::path::PathBuf::from(v),
+        None => match home {
+            Some(h) => std::path::PathBuf::from(h).join(".vagrant.d"),
+            None => std::path::PathBuf::from(".vagrant.d"),
+        },
+    }
+}
+
+/// Suspends all active machines tracked in the global machine index.
+///
+/// # Arguments
+///
+/// * `ui` - The console UI interface for emitting logs and warnings.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if reading the global index fails.
+fn suspend_all_global_machines(ui: &ConsoleUi) -> Result<(), MigratoryError> {
+    let vagrant_home = std::env::var("VAGRANT_HOME").ok();
+    let home = std::env::var("HOME").ok();
+    let vagrant_d = get_global_vagrant_d_from(vagrant_home.as_deref(), home.as_deref());
+
+    let state_manager = crate::state::GlobalStateManager::new(vagrant_d);
+    let index = if let Ok(idx) = state_manager.read_index() {
+        idx
+    } else {
+        ui.info("migratory", "No active machines found in global index.");
+        return Ok(());
+    };
+
+    if index.machines.is_empty() {
+        ui.info("migratory", "No active machines found in global index.");
+        return Ok(());
+    }
+
+    for (id, machine) in index.machines {
+        ui.info(
+            &machine.name,
+            &format!(
+                "Suspending global machine '{}' ({}) with provider '{}'...",
+                machine.name, id, machine.provider
+            ),
+        );
+
+        let provider_id = machine.extra_data.get("id").cloned().or(Some(id));
+        match provider::get_provider(&machine.provider, provider_id) {
+            Ok(p) => {
+                if let Err(e) = p.suspend() {
+                    ui.warn(
+                        &machine.name,
+                        &format!("Failed to suspend machine '{}': {}", machine.name, e),
+                    );
+                }
+            }
+            Err(e) => {
+                ui.warn(
+                    &machine.name,
+                    &format!(
+                        "Failed to get provider '{}' for machine '{}': {}",
+                        machine.provider, machine.name, e
+                    ),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Executes the `suspend` command.
 ///
 /// # Arguments
@@ -24,6 +109,13 @@ use std::path::Path;
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found.
 pub fn execute(cwd: &Path, args: &SuspendArgs) -> Result<(), MigratoryError> {
+    let ui = ConsoleUi;
+
+    if args.all_global {
+        ui.info("migratory", "Suspending all global machines...");
+        return suspend_all_global_machines(&ui);
+    }
+
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
     let _guard = lock_file.try_write().map_err(|_| {
@@ -34,12 +126,6 @@ pub fn execute(cwd: &Path, args: &SuspendArgs) -> Result<(), MigratoryError> {
     let path = crate::config::get_vagrantfile_path(cwd);
     if !path.exists() {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
-
-    let ui = ConsoleUi;
-
-    if args.all_global {
-        ui.info("migratory", "Suspending all global machines... (mock)");
     }
 
     let path_str = path.to_string_lossy();
@@ -93,6 +179,7 @@ pub fn execute(cwd: &Path, args: &SuspendArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
 
     #[test]
@@ -371,6 +458,195 @@ end
         // Restore PATH
         unsafe {
             env::set_var("PATH", old_path);
+        }
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_suspend_all_global_populated() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+
+        let temp = tempfile::tempdir().expect("operation should succeed");
+        let vagrant_home = temp.path();
+        let index_dir = vagrant_home.join("data").join("machine-index");
+        std::fs::create_dir_all(&index_dir).expect("create_dir failed");
+
+        let index_json = r#"{
+            "version": 1,
+            "machines": {
+                "vm-1-uuid": {
+                    "name": "web",
+                    "provider": "docker",
+                    "state": "running",
+                    "vagrantfile_path": "/tmp",
+                    "vagrantfile_name": "Vagrantfile",
+                    "local_data_path": "/tmp/.vagrant",
+                    "updated_at": 1000,
+                    "extra_data": { "id": "docker-c-1" }
+                }
+            }
+        }"#;
+        std::fs::write(index_dir.join("index"), index_json).expect("write failed");
+
+        unsafe {
+            std::env::set_var("VAGRANT_HOME", vagrant_home);
+        }
+
+        let dummy_cwd = temp.path().join("dummy_project");
+        std::fs::create_dir_all(&dummy_cwd).expect("create_dir failed");
+
+        let args = SuspendArgs {
+            all_global: true,
+            name: None,
+        };
+        let result = execute(&dummy_cwd, &args);
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_suspend_all_global_no_home_and_corrupt_index() {
+        assert_eq!(
+            get_global_vagrant_d_from(Some("/custom/vagrant_home"), None),
+            std::path::PathBuf::from("/custom/vagrant_home")
+        );
+        assert_eq!(
+            get_global_vagrant_d_from(None, Some("/my/home")),
+            std::path::PathBuf::from("/my/home").join(".vagrant.d")
+        );
+        assert_eq!(
+            get_global_vagrant_d_from(None, None),
+            std::path::PathBuf::from(".vagrant.d")
+        );
+    }
+
+    #[test]
+    fn test_execute_suspend_all_global_home_set_empty_index() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+
+        let old_vagrant_home = std::env::var_os("VAGRANT_HOME");
+        let old_home = std::env::var_os("HOME");
+
+        let temp = tempfile::tempdir().expect("operation should succeed");
+        let vagrant_d = temp.path().join(".vagrant.d");
+        let index_dir = vagrant_d.join("data").join("machine-index");
+        std::fs::create_dir_all(&index_dir).expect("create_dir failed");
+
+        let index_json = r#"{
+            "version": 1,
+            "machines": {}
+        }"#;
+        std::fs::write(index_dir.join("index"), index_json).expect("write failed");
+
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+            std::env::set_var("HOME", temp.path());
+        }
+
+        let args = SuspendArgs {
+            all_global: true,
+            name: None,
+        };
+        let result = execute(temp.path(), &args);
+
+        unsafe {
+            if let Some(vh) = old_vagrant_home {
+                std::env::set_var("VAGRANT_HOME", vh);
+            }
+            if let Some(h) = old_home {
+                std::env::set_var("HOME", h);
+            }
+        }
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_suspend_all_global_corrupt_index() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+
+        let temp = tempfile::tempdir().expect("operation should succeed");
+        let vagrant_home = temp.path();
+        let index_dir = vagrant_home.join("data").join("machine-index");
+        std::fs::create_dir_all(&index_dir).expect("create_dir failed");
+        std::fs::write(index_dir.join("index"), "invalid json content").expect("write failed");
+
+        unsafe {
+            std::env::set_var("VAGRANT_HOME", vagrant_home);
+        }
+
+        let args = SuspendArgs {
+            all_global: true,
+            name: None,
+        };
+        let result = execute(temp.path(), &args);
+
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+        }
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_suspend_all_global_with_provider_and_suspend_errors() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+
+        let temp = tempfile::tempdir().expect("operation should succeed");
+        let vagrant_home = temp.path();
+        let index_dir = vagrant_home.join("data").join("machine-index");
+        std::fs::create_dir_all(&index_dir).expect("create_dir failed");
+
+        let index_json = r#"{
+            "version": 1,
+            "machines": {
+                "vm-fail-suspend": {
+                    "name": "web-fail",
+                    "provider": "virtualbox",
+                    "state": "running",
+                    "vagrantfile_path": "/tmp",
+                    "vagrantfile_name": "Vagrantfile",
+                    "local_data_path": "/tmp/.vagrant",
+                    "updated_at": 1000,
+                    "extra_data": { "id": "invalid-vbox-id-404" }
+                },
+                "vm-bad-provider": {
+                    "name": "db-bad",
+                    "provider": "nonexistent_provider_12345",
+                    "state": "running",
+                    "vagrantfile_path": "/tmp",
+                    "vagrantfile_name": "Vagrantfile",
+                    "local_data_path": "/tmp/.vagrant",
+                    "updated_at": 1000,
+                    "extra_data": {}
+                }
+            }
+        }"#;
+        std::fs::write(index_dir.join("index"), index_json).expect("write failed");
+
+        unsafe {
+            std::env::set_var("VAGRANT_HOME", vagrant_home);
+        }
+
+        let args = SuspendArgs {
+            all_global: true,
+            name: None,
+        };
+        let result = execute(temp.path(), &args);
+
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
         }
 
         assert!(result.is_ok());

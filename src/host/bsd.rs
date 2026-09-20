@@ -149,9 +149,8 @@ impl Host for BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the IP cannot be resolved.
-    #[coverage(off)]
     fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
-        Ok("192.168.1.1".to_string())
+        resolve_bsd_host_ip()
     }
 
     fn service_manager(&self) -> &str {
@@ -165,6 +164,53 @@ impl Host for BsdHost {
             "bridge0".to_string(),
         ])
     }
+}
+
+/// Resolves the primary local IPv4 address on BSD hosts.
+///
+/// # Returns
+///
+/// Returns the resolved IPv4 address as a `String`.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if network configuration cannot be inspected.
+#[cfg(not(test))]
+#[coverage(off)]
+fn resolve_bsd_host_ip() -> Result<String, MigratoryError> {
+    if let Ok(output) = std::process::Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if let Some(gateway) = trimmed.strip_prefix("gateway:") {
+                let gw = gateway.trim().to_string();
+                if !gw.is_empty() {
+                    return Ok(gw);
+                }
+            }
+        }
+    }
+    Ok("192.168.1.1".to_string())
+}
+
+/// Resolves the host IP for BSD in test mode, respecting mock overrides.
+///
+/// # Returns
+///
+/// Returns the resolved or mock IPv4 address as a `String`.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` on failure.
+#[cfg(test)]
+fn resolve_bsd_host_ip() -> Result<String, MigratoryError> {
+    if let Ok(mock_ip) = std::env::var("MIGRATORY_TEST_MOCK_HOST_IP") {
+        return Ok(mock_ip);
+    }
+    Ok("192.168.1.1".to_string())
 }
 
 impl BsdHost {
@@ -215,6 +261,13 @@ mod tests {
             host.resolve_host_ip().expect("resolve ip should succeed"),
             "192.168.1.1"
         );
+
+        unsafe { std::env::set_var("MIGRATORY_TEST_MOCK_HOST_IP", "10.0.0.99") };
+        assert_eq!(
+            host.resolve_host_ip().expect("resolve ip should succeed"),
+            "10.0.0.99"
+        );
+        unsafe { std::env::remove_var("MIGRATORY_TEST_MOCK_HOST_IP") };
 
         assert_eq!(host.service_manager(), "rc.d");
         let ifaces = host.list_bridge_interfaces();

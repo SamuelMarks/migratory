@@ -26,6 +26,71 @@ pub enum LinuxDistro {
     Generic,
 }
 
+impl LinuxDistro {
+    /// Returns the command to install packages using the distribution's package manager.
+    ///
+    /// # Arguments
+    ///
+    /// * `packages` - List of package names to install.
+    ///
+    /// # Returns
+    ///
+    /// Returns the installation shell command string.
+    pub fn install_packages_cmd(&self, packages: &[&str]) -> String {
+        let pkgs = packages.join(" ");
+        match self {
+            Self::Debian => format!(
+                "sudo DEBIAN_FRONTEND=noninteractive apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {}",
+                pkgs
+            ),
+            Self::RedHat => format!(
+                "sudo dnf install -y {} || sudo yum install -y {}",
+                pkgs, pkgs
+            ),
+            Self::Arch => format!("sudo pacman -Sy --noconfirm {}", pkgs),
+            Self::Alpine => format!("sudo apk add --no-cache {}", pkgs),
+            Self::Suse => format!("sudo zypper install -y {}", pkgs),
+            Self::Generic => format!(
+                "sudo apt-get install -y {} || sudo dnf install -y {} || sudo yum install -y {} || sudo pacman -Sy --noconfirm {}",
+                pkgs, pkgs, pkgs, pkgs
+            ),
+        }
+    }
+
+    /// Returns the required kernel headers and build tools package names for this distribution.
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of package names.
+    pub fn kernel_build_packages(&self) -> Vec<&'static str> {
+        match self {
+            Self::Debian => vec![
+                "linux-headers-$(uname -r)",
+                "build-essential",
+                "dkms",
+                "make",
+                "gcc",
+            ],
+            Self::RedHat => vec![
+                "kernel-devel-$(uname -r)",
+                "kernel-headers",
+                "gcc",
+                "make",
+                "dkms",
+            ],
+            Self::Arch => vec!["linux-headers", "base-devel", "dkms"],
+            Self::Alpine => vec!["linux-headers", "build-base", "dkms"],
+            Self::Suse => vec!["kernel-default-devel", "gcc", "make", "dkms"],
+            Self::Generic => vec![
+                "linux-headers-$(uname -r)",
+                "build-essential",
+                "gcc",
+                "make",
+            ],
+        }
+    }
+}
+
 /// Linux guest OS.
 ///
 /// Handles interactions and capabilities specific to Linux virtual machines.
@@ -268,6 +333,132 @@ impl LinuxGuest {
         let _ = comm.execute("sudo dnf install -y nfs-utils || sudo yum install -y nfs-utils")?;
         Ok(())
     }
+
+    /// Installs kernel development headers and compilation tools required for kernel module building.
+    ///
+    /// # Arguments
+    ///
+    /// * `comm` - The communicator used to execute commands on the guest.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if package installation fails.
+    pub fn install_kernel_headers_and_build_tools(
+        &self,
+        comm: &dyn Communicator,
+    ) -> Result<(), MigratoryError> {
+        let distro = self.detect_distro(comm);
+        let pkgs = distro.kernel_build_packages();
+        let cmd = distro.install_packages_cmd(&pkgs);
+        comm.execute(&cmd)?;
+        Ok(())
+    }
+
+    /// Installs or updates VirtualBox Guest Additions by mounting and executing an ISO or installing distro packages.
+    ///
+    /// # Arguments
+    ///
+    /// * `comm` - The communicator used to execute commands on the guest.
+    /// * `iso_path` - Optional guest file path to the VirtualBox additions ISO.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if kernel module compilation or ISO execution fails.
+    pub fn install_virtualbox_guest_additions(
+        &self,
+        comm: &dyn Communicator,
+        iso_path: Option<&str>,
+    ) -> Result<(), MigratoryError> {
+        self.install_kernel_headers_and_build_tools(comm)?;
+
+        let iso_source = iso_path.unwrap_or("/tmp/VBoxGuestAdditions.iso");
+        let mount_and_run = format!(
+            "sudo mkdir -p /mnt/vboxadd && \
+             (sudo mount -o loop {iso} /mnt/vboxadd 2>/dev/null || sudo mount /dev/cdrom /mnt/vboxadd 2>/dev/null || true) && \
+             if [ -f /mnt/vboxadd/VBoxLinuxAdditions.run ]; then \
+                 sudo sh /mnt/vboxadd/VBoxLinuxAdditions.run --nox11; \
+                 res=$?; \
+                 sudo umount /mnt/vboxadd 2>/dev/null || true; \
+                 exit $res; \
+             else \
+                 sudo umount /mnt/vboxadd 2>/dev/null || true; \
+                 exit 10; \
+             fi",
+            iso = iso_source
+        );
+
+        let out = comm.execute(&mount_and_run);
+        match out {
+            Ok(output) => {
+                if output.contains("failed") || output.contains("Execution failed") {
+                    return Err(MigratoryError::Generic(format!(
+                        "VirtualBox Guest Additions compilation or installation failed: {}",
+                        output.trim()
+                    )));
+                }
+            }
+            Err(e) => {
+                let distro = self.detect_distro(comm);
+                let fallback_pkgs = match distro {
+                    LinuxDistro::Debian => vec!["virtualbox-guest-utils", "virtualbox-guest-dkms"],
+                    LinuxDistro::RedHat => vec!["kmod-vboxguest", "vboxguest-utils"],
+                    LinuxDistro::Arch | LinuxDistro::Generic => vec!["virtualbox-guest-utils"],
+                    LinuxDistro::Alpine => {
+                        vec!["virtualbox-guest-modules-virt", "virtualbox-guest-utils"]
+                    }
+                    LinuxDistro::Suse => vec!["virtualbox-guest-tools"],
+                };
+                let fallback_cmd = distro.install_packages_cmd(&fallback_pkgs);
+                let fallback_out = comm.execute(&fallback_cmd)?;
+                if fallback_out.contains("failed") {
+                    return Err(MigratoryError::Generic(format!(
+                        "VirtualBox Guest Additions installation failed: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        let _ = comm.execute("sudo systemctl enable --now vboxservice 2>/dev/null || sudo service vboxadd start 2>/dev/null || true");
+        Ok(())
+    }
+
+    /// Installs and activates VMware Tools (`open-vm-tools`) across Linux distributions.
+    ///
+    /// # Arguments
+    ///
+    /// * `comm` - The communicator used to execute commands on the guest.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if package installation fails.
+    pub fn install_vmware_tools(&self, comm: &dyn Communicator) -> Result<(), MigratoryError> {
+        let distro = self.detect_distro(comm);
+        let packages = vec!["open-vm-tools"];
+        let cmd = distro.install_packages_cmd(&packages);
+        let out = comm.execute(&cmd)?;
+        if out.contains("failed") && !out.contains("0 failed") {
+            return Err(MigratoryError::Generic(format!(
+                "open-vm-tools installation failed: {}",
+                out.trim()
+            )));
+        }
+
+        let _ = comm.execute("sudo systemctl enable --now vmtoolsd 2>/dev/null || sudo systemctl enable --now open-vm-tools 2>/dev/null || sudo /etc/init.d/open-vm-tools start 2>/dev/null || true");
+        Ok(())
+    }
 }
 
 impl Guest for LinuxGuest {
@@ -506,15 +697,11 @@ impl Guest for LinuxGuest {
         provider_name: &str,
         _machine_id: Option<&str>,
     ) -> Result<(), MigratoryError> {
-        if provider_name == "virtualbox" {
-            // Logic to update VBox guest additions
-            // In a complete implementation we would map an ISO, compile modules, etc.
-            // For now, we mock the command.
-            let _ = comm.execute("if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y virtualbox-guest-utils; fi")?;
-        } else if provider_name == "vmware" {
-            let _ = comm.execute("if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y open-vm-tools; fi")?;
+        match provider_name.to_lowercase().as_str() {
+            "virtualbox" => self.install_virtualbox_guest_additions(comm, None),
+            "vmware" | "vmware_desktop" => self.install_vmware_tools(comm),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn reboot(&self, comm: &dyn Communicator) -> Result<(), MigratoryError> {
@@ -569,6 +756,42 @@ mod tests {
     struct MockComm {
         output: Result<String, String>,
         fail_commands: Vec<String>,
+    }
+
+    struct MultiMockComm {
+        responses: Vec<(String, Result<String, String>)>,
+        default: Result<String, String>,
+    }
+
+    impl Communicator for MultiMockComm {
+        fn execute(&self, command: &str) -> Result<String, MigratoryError> {
+            for (pattern, res) in &self.responses {
+                if command.contains(pattern) {
+                    return res.clone().map_err(MigratoryError::Generic);
+                }
+            }
+            self.default.clone().map_err(MigratoryError::Generic)
+        }
+
+        #[coverage(off)]
+        fn upload(&self, _local: &Path, _remote: &str) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+
+        #[coverage(off)]
+        fn download(&self, _remote: &str, _local: &Path) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+
+        #[coverage(off)]
+        fn execute_interactive(&self) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+
+        #[coverage(off)]
+        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
+            Ok(())
+        }
     }
 
     impl Communicator for MockComm {
@@ -942,5 +1165,213 @@ mod tests {
                 .expect("operation should succeed")
         );
         assert!(guest.rsync_install(&fail_comm).is_err());
+    }
+
+    #[test]
+    fn test_linux_distro_package_commands() {
+        let debian = LinuxDistro::Debian;
+        assert!(debian.install_packages_cmd(&["curl"]).contains("apt-get"));
+
+        let redhat = LinuxDistro::RedHat;
+        assert!(redhat.install_packages_cmd(&["curl"]).contains("dnf"));
+
+        let arch = LinuxDistro::Arch;
+        assert!(arch.install_packages_cmd(&["curl"]).contains("pacman"));
+
+        let alpine = LinuxDistro::Alpine;
+        assert!(alpine.install_packages_cmd(&["curl"]).contains("apk"));
+
+        let suse = LinuxDistro::Suse;
+        assert!(suse.install_packages_cmd(&["curl"]).contains("zypper"));
+
+        let generic = LinuxDistro::Generic;
+        assert!(generic.install_packages_cmd(&["curl"]).contains("apt-get"));
+    }
+
+    #[test]
+    fn test_linux_distro_kernel_packages() {
+        assert!(!LinuxDistro::Debian.kernel_build_packages().is_empty());
+        assert!(!LinuxDistro::RedHat.kernel_build_packages().is_empty());
+        assert!(!LinuxDistro::Arch.kernel_build_packages().is_empty());
+        assert!(!LinuxDistro::Alpine.kernel_build_packages().is_empty());
+        assert!(!LinuxDistro::Suse.kernel_build_packages().is_empty());
+        assert!(!LinuxDistro::Generic.kernel_build_packages().is_empty());
+    }
+
+    #[test]
+    fn test_install_virtualbox_guest_additions_compilation_failure() {
+        let guest = LinuxGuest;
+        let fail_compile_comm = MultiMockComm {
+            responses: vec![
+                // detect_distro:
+                (
+                    "cat /etc/os-release".to_string(),
+                    Ok("ID=ubuntu\n".to_string()),
+                ),
+                // kernel headers install:
+                ("apt-get".to_string(), Ok("".to_string())),
+                // mount and run fails compilation:
+                (
+                    "VBoxLinuxAdditions.run".to_string(),
+                    Ok("Building kernel modules... failed".to_string()),
+                ),
+            ],
+            default: Ok("".to_string()),
+        };
+        let res = guest.install_virtualbox_guest_additions(&fail_compile_comm, None);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("compilation or installation failed")
+        );
+    }
+
+    #[test]
+    fn test_install_virtualbox_guest_additions_fallback_success() {
+        let guest = LinuxGuest;
+        let fallback_comm = MultiMockComm {
+            responses: vec![
+                (
+                    "cat /etc/os-release".to_string(),
+                    Ok("ID=ubuntu\n".to_string()),
+                ),
+                ("apt-get install".to_string(), Ok("".to_string())),
+                (
+                    "VBoxLinuxAdditions.run".to_string(),
+                    Err("No such file".to_string()),
+                ),
+                (
+                    "virtualbox-guest-utils".to_string(),
+                    Ok("Installed".to_string()),
+                ),
+            ],
+            default: Ok("".to_string()),
+        };
+        assert!(
+            guest
+                .install_virtualbox_guest_additions(&fallback_comm, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_install_virtualbox_guest_additions_fallback_all_distros_and_failures() {
+        let guest = LinuxGuest;
+        for (distro_id, expected_pkg) in [
+            ("centos", "kmod-vboxguest"),
+            ("arch", "virtualbox-guest-utils"),
+            ("alpine", "virtualbox-guest-modules-virt"),
+            ("suse", "virtualbox-guest-tools"),
+            ("unknown", "virtualbox-guest-utils"),
+        ] {
+            let comm = MultiMockComm {
+                responses: vec![
+                    (
+                        "cat /etc/os-release".to_string(),
+                        Ok(format!("ID={}\n", distro_id)),
+                    ),
+                    ("test -f".to_string(), Ok("".to_string())),
+                    (
+                        "VBoxLinuxAdditions.run".to_string(),
+                        Err("No such file".to_string()),
+                    ),
+                    (
+                        expected_pkg.to_string(),
+                        Ok("Installed successfully".to_string()),
+                    ),
+                ],
+                default: Ok("".to_string()),
+            };
+            assert!(
+                guest
+                    .install_virtualbox_guest_additions(&comm, None)
+                    .is_ok()
+            );
+        }
+
+        let fail_comm = MultiMockComm {
+            responses: vec![
+                (
+                    "cat /etc/os-release".to_string(),
+                    Ok("ID=centos\n".to_string()),
+                ),
+                (
+                    "VBoxLinuxAdditions.run".to_string(),
+                    Err("No such file".to_string()),
+                ),
+                (
+                    "kmod-vboxguest".to_string(),
+                    Ok("Transaction failed".to_string()),
+                ),
+            ],
+            default: Ok("".to_string()),
+        };
+        let res = guest.install_virtualbox_guest_additions(&fail_comm, None);
+        assert!(matches!(
+            res,
+            Err(MigratoryError::Generic(ref msg)) if msg.contains("VirtualBox Guest Additions installation failed")
+        ));
+
+        let err_fallback_comm = MultiMockComm {
+            responses: vec![
+                (
+                    "cat /etc/os-release".to_string(),
+                    Ok("ID=centos\n".to_string()),
+                ),
+                (
+                    "VBoxLinuxAdditions.run".to_string(),
+                    Err("No such file".to_string()),
+                ),
+                (
+                    "kmod-vboxguest".to_string(),
+                    Err("network timeout".to_string()),
+                ),
+            ],
+            default: Ok("".to_string()),
+        };
+        let err_res = guest.install_virtualbox_guest_additions(&err_fallback_comm, None);
+        assert!(err_res.is_err());
+    }
+
+    #[test]
+    fn test_install_vmware_tools_success_and_failure() {
+        let guest = LinuxGuest;
+        let success_comm = MultiMockComm {
+            responses: vec![
+                (
+                    "cat /etc/os-release".to_string(),
+                    Ok("ID=debian\n".to_string()),
+                ),
+                ("apt-get".to_string(), Ok("0 failed".to_string())),
+            ],
+            default: Ok("".to_string()),
+        };
+        assert!(guest.install_vmware_tools(&success_comm).is_ok());
+
+        let fail_comm = MultiMockComm {
+            responses: vec![
+                (
+                    "cat /etc/os-release".to_string(),
+                    Ok("ID=debian\n".to_string()),
+                ),
+                (
+                    "apt-get".to_string(),
+                    Ok("Package install failed with error".to_string()),
+                ),
+            ],
+            default: Ok("".to_string()),
+        };
+        assert!(guest.install_vmware_tools(&fail_comm).is_err());
+    }
+
+    #[test]
+    fn test_update_guest_additions_unknown_provider() {
+        let guest = LinuxGuest;
+        let comm = MockComm {
+            output: Ok("".to_string()),
+            fail_commands: vec![],
+        };
+        assert!(guest.update_guest_additions(&comm, "docker", None).is_ok());
     }
 }

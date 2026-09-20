@@ -358,12 +358,48 @@ class VagrantConfigMock < BasicMock
     end
   end
 
+  class PushConfigBuilder < BasicMock
+    attr_reader :options
+    def initialize
+      @options = {}
+    end
+    def method_missing(m, *args, &block)
+      str = m.to_s
+      if str.end_with?('=')
+        key = str.chop
+        @options[key] = args.first.to_s if args.first
+      else
+        @options[str]
+      end
+    end
+  end
+
+  class PushMock < BasicMock
+    attr_accessor :pushes
+    def initialize
+      @pushes = []
+    end
+    def define(name, **options, &block)
+      builder = PushConfigBuilder.new
+      block.call(builder) if block
+      opts = builder.options.dup
+      options.each do |k, v|
+        opts[k.to_s] = v.to_s unless v.nil?
+      end
+      strategy = opts["strategy"] || name.to_s
+      @pushes << { "name" => name.to_s, "strategy" => strategy, "options" => opts }
+    end
+  end
+
+  attr_accessor :vm, :ssh, :winrm, :vagrant, :trigger, :push, :machines
+
   def initialize
     @vm = VMMock.new
     @ssh = SshMock.new
     @winrm = WinrmMock.new
     @vagrant = VagrantMock.new
     @trigger = TriggerMock.new
+    @push = PushMock.new
     @machines = {}
     
     mock = self
@@ -440,6 +476,7 @@ class VagrantConfigMock < BasicMock
         "primary" => false,
         "autostart" => true,
         "triggers" => @trigger.triggers,
+        "pushes" => @push.pushes,
         "vm" => {
           "box_name" => @vm.box_name,
           "box_version" => @vm.box_version,
@@ -478,6 +515,7 @@ class VagrantConfigMock < BasicMock
           "primary" => config.instance_variable_get(:@primary) || false,
           "autostart" => config.instance_variable_get(:@autostart).nil? ? true : config.instance_variable_get(:@autostart),
           "triggers" => @trigger.triggers + config.trigger.triggers,
+          "pushes" => @push.pushes + (config.push ? config.push.pushes : []),
           "vm" => {
             "box_name" => config.vm.box_name || @vm.box_name,
             "box_version" => config.vm.box_version || @vm.box_version,
@@ -1223,6 +1261,36 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
             });
         }
 
+        let pushes = machine_val
+            .get("pushes")
+            .and_then(|p| p.as_array())
+            .unwrap_or(&empty_vec);
+        for p in pushes {
+            let p_name = p.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let p_strat = p.get("strategy").and_then(|s| s.as_str()).unwrap_or(p_name);
+            let mut opts_map = std::collections::HashMap::new();
+            if let Some(opts) = p.get("options").and_then(|o| o.as_object()) {
+                for (k, v) in opts {
+                    if let Some(s) = v.as_str() {
+                        opts_map.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+            let push_cfg = crate::config::PushConfig {
+                name: p_name.to_string(),
+                strategy: p_strat.to_string(),
+                options: opts_map,
+            };
+            if !env
+                .pushes
+                .iter()
+                .any(|existing| existing.name == push_cfg.name)
+            {
+                env.pushes.push(push_cfg.clone());
+            }
+            machine_config.pushes.push(push_cfg);
+        }
+
         let folders = vm_val
             .get("synced_folders")
             .and_then(|f| f.as_array())
@@ -1697,6 +1765,23 @@ mod parse_json_tests {
                             }
                         }
                     ],
+                    "pushes": [
+                        {
+                            "name": "ftp",
+                            "strategy": "ftp",
+                            "options": {
+                                "host": "ftp.example.com",
+                                "port": 21
+                            }
+                        },
+                        {
+                            "name": "ftp",
+                            "strategy": "ftp_dup"
+                        },
+                        {
+                            "name": "local-exec"
+                        }
+                    ],
                     "vm": {
                         "post_up_message": "VM is ready!",
                         "depends_on": ["db_service", 123],
@@ -1850,6 +1935,18 @@ mod parse_json_tests {
             m.vagrant.plugins,
             vec!["vagrant-vbguest".to_string(), "vagrant-share".to_string()]
         );
+        assert_eq!(m.pushes.len(), 3);
+        assert_eq!(m.pushes[0].name, "ftp");
+        assert_eq!(m.pushes[0].strategy, "ftp");
+        assert_eq!(
+            m.pushes[0].options.get("host").map(|s| s.as_str()),
+            Some("ftp.example.com")
+        );
+        assert_eq!(m.pushes[1].name, "ftp");
+        assert_eq!(m.pushes[1].strategy, "ftp_dup");
+        assert_eq!(m.pushes[2].name, "local-exec");
+        assert_eq!(m.pushes[2].strategy, "local-exec");
+        assert_eq!(env_config.pushes.len(), 2);
     }
 
     #[test]

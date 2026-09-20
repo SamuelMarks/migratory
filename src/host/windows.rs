@@ -111,10 +111,8 @@ impl Host for WindowsHost {
         Ok(true)
     }
 
-    #[coverage(off)]
     fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
-        // Typically parse ipconfig / get-netipaddress
-        Ok("192.168.1.4".to_string())
+        resolve_windows_host_ip()
     }
 
     fn service_manager(&self) -> &str {
@@ -124,6 +122,51 @@ impl Host for WindowsHost {
     fn list_bridge_interfaces(&self) -> Result<Vec<String>, MigratoryError> {
         Ok(vec!["Ethernet".to_string(), "Wi-Fi".to_string()])
     }
+}
+
+/// Resolves the primary local IPv4 address on Windows hosts.
+///
+/// # Returns
+///
+/// Returns the resolved IPv4 address as a `String`.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if network configuration cannot be inspected.
+#[cfg(not(test))]
+#[coverage(off)]
+fn resolve_windows_host_ip() -> Result<String, MigratoryError> {
+    if let Ok(output) = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress",
+        ])
+        .output()
+    {
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !ip.is_empty() {
+            return Ok(ip);
+        }
+    }
+    Ok("192.168.1.4".to_string())
+}
+
+/// Resolves the host IP for Windows in test mode, respecting mock overrides.
+///
+/// # Returns
+///
+/// Returns the resolved or mock IPv4 address as a `String`.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` on failure.
+#[cfg(test)]
+fn resolve_windows_host_ip() -> Result<String, MigratoryError> {
+    if let Ok(mock_ip) = std::env::var("MIGRATORY_TEST_MOCK_HOST_IP") {
+        return Ok(mock_ip);
+    }
+    Ok("192.168.1.4".to_string())
 }
 
 impl WindowsHost {
@@ -153,12 +196,27 @@ mod tests {
 
     #[test]
     fn test_windows_host() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+
         let host = WindowsHost;
         assert_eq!(host.name(), "windows");
         assert!(host.configure_nfs(&[]).is_ok());
         assert!(host.configure_smb(&[]).is_ok());
         assert!(host.check_admin().expect("admin check should succeed"));
         assert!(host.enable_ansi_colors().is_ok());
+
+        assert_eq!(
+            host.resolve_host_ip().expect("resolve ip should succeed"),
+            "192.168.1.4"
+        );
+        unsafe { std::env::set_var("MIGRATORY_TEST_MOCK_HOST_IP", "10.0.0.77") };
+        assert_eq!(
+            host.resolve_host_ip().expect("resolve ip should succeed"),
+            "10.0.0.77"
+        );
+        unsafe { std::env::remove_var("MIGRATORY_TEST_MOCK_HOST_IP") };
 
         assert_eq!(host.convert_path("/c/Users/samuel"), "C:\\Users\\samuel");
         assert_eq!(

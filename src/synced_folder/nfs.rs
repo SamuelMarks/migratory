@@ -59,9 +59,15 @@ impl SyncedFolder for NfsSyncedFolder {
         );
         let _ = comm.execute(&mkdir_cmd)?;
 
-        // Assuming host IP is accessible via default gateway on guest (e.g. 10.0.2.2 or similar)
-        // Vagrant dynamically resolves this. We'll use a mocked host IP.
-        let host_ip = "10.0.2.2";
+        // Dynamically resolve host IP from guest routing table or host resolver
+        let host_ip = match comm.execute("ip route show default | awk '{print $3}' 2>/dev/null || route -n get default | awk '/gateway/{print $2}'") {
+            Ok(output) if !output.trim().is_empty() => output.trim().to_string(),
+            _ => {
+                crate::host::detect_host()
+                    .and_then(|host| host.resolve_host_ip())
+                    .unwrap_or("10.0.2.2".to_string())
+            }
+        };
 
         let proto = if options.mount_options.iter().any(|o| o.contains("tcp")) {
             "tcp"
@@ -134,6 +140,34 @@ mod tests {
     struct FailComm;
 
     struct FailMountComm;
+
+    struct DynamicGatewayComm;
+
+    impl Communicator for DynamicGatewayComm {
+        fn execute(&self, command: &str) -> Result<String, MigratoryError> {
+            if command.contains("awk") {
+                Ok("192.168.56.1".to_string())
+            } else {
+                Ok(String::new())
+            }
+        }
+        #[coverage(off)]
+        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+        #[coverage(off)]
+        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+        #[coverage(off)]
+        fn execute_interactive(&self) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+        #[coverage(off)]
+        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+    }
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
@@ -232,6 +266,17 @@ mod tests {
     }
 
     #[test]
+    fn test_nfs_folder_dynamic_gateway() {
+        let dir = tempdir().expect("operation should succeed");
+        let folder = NfsSyncedFolder;
+        let mut opts = SyncedFolderOptions::default();
+        opts.guest_path = "/vagrant".to_string();
+        opts.host_path = dir.path().to_string_lossy().to_string();
+        let comm = DynamicGatewayComm;
+        assert!(folder.mount(&opts, &comm).is_ok());
+    }
+
+    #[test]
     fn test_nfs_folder_missing_host_path() {
         let folder = NfsSyncedFolder;
         let mut opts = SyncedFolderOptions::default();
@@ -284,6 +329,28 @@ mod tests {
             std::env::set_var("MOCK_OS", "unsupported_os_xyz");
         }
         let res = folder.prepare(&opts);
+        unsafe {
+            std::env::remove_var("MOCK_OS");
+        }
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_nfs_mount_unsupported_host_fallback() {
+        let dir = tempdir().expect("operation should succeed");
+        let folder = NfsSyncedFolder;
+        let mut opts = SyncedFolderOptions::default();
+        opts.guest_path = "/vagrant".to_string();
+        opts.host_path = dir.path().to_string_lossy().to_string();
+
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        unsafe {
+            std::env::set_var("MOCK_OS", "unsupported_os_xyz");
+        }
+        let comm = MockComm;
+        let res = folder.mount(&opts, &comm);
         unsafe {
             std::env::remove_var("MOCK_OS");
         }

@@ -81,11 +81,15 @@ fn execute_auth(cmd: &CloudAuthCommands, writer: &mut dyn Write) -> Result<(), M
     let client = crate::cloud::CloudClient::new()?;
     match cmd {
         CloudAuthCommands::Login(args) => {
-            let _ = args;
-            writeln!(
-                writer,
-                "Please use `migratory login` for interactive authentication."
-            )?;
+            let login_args = crate::cli::LoginArgs {
+                check: args.check,
+                username: args.username.clone(),
+                token: args.token.clone(),
+                description: args.description.clone(),
+            };
+            crate::cli::commands::login::execute(&login_args)?;
+            writeln!(writer, "Authentication completed successfully.")
+                .map_err(|e| MigratoryError::Generic(e.to_string()))?;
         }
         CloudAuthCommands::Logout => {
             client.delete_token()?;
@@ -340,7 +344,7 @@ mod tests {
         assert!(
             execute(
                 &CloudCommands::Auth(CloudAuthCommands::Login(crate::cli::CloudAuthLoginArgs {
-                    token: None,
+                    token: Some("mock-token-123".to_string()),
                     username: None,
                     description: None,
                     check: false,
@@ -350,10 +354,7 @@ mod tests {
             .is_ok()
         );
         let output_str = String::from_utf8(out).unwrap_or_default();
-        assert_eq!(
-            output_str.trim(),
-            "Please use `migratory login` for interactive authentication."
-        );
+        assert_eq!(output_str.trim(), "Authentication completed successfully.");
 
         let mut out = Vec::new();
         assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Logout), &mut out).is_ok());
@@ -376,7 +377,7 @@ mod tests {
         let mut out = FailingWriter::default();
         let result = execute(
             &CloudCommands::Auth(CloudAuthCommands::Login(crate::cli::CloudAuthLoginArgs {
-                token: None,
+                token: Some("mock-token-123".to_string()),
                 username: None,
                 description: None,
                 check: false,
@@ -384,6 +385,24 @@ mod tests {
             &mut out,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_execute_cloud_auth_login_check() {
+        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        let mut out = Vec::new();
+        let result = execute(
+            &CloudCommands::Auth(CloudAuthCommands::Login(crate::cli::CloudAuthLoginArgs {
+                token: None,
+                username: None,
+                description: None,
+                check: true,
+            })),
+            &mut out,
+        );
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -471,6 +471,7 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
     let mut defined_machines: HashMap<String, MachineConfig> = HashMap::new();
     let mut current_target: Option<String> = None;
     let mut is_in_provider: Option<(String, String)> = None; // (machine, provider_name)
+    let mut is_in_push: Option<String> = None;
     let mut is_v1_syntax = false;
 
     for line in expanded.lines() {
@@ -525,8 +526,63 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
         if clean == "end" {
             if is_in_provider.is_some() {
                 is_in_provider = None;
+            } else if is_in_push.is_some() {
+                is_in_push = None;
             } else if current_target.is_some() {
                 current_target = None;
+            }
+            continue;
+        }
+
+        // Push definition block: config.push.define "name", strategy: "local-exec" do |push|
+        if clean.contains(".push.define") {
+            let after_push = clean.split(".push.define").nth(1).unwrap_or("").trim();
+            let push_line = after_push.split("do").next().unwrap_or("").trim();
+            let mut parts = push_line.splitn(2, ',');
+            let name_raw = parts.next().unwrap_or("").trim();
+            let name = extract_string_value(name_raw, &vars);
+            let opts_raw = parts.next().unwrap_or("");
+            let opts = parse_options_string(opts_raw, &vars);
+            let strategy = opts
+                .get("strategy")
+                .cloned()
+                .unwrap_or_else(|| name.clone());
+
+            let machine_ref = if let Some(target) = &current_target {
+                defined_machines
+                    .get_mut(target)
+                    .unwrap_or(&mut root_machine)
+            } else {
+                &mut root_machine
+            };
+
+            machine_ref.pushes.push(crate::config::PushConfig {
+                name: name.clone(),
+                strategy,
+                options: opts,
+            });
+            is_in_push = Some(name);
+            continue;
+        }
+
+        // If inside a push block, capture settings like push.script = "deploy.sh"
+        if let Some(_push_name) = &is_in_push {
+            let machine_ref = if let Some(target) = &current_target {
+                defined_machines
+                    .get_mut(target)
+                    .unwrap_or(&mut root_machine)
+            } else {
+                &mut root_machine
+            };
+
+            if let Some((lhs, rhs)) = clean.split_once('=')
+                && !lhs.ends_with('=')
+                && !rhs.starts_with('=')
+                && let Some(last_push) = machine_ref.pushes.last_mut()
+            {
+                let key = lhs.split('.').next_back().unwrap_or(lhs).trim();
+                let val = extract_string_value(rhs, &vars);
+                last_push.options.insert(key.to_string(), val);
             }
             continue;
         }
@@ -588,9 +644,17 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
         apply_directive(clean, machine_ref, &vars, is_v1_syntax);
     }
 
+    env.pushes = root_machine.pushes.clone();
     if defined_machines.is_empty() {
         env.machines.insert("default".to_string(), root_machine);
     } else {
+        for m in defined_machines.values() {
+            for p in &m.pushes {
+                if !env.pushes.iter().any(|existing| existing.name == p.name) {
+                    env.pushes.push(p.clone());
+                }
+            }
+        }
         env.machines = defined_machines;
     }
 
@@ -1741,5 +1805,46 @@ end
         assert_eq!(m.vm.boot_timeout, Some(500));
         assert_eq!(m.vm.networks.len(), 1);
         assert_eq!(m.vm.synced_folders.len(), 1);
+    }
+
+    #[test]
+    fn test_evaluate_in_process_push_definitions() {
+        let vf = r#"
+Vagrant.configure("2") do |config|
+  config.push.define "deploy", strategy: "local-exec" do |push|
+    push.script = "deploy.sh"
+    push.no_equals_directive
+  end
+
+  config.vm.define "web" do |web|
+    web.push.define "custom" do |push|
+      push.script = "web.sh"
+    end
+    web.push.define "deploy" do |push|
+      push.script = "override.sh"
+    end
+  end
+end
+"#;
+        let env = evaluate_in_process(vf).expect("operation should succeed");
+        assert_eq!(env.pushes.len(), 2);
+        let p1 = &env.pushes[0];
+        assert_eq!(p1.name, "deploy");
+        assert_eq!(p1.strategy, "local-exec");
+        assert_eq!(
+            p1.options.get("script").map(|s| s.as_str()),
+            Some("deploy.sh")
+        );
+
+        let p2 = &env.pushes[1];
+        assert_eq!(p2.name, "custom");
+        assert_eq!(p2.strategy, "custom");
+        assert_eq!(p2.options.get("script").map(|s| s.as_str()), Some("web.sh"));
+
+        let web = &env.machines["web"];
+        assert_eq!(web.pushes.len(), 3);
+        assert_eq!(web.pushes[0].name, "deploy");
+        assert_eq!(web.pushes[1].name, "custom");
+        assert_eq!(web.pushes[2].name, "deploy");
     }
 }

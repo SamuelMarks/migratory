@@ -369,6 +369,17 @@ impl Default for VmConfig {
     }
 }
 
+/// Configuration for application push deployments (`config.push.define`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PushConfig {
+    /// Strategy name or identifier (e.g. "local-exec", "ftp", "sftp", "atlas", "vagrant-cloud").
+    pub name: String,
+    /// Strategy type to execute.
+    pub strategy: String,
+    /// Strategy options key-value mapping.
+    pub options: HashMap<String, String>,
+}
+
 /// Complete machine configuration.
 ///
 /// Brings together all configuration namespaces for a single machine definition.
@@ -392,6 +403,8 @@ pub struct MachineConfig {
     pub vm: VmConfig,
     /// Configured triggers for this machine.
     pub triggers: Vec<TriggerConfig>,
+    /// Configured push strategies for this machine.
+    pub pushes: Vec<PushConfig>,
 }
 
 impl Default for MachineConfig {
@@ -406,6 +419,7 @@ impl Default for MachineConfig {
             winrm: WinrmConfig::default(),
             vm: VmConfig::default(),
             triggers: Vec::new(),
+            pushes: Vec::new(),
         }
     }
 }
@@ -418,6 +432,8 @@ impl Default for MachineConfig {
 pub struct EnvironmentConfig {
     /// Default machine, or multiple if defined.
     pub machines: HashMap<String, MachineConfig>,
+    /// Push configurations defined in the environment.
+    pub pushes: Vec<PushConfig>,
 }
 
 /// Evaluates a Vagrantfile and builds the environment configuration.
@@ -798,7 +814,12 @@ pub fn merge_environment_configs(
 
         // Triggers: append
         entry.triggers.extend(o_machine.triggers.clone());
+
+        // Pushes: append
+        entry.pushes.extend(o_machine.pushes.clone());
     }
+
+    merged.pushes.extend(override_conf.pushes.clone());
 
     merged
 }

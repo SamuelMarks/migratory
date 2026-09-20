@@ -269,11 +269,9 @@ impl Provider for VirtualBoxProvider {
             &["import", &ovf_str, "--vsys", "0", "--vmname", vm_name],
         )?;
 
-        // Parse the ID from output, mock for now
-        let _ = out;
+        let parsed_uuid = parse_vbox_uuid_from_output(&out).or_else(|| query_vbox_uuid(vm_name));
 
-        // Let's assume the name acts as the ID or we'd parse `showvminfo` to get UUID
-        Ok(vm_name.to_string())
+        Ok(parsed_uuid.unwrap_or_else(|| vm_name.to_string()))
     }
 
     /// Clones an existing VirtualBox machine (Linked Clone vs Full).
@@ -283,25 +281,23 @@ impl Provider for VirtualBoxProvider {
         base_machine_id: &str,
         vm_name: &str,
     ) -> Result<String, MigratoryError> {
-        // Here we'd actually read if a linked clone is preferred from config
-        // but for now, we default to full clone to be safe, mimicking typical standard clone
-        // or linked if asked.
-        let clone_type = if std::env::var("VAGRANT_VBOX_LINKED_CLONE").unwrap_or_default() == "true"
-        {
-            "link"
-        } else {
-            "full"
-        };
+        let is_linked = std::env::var("VAGRANT_VBOX_LINKED_CLONE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+            || std::env::var("MIGRATORY_VBOX_LINKED_CLONE")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
 
         let mut args = vec!["clonevm", base_machine_id, "--name", vm_name, "--register"];
 
-        if clone_type == "link" {
+        if is_linked {
             args.push("--options");
             args.push("link");
         }
 
         let _ = execute_vboxmanage(&args);
-        Ok(vm_name.to_string())
+        let parsed_uuid = query_vbox_uuid(vm_name);
+        Ok(parsed_uuid.unwrap_or_else(|| vm_name.to_string()))
     }
 
     /// Destroys the VirtualBox machine.
@@ -836,6 +832,55 @@ impl VirtualBoxProvider {
     }
 }
 
+/// Parses a VirtualBox VM UUID from standard `VBoxManage import` output.
+///
+/// # Arguments
+///
+/// * `output` - The stdout/stderr output from `VBoxManage import`.
+///
+/// # Returns
+///
+/// Returns `Some(uuid)` if a UUID pattern was matched, or `None`.
+fn parse_vbox_uuid_from_output(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(pos) = trimmed.find("UUID:") {
+            let candidate = trimmed[pos + 5..].trim().trim_matches('"');
+            let candidate = candidate.split_whitespace().next().unwrap_or(candidate);
+            if !candidate.is_empty() && candidate.len() >= 32 {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Queries `VBoxManage showvminfo <vm_name> --machinereadable` to extract the VM UUID.
+///
+/// # Arguments
+///
+/// * `vm_name` - The name of the virtual machine.
+///
+/// # Returns
+///
+/// Returns `Some(uuid)` if found, or `None`.
+fn query_vbox_uuid(vm_name: &str) -> Option<String> {
+    if let Ok(info) =
+        execute_vboxmanage_inner("VBoxManage", &["showvminfo", vm_name, "--machinereadable"])
+    {
+        for line in info.lines() {
+            let trimmed = line.trim();
+            if let Some(stripped) = trimmed.strip_prefix("UUID=\"")
+                && let Some(uuid) = stripped.strip_suffix('"')
+                && !uuid.is_empty()
+            {
+                return Some(uuid.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Executes a safe VBoxManage command.
 ///
 /// # Arguments
@@ -906,6 +951,9 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
         }
         if std::env::var("MIGRATORY_TEST_MOCK_RUNNING").is_ok() {
             return Ok("VMState=\"running\"\n".to_string());
+        }
+        if std::env::var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID").is_ok() {
+            return Ok("name=\"vm\"\nUUID=\"\"\nUUID=noquotes\nUUID=\"12345678-1234-5678-1234-567812345678\"\n".to_string());
         }
         return Ok(String::new());
     }
@@ -1316,5 +1364,90 @@ exit 0",
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR");
         }
+    }
+
+    #[test]
+    fn test_parse_vbox_uuid_from_output() {
+        let sample = "0%...10%...20%...100%\nInterpreting /path/to/box.ovf...\nOK.\nDisks: ...\nSuggested VM name \"my-vm\"\nSuggested VM UUID: 12345678-1234-5678-1234-567812345678\n";
+        let parsed = parse_vbox_uuid_from_output(sample);
+        assert_eq!(
+            parsed,
+            Some("12345678-1234-5678-1234-567812345678".to_string())
+        );
+
+        let none_sample = "0%...100%\nSuccessfully imported\n";
+        assert_eq!(parse_vbox_uuid_from_output(none_sample), None);
+
+        let short_sample = "Suggested VM UUID: short\n";
+        assert_eq!(parse_vbox_uuid_from_output(short_sample), None);
+    }
+
+    #[test]
+    fn test_query_vbox_uuid() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
+            std::env::set_var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID", "1");
+        }
+        assert_eq!(
+            query_vbox_uuid("test-vm"),
+            Some("12345678-1234-5678-1234-567812345678".to_string())
+        );
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID");
+        }
+        assert_eq!(query_vbox_uuid("test-vm"), None);
+
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR", "1");
+        }
+        assert_eq!(query_vbox_uuid("test-vm"), None);
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR");
+        }
+    }
+
+    #[test]
+    fn test_import_box_and_clone_machine() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let ovf_path = dir.path().join("box.ovf");
+        std::fs::write(&ovf_path, "<xml>ovf content</xml>").expect("write failed");
+
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
+        }
+
+        let provider = VirtualBoxProvider::new(None);
+        let import_res = provider.import(dir.path(), "test-import-vm");
+        assert!(import_res.is_ok());
+
+        // Test missing ovf
+        let empty_dir = tempfile::tempdir().expect("tempdir failed");
+        let err_res = provider.import(empty_dir.path(), "missing-ovf-vm");
+        assert!(err_res.is_err());
+
+        // Test clone_machine full
+        let clone_res = provider.clone_machine("base-id", "cloned-vm");
+        assert!(clone_res.is_ok());
+
+        // Test clone_machine linked
+        unsafe {
+            std::env::set_var("VAGRANT_VBOX_LINKED_CLONE", "true");
+        }
+        let linked_res = provider.clone_machine("base-id", "linked-cloned-vm");
+        unsafe {
+            std::env::remove_var("VAGRANT_VBOX_LINKED_CLONE");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
+        }
+        assert!(linked_res.is_ok());
     }
 }
