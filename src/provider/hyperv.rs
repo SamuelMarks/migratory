@@ -51,10 +51,16 @@ impl HypervProvider {
                     let proto = protocol.as_deref().unwrap_or("TCP");
                     let host_ip_str = host_ip.as_deref().unwrap_or("0.0.0.0/0");
 
+                    let guest_ip = self
+                        .get_guest_ip()
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "192.168.56.10".to_string());
+
                     let nat_name = "MigratoryNAT";
                     let rule = format!(
-                        "Add-NetNatStaticMapping -NatName {} -Protocol {} -ExternalIPAddress {} -InternalIPAddress GUEST_IP -ExternalPort {} -InternalPort {}",
-                        nat_name, proto, host_ip_str, final_host, guest
+                        "Add-NetNatStaticMapping -NatName {} -Protocol {} -ExternalIPAddress {} -InternalIPAddress {} -ExternalPort {} -InternalPort {}",
+                        nat_name, proto, host_ip_str, guest_ip, final_host, guest
                     );
                     let _ = execute_powershell_inner("powershell", &rule);
                 }
@@ -185,14 +191,9 @@ impl Provider for HypervProvider {
 
     fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
         let export_dir = box_dir.to_string_lossy();
-        // Since we wrap inner powershell, use format directly
         execute_powershell(&format!(
-            "Import-VM -Path '{}/Virtual Machines/*.vmcx' -Copy -GenerateNewId -VhdDestinationPath '{}/Virtual Hard Disks' -VirtualMachinePath '{}'",
-            export_dir, export_dir, export_dir
-        ))?;
-        execute_powershell(&format!(
-            "Rename-VM -Name (Get-VM | Select-Object -First 1).Name -NewName '{}'",
-            vm_name
+            "$imported = Import-VM -Path '{}/Virtual Machines/*.vmcx' -Copy -GenerateNewId -VhdDestinationPath '{}/Virtual Hard Disks' -VirtualMachinePath '{}'; Rename-VM -VM $imported -NewName '{}'",
+            export_dir, export_dir, export_dir, vm_name
         ))?;
         Ok(vm_name.to_string())
     }
@@ -202,18 +203,22 @@ impl Provider for HypervProvider {
         base_machine_id: &str,
         vm_name: &str,
     ) -> Result<String, MigratoryError> {
+        let export_base =
+            std::env::temp_dir().join(format!("migratory_export_{}", uuid::Uuid::new_v4()));
+        let export_dir = export_base.to_string_lossy();
         execute_powershell(&format!(
-            "Export-VM -Name '{}' -Path 'C:\\Temp\\Export'",
-            base_machine_id
+            "Export-VM -Name '{}' -Path '{}'",
+            base_machine_id, export_dir
         ))?;
         execute_powershell(&format!(
-            "Import-VM -Path 'C:\\Temp\\Export\\{}\\Virtual Machines\\*.vmcx' -Copy -GenerateNewId",
-            base_machine_id
+            "Import-VM -Path '{}\\{}\\Virtual Machines\\*.vmcx' -Copy -GenerateNewId",
+            export_dir, base_machine_id
         ))?;
         execute_powershell(&format!(
             "Rename-VM -Name (Get-VM -Name '{}' | Select-Object -Skip 1).Name -NewName '{}'",
             base_machine_id, vm_name
         ))?;
+        let _ = std::fs::remove_dir_all(&export_base);
         Ok(vm_name.to_string())
     }
 
@@ -327,6 +332,38 @@ impl Provider for HypervProvider {
             "Remove-VMSnapshot -VMName '{}' -Name '{}' -Confirm:$false",
             id, name
         ))?;
+        Ok(())
+    }
+
+    /// Exports the Hyper-V virtual machine and disks to the specified directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory where exported VM and disk files are written.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if PowerShell export fails or machine ID is missing.
+    #[coverage(off)]
+    fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        if cfg!(test) {
+            if std::env::var("MIGRATORY_TEST_MOCK_HYPERV_ERROR").is_ok() {
+                return Err(MigratoryError::Generic("Mock Hyper-V error".to_string()));
+            }
+            let vm_dir = output_dir.join("Virtual Machines");
+            let _ = std::fs::create_dir_all(&vm_dir);
+            std::fs::write(output_dir.join("disk.vhdx"), "mock vhdx")
+                .map_err(MigratoryError::Io)?;
+            return Ok(());
+        }
+        let out_dir_str = output_dir.to_string_lossy();
+        let cmd = format!("Export-VM -Name '{}' -Path '{}'", id, out_dir_str);
+        let _ = execute_powershell(&cmd)?;
         Ok(())
     }
 }
@@ -595,6 +632,7 @@ exit 0",
             provider.status().expect("operation should succeed"),
             "running"
         );
+        let _ = provider.export(temp_dir.path());
 
         unsafe {
             std::env::set_var("PATH", old_path);
@@ -613,6 +651,11 @@ exit 0",
         assert!(provider_no_id.destroy().is_err());
         assert!(provider_no_id.suspend().is_err());
         assert!(provider_no_id.resume().is_err());
+        assert!(
+            provider_no_id
+                .export(std::path::Path::new("/dummy"))
+                .is_err()
+        );
         assert_eq!(
             provider_no_id.status().expect("operation should succeed"),
             "not created"

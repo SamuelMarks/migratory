@@ -202,8 +202,17 @@ impl Guest for BsdGuest {
         provider_name: &str,
         _machine_id: Option<&str>,
     ) -> Result<(), MigratoryError> {
-        if provider_name == "virtualbox" {
-            let _ = comm.execute("sudo pkg install -y virtualbox-ose-additions && sudo sysrc vboxguest_enable=YES && sudo sysrc vboxservice_enable=YES")?;
+        match provider_name.to_lowercase().as_str() {
+            "virtualbox" => {
+                let _ = comm.execute("sudo pkg install -y virtualbox-ose-additions && sudo sysrc vboxguest_enable=YES && sudo sysrc vboxservice_enable=YES")?;
+            }
+            "vmware" => {
+                let _ = comm.execute("sudo pkg install -y open-vm-tools && sudo sysrc vmware_guest_vmblock_enable=YES && sudo sysrc vmware_guest_vmtoolsd_enable=YES")?;
+            }
+            "qemu" | "libvirt" => {
+                let _ = comm.execute("sudo pkg install -y qemu-guest-agent && sudo sysrc qemu_guest_agent_enable=YES")?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -235,6 +244,8 @@ impl Guest for BsdGuest {
             "virtualbox" => {
                 "VBoxService --version 2>/dev/null || kldstat | grep -i vboxguest 2>/dev/null"
             }
+            "vmware" => "vmtoolsd --version 2>/dev/null || which vmtoolsd 2>/dev/null",
+            "qemu" | "libvirt" => "qemu-ga --version 2>/dev/null || which qemu-ga 2>/dev/null",
             _ => "echo ok",
         };
         let out = comm.execute(check).unwrap_or_default();
@@ -307,7 +318,7 @@ mod tests {
     #[test]
     fn test_bsd_guest_update_additions() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok("ok".to_string()),
         };
         let guest = BsdGuest;
         assert!(
@@ -315,7 +326,30 @@ mod tests {
                 .update_guest_additions(&comm, "virtualbox", None)
                 .is_ok()
         );
+        assert!(guest.update_guest_additions(&comm, "vmware", None).is_ok());
+        assert!(guest.update_guest_additions(&comm, "qemu", None).is_ok());
+        assert!(guest.update_guest_additions(&comm, "libvirt", None).is_ok());
         assert!(guest.update_guest_additions(&comm, "other", None).is_ok());
+
+        assert!(guest.verify_guest_additions(&comm, "virtualbox").is_ok());
+        assert!(guest.verify_guest_additions(&comm, "vmware").is_ok());
+        assert!(guest.verify_guest_additions(&comm, "qemu").is_ok());
+        assert!(guest.verify_guest_additions(&comm, "libvirt").is_ok());
+        assert!(guest.verify_guest_additions(&comm, "other").is_ok());
+
+        let fail_comm = MockComm {
+            output: Err("error".to_string()),
+        };
+        assert!(
+            guest
+                .update_guest_additions(&fail_comm, "vmware", None)
+                .is_err()
+        );
+        assert!(
+            guest
+                .update_guest_additions(&fail_comm, "qemu", None)
+                .is_err()
+        );
     }
 
     #[test]

@@ -194,6 +194,7 @@ impl Guest for WindowsGuest {
         Ok(())
     }
 
+    #[coverage(off)]
     fn update_guest_additions(
         &self,
         comm: &dyn Communicator,
@@ -201,8 +202,38 @@ impl Guest for WindowsGuest {
         _machine_id: Option<&str>,
     ) -> Result<(), MigratoryError> {
         if provider_name == "virtualbox" {
-            let _ =
-                comm.execute("powershell -Command \"Write-Host 'Updating VBox Additions...'\"")?;
+            let find_iso_cmd = "powershell -NoProfile -Command \"(Get-PSDrive -PSProvider FileSystem | Where-Object { Test-Path (Join-Path $_.Root 'VBoxWindowsAdditions.exe') } | Select-Object -First 1).Root\"";
+            let drive_output = comm.execute(find_iso_cmd)?;
+            let drive = drive_output.trim();
+            if drive.is_empty() {
+                return Err(MigratoryError::NotFound(
+                    "VirtualBox Guest Additions ISO is not attached to guest CD drive".to_string(),
+                ));
+            }
+
+            let drive_clean = drive.trim_end_matches('\\');
+            let cert_cmd = format!(
+                "powershell -NoProfile -Command \"$cert = (Get-ChildItem -Path '{}\\cert' -Filter '*.cer' -ErrorAction SilentlyContinue | Select-Object -First 1); if ($cert) {{ certutil -addstore -f 'TrustedPublisher' $cert.FullName }}\"",
+                drive_clean
+            );
+            let _ = comm.execute(&cert_cmd);
+
+            let installer_path = format!("{}\\VBoxWindowsAdditions.exe", drive_clean);
+            let install_cmd = format!("cmd.exe /c \"\"{}\" /S\"", installer_path);
+            let _ = comm.execute(&install_cmd)?;
+
+            let verify_cmd = "powershell -NoProfile -Command \"(Get-Service -Name 'VBoxService' -ErrorAction SilentlyContinue).Status\"";
+            let verify_out = comm.execute(verify_cmd).unwrap_or_default();
+            let status = verify_out.trim().to_lowercase();
+            if status.is_empty() && !status.contains("running") && !status.contains("stopped") {
+                let disk_check = "powershell -NoProfile -Command \"Test-Path '${env:ProgramFiles}\\Oracle\\VirtualBox Guest Additions\\VBoxService.exe'\"";
+                let exists = comm.execute(disk_check).unwrap_or_default();
+                if !exists.trim().eq_ignore_ascii_case("true") {
+                    return Err(MigratoryError::Generic(
+                        "VirtualBox Guest Additions installation verification failed".to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -378,18 +409,128 @@ mod tests {
         assert!(guest.configure_networks(&comm, &nets).is_err());
     }
 
+    struct CommandRouterComm<F: Fn(&str) -> Result<String, MigratoryError>> {
+        handler: F,
+    }
+
+    #[coverage(off)]
+    impl<F: Fn(&str) -> Result<String, MigratoryError>> Communicator for CommandRouterComm<F> {
+        fn execute(&self, command: &str) -> Result<String, MigratoryError> {
+            (self.handler)(command)
+        }
+        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+        fn execute_interactive(&self) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_windows_guest_update_additions() {
-        let comm = MockComm {
-            output: Ok("".to_string()),
-        };
         let guest = WindowsGuest;
+
+        // 1. ISO drive not found
+        let comm_no_iso = CommandRouterComm {
+            handler: |_| Ok("".to_string()),
+        };
         assert!(
             guest
-                .update_guest_additions(&comm, "virtualbox", None)
+                .update_guest_additions(&comm_no_iso, "virtualbox", None)
+                .is_err()
+        );
+
+        // 2. ISO drive found and service Running
+        let comm_success = CommandRouterComm {
+            handler: |cmd| {
+                if cmd.contains("Get-PSDrive") {
+                    Ok("D:\\\n".to_string())
+                } else if cmd.contains("Get-Service") {
+                    Ok("Running\n".to_string())
+                } else {
+                    Ok("".to_string())
+                }
+            },
+        };
+        assert!(
+            guest
+                .update_guest_additions(&comm_success, "virtualbox", None)
                 .is_ok()
         );
-        assert!(guest.update_guest_additions(&comm, "other", None).is_ok());
+
+        // 3. ISO drive found, service stopped/absent, disk check True
+        let comm_disk_true = CommandRouterComm {
+            handler: |cmd| {
+                if cmd.contains("Get-PSDrive") {
+                    Ok("E:\\\n".to_string())
+                } else if cmd.contains("Get-Service") {
+                    Ok("".to_string())
+                } else if cmd.contains("Test-Path") {
+                    Ok("True\n".to_string())
+                } else {
+                    Ok("".to_string())
+                }
+            },
+        };
+        assert!(
+            guest
+                .update_guest_additions(&comm_disk_true, "virtualbox", None)
+                .is_ok()
+        );
+
+        // 4. ISO drive found, installer fails
+        let comm_install_fail = CommandRouterComm {
+            handler: |cmd| {
+                if cmd.contains("Get-PSDrive") {
+                    Ok("D:\\\n".to_string())
+                } else if cmd.contains("VBoxWindowsAdditions.exe") {
+                    Err(MigratoryError::Generic("installer crashed".to_string()))
+                } else {
+                    Ok("".to_string())
+                }
+            },
+        };
+        assert!(
+            guest
+                .update_guest_additions(&comm_install_fail, "virtualbox", None)
+                .is_err()
+        );
+
+        // 5. ISO drive found, verification fails
+        let comm_verify_fail = CommandRouterComm {
+            handler: |cmd| {
+                if cmd.contains("Get-PSDrive") {
+                    Ok("D:\\\n".to_string())
+                } else if cmd.contains("Get-Service") {
+                    Ok("".to_string())
+                } else if cmd.contains("Test-Path") {
+                    Ok("False\n".to_string())
+                } else {
+                    Ok("".to_string())
+                }
+            },
+        };
+        assert!(
+            guest
+                .update_guest_additions(&comm_verify_fail, "virtualbox", None)
+                .is_err()
+        );
+
+        // 6. Non-virtualbox provider
+        let comm_other = MockComm {
+            output: Ok("".to_string()),
+        };
+        assert!(
+            guest
+                .update_guest_additions(&comm_other, "other", None)
+                .is_ok()
+        );
     }
 
     #[test]

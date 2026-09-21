@@ -225,6 +225,17 @@ pub trait Provider {
 
     /// Exports the machine to the specified directory.
     ///
+    /// The export pipeline produces provider-specific virtual machine artifacts suitable
+    /// for packaging into a `.box` archive:
+    /// - VirtualBox: exports an OVF appliance (`box.ovf`) and disk images (`.vmdk`).
+    /// - QEMU/Libvirt: dumps domain definition (`box.xml`) and disk images (`box.img`).
+    /// - Hyper-V: exports virtual machine definitions (`Virtual Machines/`) and virtual hard disks (`.vhdx`).
+    /// - VMware: exports virtual machine configuration (`box.vmx`) and disk files (`box.vmdk`).
+    /// - Docker: commits container state and saves image tarball (`box.tar`).
+    ///
+    /// The packaging step subsequently writes `metadata.json` and optional embedded `Vagrantfile`
+    /// into this directory before compressing the tree into the target box file.
+    ///
     /// # Arguments
     ///
     /// * `output_dir` - The directory where the OVF/box files should be exported.

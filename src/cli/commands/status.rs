@@ -72,7 +72,7 @@ pub fn execute(cwd: &Path, args: &StatusArgs) -> Result<(), MigratoryError> {
             .unwrap_or_else(|| "virtualbox".to_string());
         let target_provider_name_str = target_provider_name.as_str();
 
-        let machine_id_result = state_mgr.read_id(name, "virtualbox");
+        let machine_id_result = state_mgr.read_id(name, target_provider_name_str);
         let machine_id = machine_id_result.unwrap_or(None);
 
         let p = get_provider_or_default(target_provider_name_str, machine_id.clone());
@@ -238,5 +238,65 @@ mod tests {
         let result = execute(cwd, &args);
         assert!(result.is_ok());
         Ok(())
+    }
+
+    #[test]
+    fn test_execute_status_heterogeneous_providers() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
+        }
+
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+
+        let vf_content = r#"
+Vagrant.configure("2") do |config|
+  config.vm.define "web" do |web|
+    web.vm.provider "docker"
+  end
+  config.vm.define "db" do |db|
+    db.vm.provider "qemu"
+  end
+  config.vm.define "win" do |win|
+    win.vm.provider "hyperv"
+  end
+  config.vm.define "esxi" do |esxi|
+    esxi.vm.provider "vmware"
+  end
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vf_content).expect("operation should succeed");
+
+        let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(cwd));
+        state_mgr
+            .write_id("web", "docker", "container-1234")
+            .expect("operation should succeed");
+        state_mgr
+            .write_id("db", "qemu", "domain-5678")
+            .expect("operation should succeed");
+        state_mgr
+            .write_id("win", "hyperv", "vm-uuid-9999")
+            .expect("operation should succeed");
+        state_mgr
+            .write_id("esxi", "vmware", "/path/to/vm.vmx")
+            .expect("operation should succeed");
+
+        let args = StatusArgs { name: None };
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+
+        // Target single non-virtualbox machine
+        let target_args = StatusArgs {
+            name: Some("db".to_string()),
+        };
+        let target_res = execute(cwd, &target_args);
+        assert!(target_res.is_ok());
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+        }
     }
 }

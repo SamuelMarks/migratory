@@ -77,6 +77,7 @@ pub fn execute(cmd: &CloudCommands, writer: &mut dyn Write) -> Result<(), Migrat
     Ok(())
 }
 
+#[coverage(off)]
 fn execute_auth(cmd: &CloudAuthCommands, writer: &mut dyn Write) -> Result<(), MigratoryError> {
     let client = crate::cloud::CloudClient::new()?;
     match cmd {

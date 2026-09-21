@@ -104,7 +104,7 @@ pub fn detect_usable_providers() -> Vec<String> {
 /// Returns a `MigratoryError` if the package manager command fails.
 pub fn install_provider_with(
     provider_name: &str,
-    brew_cmd: &str,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] brew_cmd: &str,
     installer: ProviderInstaller<'_>,
 ) -> Result<(), MigratoryError> {
     println!("Ensuring provider '{}' is installed...", provider_name);
@@ -145,10 +145,10 @@ pub fn install_provider_with(
             "qemu" => Some("qemu-kvm"),
             _ => None,
         };
-        if let Some(pkg) = pkg {
-            if std::path::Path::new("/usr/bin/apt-get").exists() {
-                let _ = installer("sudo", &["apt-get", "install", "-y", pkg]);
-            }
+        if let Some(pkg) = pkg
+            && std::path::Path::new("/usr/bin/apt-get").exists()
+        {
+            let _ = installer("sudo", &["apt-get", "install", "-y", pkg]);
         }
     }
 

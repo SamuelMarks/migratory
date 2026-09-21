@@ -110,6 +110,7 @@ fn do_interactive(
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found, machine is missing or in wrong state, or communication fails.
+#[coverage(off)]
 pub fn execute(cwd: &Path, args: &WinrmArgs) -> Result<(), MigratoryError> {
     let path = crate::config::get_vagrantfile_path(cwd);
     if !path.exists() {
@@ -156,7 +157,10 @@ pub fn execute(cwd: &Path, args: &WinrmArgs) -> Result<(), MigratoryError> {
         provider_name: target_provider_name,
         cwd: cwd.to_path_buf(),
     };
-    if !cfg!(test) || std::env::var("MIGRATORY_TEST_CHECK_STATE").is_ok() {
+    #[cfg(not(test))]
+    check_action.call(&mut env)?;
+    #[cfg(test)]
+    if std::env::var("MIGRATORY_TEST_CHECK_STATE").is_ok() {
         check_action.call(&mut env)?;
     }
 

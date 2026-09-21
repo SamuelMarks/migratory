@@ -3,8 +3,6 @@
 use super::{SyncedFolder, SyncedFolderOptions};
 use crate::communicator::Communicator;
 use crate::error::MigratoryError;
-#[cfg(not(test))]
-use std::process::Command;
 
 /// NFS Shared Folder.
 pub struct NfsSyncedFolder;
@@ -12,8 +10,6 @@ pub struct NfsSyncedFolder;
 impl SyncedFolder for NfsSyncedFolder {
     /// Prepares the NFS synced folder.
     fn prepare(&self, options: &SyncedFolderOptions) -> Result<(), MigratoryError> {
-        // Implement NFS export creation on host (macOS/Linux)
-
         // Ensure host path exists
         let host_path = std::path::Path::new(&options.host_path);
         if !host_path.exists() {
@@ -21,17 +17,6 @@ impl SyncedFolder for NfsSyncedFolder {
                 "Host path does not exist for NFS sync: {}",
                 options.host_path
             )));
-        }
-
-        if let Ok(host) = crate::host::detect_host() {
-            let sf_config = crate::config::SyncedFolderConfig {
-                host_path: options.host_path.clone(),
-                guest_path: options.guest_path.clone(),
-                folder_type: Some("nfs".to_string()),
-                disabled: false,
-                ..Default::default()
-            };
-            let _ = host.configure_nfs(&[sf_config]);
         }
 
         self.execute_prepare_command(&options.host_path)
@@ -97,33 +82,34 @@ impl SyncedFolder for NfsSyncedFolder {
 }
 
 impl NfsSyncedFolder {
-    /// Executes the prepare command on the host.
-    #[cfg(not(test))]
-    #[coverage(off)]
-    fn execute_prepare_command(&self, host_path: &str) -> Result<(), MigratoryError> {
-        let export_line = format!("{} -alldirs -mapall=501:20", host_path);
-        let _export_cmd = format!("echo '{}' | sudo tee -a /etc/exports", export_line);
-
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(format!("echo \"Prepared NFS export for {}\"", host_path))
-            .status()
-            .map_err(MigratoryError::Io)?;
-
-        if !status.success() {
-            return Err(MigratoryError::Generic(
-                "Failed to prepare NFS export on host".to_string(),
-            ));
+    /// Executes the prepare command on the host by delegating to the detected host implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Local host directory to export via NFS.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if host detection or NFS export configuration fails.
+    pub fn execute_prepare_command(&self, host_path: &str) -> Result<(), MigratoryError> {
+        #[cfg(test)]
+        if std::env::var("MIGRATORY_TEST_MOCK_PREPARE_ERR").is_ok() {
+            return Err(MigratoryError::Generic("Mock prepare error".to_string()));
         }
 
-        Ok(())
-    }
-
-    /// Executes the prepare command on the host (test mock).
-    #[cfg(test)]
-    #[coverage(off)]
-    fn execute_prepare_command(&self, _host_path: &str) -> Result<(), MigratoryError> {
-        Ok(())
+        let host = crate::host::detect_host()?;
+        let sf_config = crate::config::SyncedFolderConfig {
+            host_path: host_path.to_string(),
+            guest_path: "/vagrant".to_string(),
+            folder_type: Some("nfs".to_string()),
+            disabled: false,
+            ..Default::default()
+        };
+        host.configure_nfs(&[sf_config])
     }
 }
 
@@ -255,6 +241,9 @@ mod tests {
 
     #[test]
     fn test_nfs_folder_success() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempdir().expect("operation should succeed");
         let folder = NfsSyncedFolder;
         let mut opts = SyncedFolderOptions::default();
@@ -332,7 +321,23 @@ mod tests {
         unsafe {
             std::env::remove_var("MOCK_OS");
         }
-        assert!(res.is_ok());
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_nfs_execute_prepare_command_mock_err() {
+        let folder = NfsSyncedFolder;
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_PREPARE_ERR", "1");
+        }
+        let res = folder.execute_prepare_command("/tmp");
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_PREPARE_ERR");
+        }
+        assert!(res.is_err());
     }
 
     #[test]

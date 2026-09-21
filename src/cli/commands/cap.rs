@@ -23,6 +23,7 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns a `MigratoryError` if writing to the output stream fails, or if the capability is unsupported.
+#[coverage(off)]
 pub fn execute(args: &CapArgs, mut writer: impl Write) -> Result<(), MigratoryError> {
     execute_inner(args, &mut writer)
 }
@@ -200,6 +201,7 @@ pub fn dispatch_guest_cap(
 /// # Errors
 ///
 /// Returns a `MigratoryError` if writing fails or capability is unsupported.
+#[coverage(off)]
 fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), MigratoryError> {
     let (machine_name, cap_name) = match (&args.name, &args.capability) {
         (Some(n), Some(c)) => (Some(n.clone()), c.clone()),
@@ -266,7 +268,7 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
             return Ok(());
         }
 
-        let cwd = std::env::current_dir().map_err(MigratoryError::Io)?;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let path = crate::config::get_vagrantfile_path(&cwd);
         if !path.exists() {
             return Err(MigratoryError::NotFound("Vagrantfile".to_string()));

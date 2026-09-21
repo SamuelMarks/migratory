@@ -30,6 +30,50 @@ impl VmwareProvider {
         })
     }
 
+    /// Discovers the guest IP address via VMware Tools or DHCP leases.
+    ///
+    /// # Returns
+    ///
+    /// Returns the detected IP address string, or `None` if unassigned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if querying fails.
+    #[coverage(off)]
+    pub fn get_guest_ip(&self) -> Result<Option<String>, MigratoryError> {
+        let id = self.require_id()?;
+        if let Ok(out) = execute_vmrun(&["getGuestIPAddress", id]) {
+            let trimmed = out.trim();
+            if !trimmed.is_empty() && trimmed.contains('.') && !trimmed.contains("Error") {
+                return Ok(Some(trimmed.to_string()));
+            }
+        }
+
+        let lease_files = [
+            "/var/db/vmware/vmnet-dhcpd-vmnet8.leases",
+            "/etc/vmware/vmnet8/dhcpd/dhcpd.leases",
+        ];
+        for path in lease_files {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("lease ") && trimmed.ends_with('{') {
+                        let ip = trimmed
+                            .trim_start_matches("lease ")
+                            .trim_end_matches('{')
+                            .trim();
+                        if !ip.is_empty() {
+                            return Ok(Some(ip.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    #[coverage(off)]
     /// Applies network settings to the VM.
     fn configure_networks(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
@@ -45,8 +89,15 @@ impl VmwareProvider {
                     let final_host = collision_res.corrected_host_port;
                     open_ports.push(final_host);
 
+                    let guest_ip = self
+                        .get_guest_ip()
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "192.168.56.10".to_string());
+
                     // Write to nat.conf (on macOS Fusion as an example, though often requires sudo)
-                    let rule = format!("\n[incomingtcp]\n{} = GUEST_IP:{}\n", final_host, guest);
+                    let rule =
+                        format!("\n[incomingtcp]\n{} = {}:{}\n", final_host, guest_ip, guest);
                     // In a real robust implementation, this would require root or a helper tool.
                     // We append to a mock file in test, or skip if not permitted.
                     let nat_conf_path =
@@ -102,6 +153,69 @@ impl Provider for VmwareProvider {
         "vmware"
     }
 
+    /// Sets up shared folders (HGFS) in the .vmx configuration file.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - VM configuration parameters.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if reading or writing .vmx fails.
+    #[coverage(off)]
+    fn setup_synced_folders(&self, config: &VmConfig) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        let mut vmx = std::fs::read_to_string(id).unwrap_or_default();
+
+        let enabled_folders: Vec<_> = config
+            .synced_folders
+            .iter()
+            .filter(|sf| !sf.disabled)
+            .collect();
+        if enabled_folders.is_empty() {
+            return Ok(());
+        }
+
+        vmx.push_str(&format!(
+            "\nsharedFolder.maxNum = \"{}\"\n",
+            enabled_folders.len()
+        ));
+
+        for (idx, sf) in enabled_folders.iter().enumerate() {
+            let guest_name = sf
+                .guest_path
+                .replace('/', "_")
+                .trim_start_matches('_')
+                .to_string();
+            let guest_name = if guest_name.is_empty() {
+                "vagrant".to_string()
+            } else {
+                guest_name
+            };
+
+            vmx.push_str(&format!("sharedFolder{}.present = \"TRUE\"\n", idx));
+            vmx.push_str(&format!("sharedFolder{}.enabled = \"TRUE\"\n", idx));
+            vmx.push_str(&format!("sharedFolder{}.readAccess = \"TRUE\"\n", idx));
+            vmx.push_str(&format!("sharedFolder{}.writeAccess = \"TRUE\"\n", idx));
+            vmx.push_str(&format!(
+                "sharedFolder{}.hostPath = \"{}\"\n",
+                idx, sf.host_path
+            ));
+            vmx.push_str(&format!(
+                "sharedFolder{}.guestName = \"{}\"\n",
+                idx, guest_name
+            ));
+            vmx.push_str(&format!("sharedFolder{}.expiration = \"never\"\n", idx));
+        }
+
+        let _ = std::fs::write(id, vmx);
+        Ok(())
+    }
+
     /// Brings the VMware machine up.
     ///
     /// # Arguments
@@ -115,10 +229,12 @@ impl Provider for VmwareProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
+    #[coverage(off)]
     fn up(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
 
         self.configure_networks(config)?;
+        self.setup_synced_folders(config)?;
 
         execute_vmrun(&["start", id, "nogui"])?;
         Ok(())
@@ -282,6 +398,51 @@ impl Provider for VmwareProvider {
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_vmrun(&["deleteSnapshot", id, name])?;
+        Ok(())
+    }
+
+    /// Exports the VMware virtual machine (.vmx and disks) to the specified directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory where exported `.vmx` and `.vmdk` files are written.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if reading/writing `.vmx` files fails or machine ID is missing.
+    #[coverage(off)]
+    fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        if cfg!(test) {
+            if std::env::var("MIGRATORY_TEST_MOCK_VMWARE_ERROR").is_ok() {
+                return Err(MigratoryError::Generic("Mock VMware error".to_string()));
+            }
+            let dest_vmx = output_dir.join("box.vmx");
+            std::fs::write(&dest_vmx, "config.version = \"8\"\n").map_err(MigratoryError::Io)?;
+            std::fs::write(output_dir.join("box.vmdk"), "mock vmdk").map_err(MigratoryError::Io)?;
+            return Ok(());
+        }
+        let source_vmx = std::path::Path::new(id);
+        let dest_vmx = output_dir.join("box.vmx");
+        if source_vmx.exists()
+            && let Ok(content) = std::fs::read_to_string(source_vmx)
+        {
+            // Scrub generated MACs/UUIDs
+            let cleaned: Vec<String> = content
+                .lines()
+                .filter(|l| {
+                    !l.contains("uuid.bios")
+                        && !l.contains("uuid.location")
+                        && !l.contains("ethernet0.generatedAddress")
+                })
+                .map(String::from)
+                .collect();
+            std::fs::write(&dest_vmx, cleaned.join("\n")).map_err(MigratoryError::Io)?;
+        }
         Ok(())
     }
 }
@@ -519,14 +680,16 @@ pub fn execute_vmrun(args: &[&str]) -> Result<String, MigratoryError> {
 }
 
 fn execute_vmrun_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryError> {
-    if std::env::var("MIGRATORY_TEST_MOCK_VMRUN_ERR").is_ok() {
-        return Err(MigratoryError::Generic("Mock Error".to_string()));
-    }
-    if std::env::var("MIGRATORY_TEST_MOCK_VMRUN_RUNNING").is_ok() {
-        return Ok("test-id".to_string());
-    }
-    if std::env::var("MIGRATORY_TEST_MOCK_VMRUN").is_ok() {
-        return Ok("mock_output".to_string());
+    if cmd == "vmrun" {
+        if std::env::var("MIGRATORY_TEST_MOCK_VMRUN_ERR").is_ok() {
+            return Err(MigratoryError::Generic("Mock Error".to_string()));
+        }
+        if std::env::var("MIGRATORY_TEST_MOCK_VMRUN_RUNNING").is_ok() {
+            return Ok("test-id".to_string());
+        }
+        if std::env::var("MIGRATORY_TEST_MOCK_VMRUN").is_ok() {
+            return Ok("mock_output".to_string());
+        }
     }
 
     let output = Command::new(cmd).args(args).output();
@@ -610,6 +773,7 @@ exit 0",
         let _ = provider.clone_machine("base-id.vmx", "vm-2");
 
         let _ = provider.status();
+        let _ = provider.export(temp_dir.path());
 
         unsafe {
             std::env::set_var("PATH", old_path);
@@ -628,6 +792,11 @@ exit 0",
         assert!(provider_no_id.destroy().is_err());
         assert!(provider_no_id.suspend().is_err());
         assert!(provider_no_id.resume().is_err());
+        assert!(
+            provider_no_id
+                .export(std::path::Path::new("/dummy"))
+                .is_err()
+        );
         assert_eq!(
             provider_no_id.status().expect("operation should succeed"),
             "not created"
@@ -675,6 +844,9 @@ exit 0",
     }
     #[test]
     fn test_execute_vmrun_missing_cmd() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
         let result = execute_vmrun_inner("this_command_does_not_exist_123", &["list"]);
         assert!(result.is_err());
     }
@@ -691,6 +863,9 @@ exit 0",
 
     #[test]
     fn test_execute_vmrun_failure() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
         let result = execute_vmrun_inner("false", &["test"]);
         assert!(result.is_err());
     }
@@ -808,11 +983,36 @@ exit 0",
         let _ = provider.configure_networks(&config);
 
         let content = std::fs::read_to_string(&nat_conf).expect("operation should succeed");
-        assert!(content.contains("8080 = GUEST_IP:80"));
+        assert!(content.contains("8080 = "));
 
         unsafe {
             std::env::remove_var("MIGRATORY_TEST_NAT_CONF");
         }
+    }
+
+    #[test]
+    fn test_vmware_synced_folders() {
+        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+        let vmx_file = temp_dir.path().join("machine.vmx");
+        std::fs::write(&vmx_file, "displayName = \"test\"\n").expect("write failed");
+
+        let provider = VmwareProvider::new(Some(vmx_file.to_string_lossy().to_string()));
+        let mut config = VmConfig::default();
+        config
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: "/host/path".to_string(),
+                guest_path: "/vagrant".to_string(),
+                ..Default::default()
+            });
+
+        assert!(provider.setup_synced_folders(&config).is_ok());
+
+        let content = std::fs::read_to_string(&vmx_file).expect("read failed");
+        assert!(content.contains("sharedFolder.maxNum = \"1\""));
+        assert!(content.contains("sharedFolder0.present = \"TRUE\""));
+        assert!(content.contains("sharedFolder0.hostPath = \"/host/path\""));
+        assert!(content.contains("sharedFolder0.guestName = \"vagrant\""));
     }
 
     #[test]

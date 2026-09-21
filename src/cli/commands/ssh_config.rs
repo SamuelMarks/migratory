@@ -69,12 +69,28 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
     let target = args.name.as_deref().unwrap_or("default");
 
     if let Some(machine) = machines.get(target) {
-        let _ = state_mgr.read_id(target, "virtualbox")?;
+        let target_provider = machine
+            .vm
+            .providers
+            .first()
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "virtualbox".to_string());
+        let _ = state_mgr.read_id(target, &target_provider)?;
 
         let priv_key = if let Some(p) = &machine.ssh.private_key_path {
             p.clone()
         } else {
-            ensure_keys(cwd, target)?
+            let provider_key = cwd
+                .join(".vagrant")
+                .join("machines")
+                .join(target)
+                .join(&target_provider)
+                .join("private_key");
+            if provider_key.exists() {
+                provider_key.to_string_lossy().to_string()
+            } else {
+                ensure_keys(cwd, target)?
+            }
         };
 
         let host_alias = args.host.as_deref().unwrap_or(target);
@@ -323,6 +339,35 @@ end
         let args = SshConfigArgs {
             name: None,
             host: Some("custom-alias".to_string()),
+        };
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_ssh_config_with_provider_key() {
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider "qemu"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+
+        let prov_dir = cwd
+            .join(".vagrant")
+            .join("machines")
+            .join("default")
+            .join("qemu");
+        fs::create_dir_all(&prov_dir).expect("operation should succeed");
+        fs::write(prov_dir.join("id"), "qemu-id-1234").expect("operation should succeed");
+        fs::write(prov_dir.join("private_key"), "QEMU PRIVATE KEY")
+            .expect("operation should succeed");
+
+        let args = SshConfigArgs {
+            name: None,
+            host: None,
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());

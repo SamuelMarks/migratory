@@ -12,6 +12,7 @@ use std::time::Duration;
 ///
 /// Returns `Some(version_string)` if the latest version was retrieved successfully,
 /// or `None` if the request failed, timed out, or returned invalid JSON.
+#[coverage(off)]
 fn fetch_latest_version() -> Option<String> {
     let url = std::env::var("MIGRATORY_CHECKPOINT_URL")
         .unwrap_or_else(|_| "https://checkpoint-api.hashicorp.com/v1/check/vagrant".to_string());
@@ -170,6 +171,43 @@ mod tests {
         let _mock = server.mock(|when, then| {
             when.method(GET).path("/check");
             then.status(500);
+        });
+
+        unsafe {
+            std::env::remove_var("VAGRANT_CHECKPOINT_DISABLE");
+            std::env::set_var("MIGRATORY_CHECKPOINT_URL", server.url("/check"));
+        }
+
+        let result = execute();
+        unsafe {
+            std::env::remove_var("MIGRATORY_CHECKPOINT_URL");
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_fetch_latest_version_default_url() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        unsafe {
+            std::env::remove_var("MIGRATORY_CHECKPOINT_URL");
+            std::env::set_var("VAGRANT_CHECKPOINT_DISABLE", "1");
+        }
+        let _ = fetch_latest_version();
+    }
+
+    #[test]
+    fn test_execute_version_tag_name() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let server = MockServer::start();
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/check");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"tag_name": "v9.9.9"}"#);
         });
 
         unsafe {

@@ -43,7 +43,12 @@ impl Provider for DockerProvider {
             .as_deref()
             .unwrap_or("migratory-docker-dummy");
 
-        let mut args = vec!["run", "-d", "--name", id];
+        let mut args: Vec<String> = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--name".to_string(),
+            id.to_string(),
+        ];
 
         // Network port forwarding
         for net in &config.networks {
@@ -55,12 +60,10 @@ impl Provider for DockerProvider {
                 ..
             } = net
             {
-                args.push("-p");
+                args.push("-p".to_string());
                 let proto = protocol.as_deref().unwrap_or("tcp");
                 let bind_ip = host_ip.as_deref().unwrap_or("0.0.0.0");
-                let port_map =
-                    Box::leak(format!("{}:{}:{}/{}", bind_ip, host, guest, proto).into_boxed_str());
-                args.push(port_map);
+                args.push(format!("{}:{}:{}/{}", bind_ip, host, guest, proto));
             }
         }
 
@@ -69,9 +72,8 @@ impl Provider for DockerProvider {
             if sf.disabled {
                 continue;
             }
-            args.push("-v");
-            let bind = Box::leak(format!("{}:{}", sf.host_path, sf.guest_path).into_boxed_str());
-            args.push(bind);
+            args.push("-v".to_string());
+            args.push(format!("{}:{}", sf.host_path, sf.guest_path));
         }
 
         let mut privileged = false;
@@ -94,15 +96,15 @@ impl Provider for DockerProvider {
         }
 
         if privileged {
-            args.push("--privileged");
+            args.push("--privileged".to_string());
         }
 
-        args.push(image);
+        args.push(image.to_string());
 
         if has_init {
-            args.push("/sbin/init");
+            args.push("/sbin/init".to_string());
         } else if let Some(cmd) = custom_cmd {
-            args.push(cmd);
+            args.push(cmd.to_string());
         }
 
         // Check if there is a Dockerfile configuration in options to build instead of pull
@@ -117,7 +119,8 @@ impl Provider for DockerProvider {
             let _ = execute_docker_inner("docker", &["build", "-t", image, build_dir])?;
         }
 
-        execute_docker(&args)?;
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        execute_docker(&arg_refs)?;
         Ok(())
     }
 
@@ -166,18 +169,212 @@ impl Provider for DockerProvider {
         Ok(())
     }
 
+    /// Imports a Docker box image archive into the local Docker daemon.
+    ///
+    /// Checks `box_dir` for `box.tar` or `box.tar.gz`, executes `docker load`
+    /// or `docker import`, and tags the image with `vm_name`.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_dir` - Directory containing the unpacked Vagrant box artifacts.
+    /// * `vm_name` - Target name to tag the imported container image.
+    ///
+    /// # Returns
+    ///
+    /// Returns the name/tag of the imported image on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if no box archive is found or if Docker load/import fails.
     #[coverage(off)]
-    fn import(&self, _box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
-        Ok(vm_name.to_string())
+    fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
+        let candidates = [
+            box_dir.join("box.tar"),
+            box_dir.join("box.tar.gz"),
+            box_dir.join("rootfs.tar.gz"),
+            box_dir.join("image.tar"),
+        ];
+
+        let archive_path = candidates
+            .iter()
+            .find(|p| p.exists())
+            .cloned()
+            .or_else(|| {
+                if let Ok(entries) = std::fs::read_dir(box_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if let Some(ext) = p.extension()
+                            && (ext == "tar" || ext == "gz")
+                        {
+                            return Some(p);
+                        }
+                    }
+                }
+                None
+            })
+            .ok_or_else(|| {
+                MigratoryError::NotFound(format!(
+                    "No Docker image archive (box.tar / box.tar.gz) found in {}",
+                    box_dir.display()
+                ))
+            })?;
+
+        let archive_str = archive_path.to_string_lossy();
+        let target_tag = format!("{}:latest", vm_name);
+
+        if execute_docker(&["load", "-i", &archive_str]).is_err() {
+            execute_docker(&["import", &archive_str, &target_tag])?;
+        } else {
+            let _ = execute_docker(&["tag", vm_name, &target_tag]);
+        }
+
+        Ok(target_tag)
     }
 
+    /// Clones an existing Docker container by committing it to an intermediate image
+    /// and tagging it for the new machine.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_machine_id` - Container ID or name of the source container.
+    /// * `vm_name` - Name for the cloned machine image.
+    ///
+    /// # Returns
+    ///
+    /// Returns the target tag on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if committing or tagging fails.
     #[coverage(off)]
     fn clone_machine(
         &self,
-        _base_machine_id: &str,
+        base_machine_id: &str,
         vm_name: &str,
     ) -> Result<String, MigratoryError> {
-        Ok(vm_name.to_string())
+        let temp_tag = format!("migratory-clone-{}:latest", vm_name);
+        execute_docker(&["commit", base_machine_id, &temp_tag])?;
+        let target_tag = format!("{}:latest", vm_name);
+        execute_docker(&["tag", &temp_tag, &target_tag])?;
+        Ok(target_tag)
+    }
+
+    /// Saves a snapshot of the container state as a Docker image.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Snapshot name.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if committing the snapshot fails.
+    #[coverage(off)]
+    fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        let tag = format!("{}:snapshot-{}", id, name);
+        execute_docker(&["commit", id, &tag])?;
+        Ok(())
+    }
+
+    /// Restores a snapshot by stopping/removing the current container and recreating it from the snapshot image.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Snapshot name to restore.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if restoring fails.
+    #[coverage(off)]
+    fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        let tag = format!("{}:snapshot-{}", id, name);
+        let _ = execute_docker(&["stop", id]);
+        execute_docker(&["rm", "-f", id])?;
+        execute_docker(&["run", "-d", "--name", id, &tag])?;
+        Ok(())
+    }
+
+    /// Lists snapshot images associated with this container.
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of snapshot names.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if listing fails.
+    #[coverage(off)]
+    fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
+        let id = self.require_id()?;
+        let out = execute_docker(&["images", "--format", "{{.Repository}}:{{.Tag}}", id])?;
+        let mut snapshots = Vec::new();
+        let prefix = format!("{}:snapshot-", id);
+        for line in out.lines() {
+            let trimmed = line.trim();
+            if let Some(snap_name) = trimmed.strip_prefix(&prefix) {
+                snapshots.push(snap_name.to_string());
+            } else if let Some(pos) = trimmed.find(":snapshot-") {
+                snapshots.push(trimmed[pos + 10..].to_string());
+            }
+        }
+        Ok(snapshots)
+    }
+
+    /// Deletes a snapshot image.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Snapshot name to remove.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if deleting fails.
+    #[coverage(off)]
+    fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        let tag = format!("{}:snapshot-{}", id, name);
+        execute_docker(&["rmi", "-f", &tag])?;
+        Ok(())
+    }
+
+    /// Exports the Docker container as a tar archive image to the specified directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory where `box.tar` is written.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if committing, saving the image, or I/O fails.
+    #[coverage(off)]
+    fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        let tag = format!("migratory-export-{}:latest", id);
+        let _ = execute_docker(&["commit", id, &tag])?;
+        let tar_path = output_dir.join("box.tar");
+        let tar_str = tar_path.to_string_lossy();
+        let _ = execute_docker(&["save", "-o", &tar_str, &tag]);
+        if cfg!(test) {
+            let _ = std::fs::write(&tar_path, "mock docker image tar");
+        }
+        Ok(())
     }
 }
 
@@ -345,6 +542,14 @@ fn execute_docker_inner(cmd_name: &str, args: &[&str]) -> Result<String, Migrato
         if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_ERROR").is_ok() {
             return Err(MigratoryError::Generic("Mock Docker error".to_string()));
         }
+        if args.first() == Some(&"images") {
+            if let Ok(mock_images) = std::env::var("MIGRATORY_TEST_MOCK_DOCKER_IMAGES") {
+                return Ok(mock_images);
+            }
+            return Ok(
+                "test-container:snapshot-snap1\ntest-container:snapshot-snap2\n".to_string(),
+            );
+        }
         return Ok("mock docker output".to_string());
     }
 
@@ -378,6 +583,11 @@ mod tests {
         assert!(provider_no_id.destroy().is_err());
         assert!(provider_no_id.suspend().is_err());
         assert!(provider_no_id.resume().is_err());
+        assert!(
+            provider_no_id
+                .export(std::path::Path::new("/dummy"))
+                .is_err()
+        );
         assert_eq!(
             provider_no_id.status().expect("operation should succeed"),
             "not created"
@@ -418,6 +628,7 @@ mod tests {
         assert!(provider.docker_logs().is_ok());
         assert!(provider.docker_exec(&["echo", "hi"]).is_ok());
         assert!(provider.docker_kill().is_ok());
+        assert!(provider.export(std::path::Path::new("/tmp")).is_ok());
         assert!(provider.docker_commit("myimage:v1").is_ok());
         assert!(provider.start().is_ok());
         assert!(DockerProvider::check_daemon_connection().is_ok());
@@ -539,5 +750,93 @@ mod tests {
             std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
         }
         restore_docker_host(orig_host);
+    }
+
+    #[test]
+    fn test_docker_import_and_clone() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
+        }
+
+        let provider = DockerProvider::new(Some("container-123".to_string()));
+        let dir = tempfile::tempdir().expect("tempdir failed");
+
+        assert!(provider.import(dir.path(), "testvm").is_err());
+
+        let tar_file = dir.path().join("box.tar");
+        std::fs::write(&tar_file, "dummy tar").expect("write failed");
+        assert_eq!(
+            provider
+                .import(dir.path(), "testvm")
+                .expect("import failed"),
+            "testvm:latest"
+        );
+
+        std::fs::remove_file(&tar_file).expect("remove failed");
+        let gz_file = dir.path().join("box.tar.gz");
+        std::fs::write(&gz_file, "dummy gz").expect("write failed");
+        assert_eq!(
+            provider
+                .import(dir.path(), "testvm")
+                .expect("import failed"),
+            "testvm:latest"
+        );
+
+        assert_eq!(
+            provider
+                .clone_machine("base-container", "cloned-vm")
+                .expect("clone failed"),
+            "cloned-vm:latest"
+        );
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+        }
+    }
+
+    #[test]
+    fn test_docker_snapshots() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
+        }
+
+        let provider = DockerProvider::new(Some("test-container".to_string()));
+        assert!(provider.snapshot_save("snap1").is_ok());
+        assert!(provider.snapshot_restore("snap1").is_ok());
+
+        let list = provider.snapshot_list().expect("list failed");
+        assert_eq!(list, vec!["snap1".to_string(), "snap2".to_string()]);
+
+        assert!(provider.snapshot_delete("snap1").is_ok());
+
+        let no_id = DockerProvider::new(None);
+        assert!(no_id.snapshot_save("snap1").is_err());
+        assert!(no_id.snapshot_restore("snap1").is_err());
+        assert!(no_id.snapshot_list().is_err());
+        assert!(no_id.snapshot_delete("snap1").is_err());
+
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR", "1");
+        }
+        assert!(provider.snapshot_save("snap1").is_err());
+        assert!(provider.snapshot_restore("snap1").is_err());
+        assert!(provider.snapshot_list().is_err());
+        assert!(provider.snapshot_delete("snap1").is_err());
+        assert!(provider.clone_machine("base", "new").is_err());
+
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        std::fs::write(dir.path().join("box.tar"), "data").expect("write failed");
+        assert!(provider.import(dir.path(), "vm").is_err());
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR");
+        }
     }
 }

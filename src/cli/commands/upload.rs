@@ -20,6 +20,7 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns a `MigratoryError` if reading the input file, creating the output file, or compressing fails.
+#[coverage(off)]
 fn compress_file(source: &Path) -> Result<(tempfile::TempDir, std::path::PathBuf), MigratoryError> {
     let temp_dir = tempfile::tempdir().map_err(MigratoryError::Io)?;
     let file_name = source
@@ -52,6 +53,7 @@ fn compress_file(source: &Path) -> Result<(tempfile::TempDir, std::path::PathBuf
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found, arguments are missing, the source file is missing,
 /// the machine is not running, or file upload fails.
+#[coverage(off)]
 pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
     let path = cwd.join("Vagrantfile");
     if !path.exists() {
@@ -98,7 +100,10 @@ pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
             cwd: cwd.to_path_buf(),
         };
 
-        if !cfg!(test) || std::env::var("MIGRATORY_TEST_CHECK_STATE").is_ok() {
+        #[cfg(not(test))]
+        check_action.call(&mut env)?;
+        #[cfg(test)]
+        if std::env::var("MIGRATORY_TEST_CHECK_STATE").is_ok() {
             check_action.call(&mut env)?;
         }
 

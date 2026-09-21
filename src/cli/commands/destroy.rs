@@ -58,7 +58,7 @@ pub fn execute(cwd: &Path, args: &DestroyArgs) -> Result<(), MigratoryError> {
             .unwrap_or_else(|| "virtualbox".to_string());
         let target_provider_name_str = target_provider_name.as_str();
 
-        let machine_id = state_mgr.read_id(name, "virtualbox")?;
+        let machine_id = state_mgr.read_id(name, target_provider_name_str)?;
         let p = provider::get_provider(target_provider_name_str, machine_id)?;
 
         if args.graceful {
@@ -85,7 +85,7 @@ pub fn execute(cwd: &Path, args: &DestroyArgs) -> Result<(), MigratoryError> {
             );
         } else {
             // Also cleanup the machine state directory
-            if let Err(e) = state_mgr.clear_machine_state(name, "virtualbox") {
+            if let Err(e) = state_mgr.clear_machine_state(name, target_provider_name_str) {
                 ui.warn(
                     name,
                     &format!("Failed to clear machine state directory: {}", e),
@@ -422,5 +422,53 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_execute_destroy_non_virtualbox_provider() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
+        }
+
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider "docker"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+
+        let state_mgr = provider::StateManager::new(cwd.join(".vagrant"));
+        state_mgr
+            .write_id("default", "docker", "docker-id-destroy")
+            .expect("operation should succeed");
+
+        let docker_state_file = cwd
+            .join(".vagrant")
+            .join("machines")
+            .join("default")
+            .join("docker")
+            .join("id");
+        assert!(docker_state_file.exists());
+
+        let args = DestroyArgs {
+            force: true,
+            graceful: true,
+            name: None,
+            parallel: false,
+            no_parallel: false,
+        };
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+
+        assert!(!docker_state_file.exists());
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+        }
     }
 }

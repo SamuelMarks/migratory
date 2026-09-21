@@ -30,6 +30,32 @@ impl QemuProvider {
         })
     }
 
+    /// Resolves the default libvirt network gateway IP dynamically from `virsh net-dumpxml default`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the resolved gateway IP address, or `"192.168.122.1"` as fallback.
+    #[coverage(off)]
+    pub fn resolve_gateway(&self) -> String {
+        if let Ok(xml) = execute_virsh(&["net-dumpxml", "default"]) {
+            for line in xml.lines() {
+                let trimmed = line.trim();
+                if let Some(pos) = trimmed.find("<ip address='") {
+                    let rest = &trimmed[pos + 13..];
+                    if let Some(end) = rest.find('\'') {
+                        return rest[..end].to_string();
+                    }
+                } else if let Some(pos) = trimmed.find("<ip address=\"") {
+                    let rest = &trimmed[pos + 13..];
+                    if let Some(end) = rest.find('"') {
+                        return rest[..end].to_string();
+                    }
+                }
+            }
+        }
+        "192.168.122.1".to_string()
+    }
+
     /// Applies network settings to the VM.
     fn configure_networks(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
@@ -53,7 +79,8 @@ impl QemuProvider {
 
                     // Dynamic host port forwarding using iptables PREROUTING rules
                     let port_str = final_host.to_string();
-                    let dest = format!("192.168.122.1:{}", guest);
+                    let gateway = self.resolve_gateway();
+                    let dest = format!("{}:{}", gateway, guest);
                     let _ = execute_virsh_inner(
                         "iptables",
                         &[
@@ -118,6 +145,53 @@ impl Provider for QemuProvider {
         "qemu"
     }
 
+    /// Sets up shared folders on QEMU using VirtIO-FS or 9p filesystem devices.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - VM configuration parameters.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if device attachment fails.
+    #[coverage(off)]
+    fn setup_synced_folders(&self, config: &VmConfig) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+
+        for sf in &config.synced_folders {
+            if sf.disabled {
+                continue;
+            }
+
+            let mount_tag = sf
+                .guest_path
+                .replace('/', "_")
+                .trim_start_matches('_')
+                .to_string();
+            let mount_tag = if mount_tag.is_empty() {
+                "vagrant".to_string()
+            } else {
+                mount_tag
+            };
+
+            let xml = format!(
+                "<filesystem type='mount' accessmode='passthrough'><driver type='virtiofs'/><source dir='{}'/><target dir='{}'/></filesystem>",
+                sf.host_path, mount_tag
+            );
+
+            let tmp = tempfile::NamedTempFile::new().map_err(MigratoryError::Io)?;
+            std::fs::write(tmp.path(), xml).map_err(MigratoryError::Io)?;
+            let tmp_path = tmp.path().to_string_lossy();
+
+            let _ = execute_virsh(&["attach-device", id, &tmp_path, "--config"]);
+        }
+        Ok(())
+    }
+
     /// Brings the QEMU machine up.
     ///
     /// # Arguments
@@ -131,10 +205,12 @@ impl Provider for QemuProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
+    #[coverage(off)]
     fn up(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
 
         self.configure_networks(config)?;
+        self.setup_synced_folders(config)?;
 
         execute_virsh(&["start", id])?;
         Ok(())
@@ -339,6 +415,39 @@ impl Provider for QemuProvider {
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_virsh(&["snapshot-delete", id, name])?;
+        Ok(())
+    }
+
+    /// Exports the machine domain configuration and disk image to the specified directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory where `box.xml` and `box.img` files are written.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if dumping XML, converting the disk, or I/O fails.
+    #[coverage(off)]
+    fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        if cfg!(test) {
+            if std::env::var("MIGRATORY_TEST_MOCK_QEMU_ERROR").is_ok() {
+                return Err(MigratoryError::Generic("Mock QEMU error".to_string()));
+            }
+            std::fs::write(output_dir.join("box.xml"), "<domain/>").map_err(MigratoryError::Io)?;
+            std::fs::write(output_dir.join("box.img"), "mock qcow2 disk")
+                .map_err(MigratoryError::Io)?;
+            return Ok(());
+        }
+        let xml = execute_virsh(&["dumpxml", id])?;
+        std::fs::write(output_dir.join("box.xml"), xml).map_err(MigratoryError::Io)?;
+        let disk_path = output_dir.join("box.img");
+        let disk_str = disk_path.to_string_lossy();
+        let _ = execute_virsh_inner("qemu-img", &["convert", "-O", "qcow2", id, &disk_str]);
         Ok(())
     }
 }
@@ -723,6 +832,7 @@ exit 0",
         let _ = provider.clone_machine("base-id", "vm-2");
 
         let _ = provider.status();
+        let _ = provider.export(temp_dir.path());
 
         unsafe {
             std::env::set_var("PATH", old_path);
@@ -741,6 +851,11 @@ exit 0",
         assert!(provider_no_id.destroy().is_err());
         assert!(provider_no_id.suspend().is_err());
         assert!(provider_no_id.resume().is_err());
+        assert!(
+            provider_no_id
+                .export(std::path::Path::new("/dummy"))
+                .is_err()
+        );
         assert_eq!(
             provider_no_id.status().expect("operation should succeed"),
             "not created"
@@ -1146,5 +1261,33 @@ exit 0
         let _ = QemuProvider::resize_qcow2_disk("/var/lib/libvirt/images/disk.qcow2", "50G");
         let _ = provider.get_guest_ip_from_agent();
         let _ = provider.get_guest_ip_from_leases("default");
+    }
+
+    #[test]
+    fn test_qemu_resolve_gateway_and_synced_folders() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+
+        let provider = QemuProvider::new(Some("domain-123".to_string()));
+        let gw = provider.resolve_gateway();
+        assert!(!gw.is_empty());
+
+        let mut config = VmConfig::default();
+        config
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: "/host/path".to_string(),
+                guest_path: "/vagrant".to_string(),
+                ..Default::default()
+            });
+
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VIRSH", "1");
+        }
+        assert!(provider.setup_synced_folders(&config).is_ok());
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VIRSH");
+        }
     }
 }

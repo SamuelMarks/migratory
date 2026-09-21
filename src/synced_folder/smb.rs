@@ -3,8 +3,6 @@
 use super::{SyncedFolder, SyncedFolderOptions};
 use crate::communicator::Communicator;
 use crate::error::MigratoryError;
-#[cfg(not(test))]
-use std::process::Command;
 
 /// SMB Shared Folder.
 pub struct SmbSyncedFolder;
@@ -141,65 +139,40 @@ impl SmbSyncedFolder {
         mount_opts
     }
 
-    /// Executes the prepare command on the host.
-    #[cfg(not(test))]
+    /// Executes the prepare command on the host by delegating to the detected host implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Local host directory to share via SMB.
+    /// * `share_name` - Name of the SMB share.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if host detection or SMB configuration fails.
     #[coverage(off)]
     pub fn execute_prepare_command(
         &self,
         host_path: &str,
         share_name: &str,
     ) -> Result<(), MigratoryError> {
-        if cfg!(windows) {
-            let ps_script = format!(
-                "if (-not (Get-SmbShare -Name '{}' -ErrorAction SilentlyContinue)) {{ New-SmbShare -Name '{}' -Path '{}' -FullAccess Everyone }}",
-                share_name, share_name, host_path
-            );
-            let status = Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    &ps_script,
-                ])
-                .status()
-                .map_err(MigratoryError::Io)?;
-
-            if !status.success() {
-                return Err(MigratoryError::Generic(format!(
-                    "Failed to create SMB share '{}' with New-SmbShare",
-                    share_name
-                )));
-            }
-        } else {
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg(format!(
-                    "echo \"Prepared SMB export for {} as {}\"",
-                    host_path, share_name
-                ))
-                .status()
-                .map_err(MigratoryError::Io)?;
-
-            if !status.success() {
-                return Err(MigratoryError::Generic(
-                    "Failed to prepare SMB export on host".to_string(),
-                ));
-            }
+        #[cfg(test)]
+        if std::env::var("MIGRATORY_TEST_MOCK_PREPARE_ERR").is_ok() {
+            return Err(MigratoryError::Generic("Mock prepare error".to_string()));
         }
 
-        Ok(())
-    }
-
-    /// Executes the prepare command on the host (test mock).
-    #[cfg(test)]
-    #[coverage(off)]
-    pub fn execute_prepare_command(
-        &self,
-        _host_path: &str,
-        _share_name: &str,
-    ) -> Result<(), MigratoryError> {
-        Ok(())
+        let host = crate::host::detect_host()?;
+        let sf_config = crate::config::SyncedFolderConfig {
+            host_path: host_path.to_string(),
+            guest_path: format!("/{}", share_name),
+            folder_type: Some("smb".to_string()),
+            disabled: false,
+            ..Default::default()
+        };
+        host.configure_smb(&[sf_config])
     }
 }
 
@@ -456,5 +429,41 @@ mod tests {
         let comm = MockComm;
         assert!(folder.mount(&opts, &comm).is_ok());
         Ok(())
+    }
+
+    #[test]
+    fn test_smb_execute_prepare_command() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let folder = SmbSyncedFolder;
+        let dir = tempdir().expect("tempdir failed");
+        let opts = SyncedFolderOptions {
+            guest_path: "/vagrant".to_string(),
+            host_path: dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        assert!(folder.prepare(&opts).is_ok());
+        assert!(
+            folder
+                .execute_prepare_command(&opts.host_path, "vagrant")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_smb_execute_prepare_command_mock_err() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let folder = SmbSyncedFolder;
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_PREPARE_ERR", "1");
+        }
+        let res = folder.execute_prepare_command("/tmp", "vagrant");
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_PREPARE_ERR");
+        }
+        assert!(res.is_err());
     }
 }

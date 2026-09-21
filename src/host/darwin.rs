@@ -64,13 +64,7 @@ impl Host for DarwinHost {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|_| "20".to_string());
 
-            let export_line = format!(
-                "# VAGRANT-BEGIN
-/tmp -alldirs -mapall={}:{} 127.0.0.1
-# VAGRANT-END
-",
-                uid, gid
-            );
+            let export_line = Self::generate_nfs_exports(_folders, &uid, &gid);
             let cmd = format!(
                 "echo '{}' | sudo tee -a /etc/exports > /dev/null",
                 export_line
@@ -126,7 +120,7 @@ impl Host for DarwinHost {
                         .arg("sharing")
                         .arg("-a")
                         .arg(&sf.host_path)
-                        .arg("-s")
+                        .arg("-S")
                         .arg(&share_name)
                         .status()
                         .map_err(MigratoryError::Io)?;
@@ -294,6 +288,50 @@ impl DarwinHost {
         }
         caps
     }
+
+    /// Generates the NFS export configuration block for Darwin hosts.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    /// * `uid` - Anonymous user ID.
+    /// * `gid` - Anonymous group ID.
+    ///
+    /// # Returns
+    ///
+    /// Returns the formatted export lines.
+    pub fn generate_nfs_exports(
+        folders: &[crate::config::SyncedFolderConfig],
+        uid: &str,
+        gid: &str,
+    ) -> String {
+        let mut lines = String::new();
+        lines.push_str("# VAGRANT-BEGIN\n");
+        for sf in folders {
+            if sf.folder_type.as_deref() == Some("nfs") && !sf.disabled {
+                lines.push_str(&format!(
+                    "\"{}\" -alldirs -mapall={}:{} 127.0.0.1\n",
+                    sf.host_path, uid, gid
+                ));
+            }
+        }
+        lines.push_str("# VAGRANT-END\n");
+        lines
+    }
+
+    /// Generates the macOS sharing command for an SMB share.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Path on host.
+    /// * `share_name` - Name of the share.
+    ///
+    /// # Returns
+    ///
+    /// Returns the command line string.
+    pub fn generate_smb_sharing_command(host_path: &str, share_name: &str) -> String {
+        format!("sharing -a \"{}\" -S \"{}\"", host_path, share_name)
+    }
 }
 
 #[cfg(test)]
@@ -399,5 +437,34 @@ mod tests {
         assert!(caps.contains(&"virtualbox".to_string()));
         assert!(caps.contains(&"vmware".to_string()));
         assert!(missing_caps.is_empty());
+    }
+
+    #[test]
+    fn test_darwin_nfs_and_smb_generation() {
+        let folders = vec![
+            crate::config::SyncedFolderConfig {
+                host_path: "/Users/user/project".to_string(),
+                guest_path: "/vagrant".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/Users/user/disabled".to_string(),
+                guest_path: "/disabled".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: true,
+                ..Default::default()
+            },
+        ];
+
+        let exports = DarwinHost::generate_nfs_exports(&folders, "501", "20");
+        assert!(exports.contains("# VAGRANT-BEGIN"));
+        assert!(exports.contains("\"/Users/user/project\" -alldirs -mapall=501:20 127.0.0.1"));
+        assert!(!exports.contains("/Users/user/disabled"));
+        assert!(exports.contains("# VAGRANT-END"));
+
+        let smb_cmd = DarwinHost::generate_smb_sharing_command("/Users/user/project", "vagrant");
+        assert_eq!(smb_cmd, "sharing -a \"/Users/user/project\" -S \"vagrant\"");
     }
 }

@@ -81,7 +81,7 @@ pub fn execute(cwd: &Path, args: &ReloadArgs) -> Result<(), MigratoryError> {
             .unwrap_or_else(|| "virtualbox".to_string());
         let target_provider_name_str = target_provider_name.as_str();
 
-        let machine_id = state_mgr.read_id(name, "virtualbox")?;
+        let machine_id = state_mgr.read_id(name, target_provider_name_str)?;
         let p = provider::get_provider(target_provider_name_str, machine_id)?;
 
         ui.info(name, "Attempting graceful shutdown of VM...");
@@ -365,5 +365,41 @@ end
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_reload_non_virtualbox_provider() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
+        }
+
+        let dir = tempdir().expect("failed");
+        let cwd = dir.path();
+        let args = mock_args();
+
+        fs::write(
+            cwd.join("Vagrantfile"),
+            r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider "docker"
+end
+        "#,
+        )
+        .expect("failed");
+
+        let state_mgr = provider::StateManager::new(cwd.join(".vagrant"));
+        state_mgr
+            .write_id("default", "docker", "docker-id-reload")
+            .expect("failed");
+
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+        }
     }
 }

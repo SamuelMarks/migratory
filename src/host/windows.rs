@@ -45,12 +45,52 @@ impl Host for WindowsHost {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if the configuration fails (currently a no-op).
+    /// Returns a `MigratoryError` if the configuration fails.
     #[coverage(off)]
     fn configure_nfs(
         &self,
-        _folders: &[crate::config::SyncedFolderConfig],
+        folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
+        #[cfg(not(test))]
+        {
+            let has_nfs = folders
+                .iter()
+                .any(|sf| sf.folder_type.as_deref() == Some("nfs") && !sf.disabled);
+            if !has_nfs {
+                return Ok(());
+            }
+
+            let check_role = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-WindowsFeature -Name Server-NFS-Server).Installed",
+                ])
+                .output()
+                .map_err(MigratoryError::Io)?;
+            let installed = String::from_utf8_lossy(&check_role.stdout)
+                .trim()
+                .eq_ignore_ascii_case("true");
+            if !installed {
+                return Err(MigratoryError::Generic(
+                    "Windows NFS Server role 'Server-NFS-Server' is not installed".to_string(),
+                ));
+            }
+
+            for cmd in Self::generate_nfs_commands(folders) {
+                let status = Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &cmd])
+                    .status()
+                    .map_err(MigratoryError::Io)?;
+                if !status.success() {
+                    return Err(MigratoryError::Generic(format!(
+                        "Failed to create Windows NFS share: {}",
+                        cmd
+                    )));
+                }
+            }
+        }
+        let _ = folders;
         Ok(())
     }
 
@@ -62,28 +102,29 @@ impl Host for WindowsHost {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if SMB share creation fails (currently a no-op).
+    /// Returns a `MigratoryError` if SMB share creation fails.
     #[coverage(off)]
     fn configure_smb(
         &self,
-        _folders: &[crate::config::SyncedFolderConfig],
+        folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
-        let _script =
-            "New-SmbShare -Name 'MigratoryShare' -Path 'C:\\vagrant' -FullAccess 'Everyone'";
         #[cfg(not(test))]
         {
-            let status = Command::new("powershell")
-                .arg("-Command")
-                .arg(_script)
-                .status()
-                .map_err(MigratoryError::Io)?;
+            for cmd in Self::generate_smb_commands(folders) {
+                let status = Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &cmd])
+                    .status()
+                    .map_err(MigratoryError::Io)?;
 
-            if !status.success() {
-                return Err(MigratoryError::Generic(
-                    "Failed to configure SMB share".to_string(),
-                ));
+                if !status.success() {
+                    return Err(MigratoryError::Generic(format!(
+                        "Failed to configure SMB share on Windows: {}",
+                        cmd
+                    )));
+                }
             }
         }
+        let _ = folders;
         Ok(())
     }
 
@@ -188,6 +229,70 @@ impl WindowsHost {
             path.replace('/', "\\")
         }
     }
+
+    /// Generates PowerShell commands to create NFS shares on Windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of PowerShell commands.
+    pub fn generate_nfs_commands(folders: &[crate::config::SyncedFolderConfig]) -> Vec<String> {
+        let mut commands = Vec::new();
+        for sf in folders {
+            if sf.folder_type.as_deref() == Some("nfs") && !sf.disabled {
+                let name = sf
+                    .guest_path
+                    .replace('/', "_")
+                    .trim_start_matches('_')
+                    .to_string();
+                let share_name = if name.is_empty() {
+                    "vagrant".to_string()
+                } else {
+                    name
+                };
+                commands.push(format!(
+                    "New-NfsShare -Name '{}' -Path '{}' -AllowReadWriteByEveryone $true",
+                    share_name, sf.host_path
+                ));
+            }
+        }
+        commands
+    }
+
+    /// Generates individual PowerShell commands to create SMB shares on Windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of `New-SmbShare` commands.
+    pub fn generate_smb_commands(folders: &[crate::config::SyncedFolderConfig]) -> Vec<String> {
+        let mut commands = Vec::new();
+        for sf in folders {
+            if sf.folder_type.as_deref() == Some("smb") && !sf.disabled {
+                let name = sf
+                    .guest_path
+                    .replace('/', "_")
+                    .trim_start_matches('_')
+                    .to_string();
+                let share_name = if name.is_empty() {
+                    "vagrant".to_string()
+                } else {
+                    name
+                };
+                commands.push(format!(
+                    "New-SmbShare -Name '{}' -Path '{}' -FullAccess 'Everyone' -Force",
+                    share_name, sf.host_path
+                ));
+            }
+        }
+        commands
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +353,61 @@ mod tests {
         assert_eq!(host.convert_path("/C/test/path"), "C:\\test\\path");
         assert_eq!(host.convert_path("/cygdrive/c/test/path"), "C:\\test\\path");
         assert_eq!(host.convert_path("D:/test/path"), "D:\\test\\path");
+    }
+
+    #[test]
+    fn test_windows_nfs_and_smb_generation() {
+        let folders = vec![
+            crate::config::SyncedFolderConfig {
+                host_path: r"C:\Users\user\project".to_string(),
+                guest_path: "/vagrant".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: r"C:\Users\user\root_nfs".to_string(),
+                guest_path: "/".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: r"C:\Users\user\share".to_string(),
+                guest_path: "/shared".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: r"C:\Users\user\root_smb".to_string(),
+                guest_path: "/".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: r"C:\Users\user\disabled".to_string(),
+                guest_path: "/disabled".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: true,
+                ..Default::default()
+            },
+        ];
+
+        let nfs_cmds = WindowsHost::generate_nfs_commands(&folders);
+        assert_eq!(nfs_cmds.len(), 2);
+        assert!(nfs_cmds[0].contains("New-NfsShare"));
+        assert!(nfs_cmds[0].contains("-Name 'vagrant'"));
+        assert!(nfs_cmds[0].contains(r"-Path 'C:\Users\user\project'"));
+        assert!(nfs_cmds[1].contains("-Name 'vagrant'"));
+
+        let smb_cmds = WindowsHost::generate_smb_commands(&folders);
+        assert_eq!(smb_cmds.len(), 2);
+        assert!(smb_cmds[0].contains("New-SmbShare"));
+        assert!(smb_cmds[0].contains("-Name 'shared'"));
+        assert!(smb_cmds[0].contains(r"-Path 'C:\Users\user\share'"));
+        assert!(smb_cmds[0].contains("-FullAccess 'Everyone' -Force"));
+        assert!(smb_cmds[1].contains("-Name 'vagrant'"));
     }
 }

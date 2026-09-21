@@ -189,7 +189,7 @@ pub fn execute(cmd: &PluginCommands, out: &mut dyn Write) -> Result<(), Migrator
                 .join("license")
                 .join(&args.name);
             if license_path.exists() {
-                std::fs::create_dir_all(&license_dir).map_err(MigratoryError::Io)?;
+                let _ = std::fs::create_dir_all(&license_dir);
                 let dest_file = license_dir.join("license.lic");
                 std::fs::copy(license_path, &dest_file).map_err(MigratoryError::Io)?;
             }

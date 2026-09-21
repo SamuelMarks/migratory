@@ -63,18 +63,7 @@ impl Host for LinuxHost {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|_| "1000".to_string());
 
-            let mut export_lines = String::new();
-            export_lines.push_str("# VAGRANT-BEGIN\n");
-
-            for sf in _folders {
-                if sf.folder_type.as_deref() == Some("nfs") && !sf.disabled {
-                    export_lines.push_str(&format!(
-                        "{} *(rw,sync,no_subtree_check,all_squash,anonuid={},anongid={})\n",
-                        sf.host_path, uid, gid
-                    ));
-                }
-            }
-            export_lines.push_str("# VAGRANT-END\n");
+            let export_lines = Self::generate_nfs_exports(_folders, &uid, &gid);
 
             let cmd = format!(
                 "echo '{}' | sudo tee -a /etc/exports > /dev/null",
@@ -111,6 +100,28 @@ impl Host for LinuxHost {
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
+        #[cfg(not(test))]
+        {
+            let conf_block = Self::generate_smb_conf(_folders);
+            let cmd = format!(
+                "echo '{}' | sudo tee -a /etc/samba/smb.conf > /dev/null",
+                conf_block
+            );
+            let _ = Command::new("sh").arg("-c").arg(cmd).status();
+
+            let status = Command::new("sudo")
+                .arg("systemctl")
+                .arg("reload")
+                .arg("smbd")
+                .status()
+                .map_err(MigratoryError::Io)?;
+
+            if !status.success() {
+                return Err(MigratoryError::Generic(
+                    "Failed to reload Samba on Linux host".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -251,6 +262,81 @@ impl LinuxHost {
         }
         caps
     }
+
+    /// Generates the NFS export configuration block for Linux hosts.
+    ///
+    /// Handles folder-specific options (such as mount_options).
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    /// * `uid` - Anonymous user ID.
+    /// * `gid` - Anonymous group ID.
+    ///
+    /// # Returns
+    ///
+    /// Returns the formatted export lines.
+    pub fn generate_nfs_exports(
+        folders: &[crate::config::SyncedFolderConfig],
+        uid: &str,
+        gid: &str,
+    ) -> String {
+        let mut lines = String::new();
+        lines.push_str("# VAGRANT-BEGIN\n");
+
+        for sf in folders {
+            if sf.folder_type.as_deref() == Some("nfs") && !sf.disabled {
+                let default_opts = format!(
+                    "rw,sync,no_subtree_check,all_squash,anonuid={},anongid={}",
+                    uid, gid
+                );
+                let opts = if let Some(custom_opts) = &sf.mount_options
+                    && !custom_opts.is_empty()
+                {
+                    custom_opts.join(",")
+                } else {
+                    default_opts
+                };
+                lines.push_str(&format!("\"{}\" *({})\n", sf.host_path, opts));
+            }
+        }
+        lines.push_str("# VAGRANT-END\n");
+        lines
+    }
+
+    /// Generates Samba share definitions for Linux hosts.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    ///
+    /// # Returns
+    ///
+    /// Returns the Samba configuration block.
+    pub fn generate_smb_conf(folders: &[crate::config::SyncedFolderConfig]) -> String {
+        let mut conf = String::new();
+        conf.push_str("# VAGRANT-BEGIN-SMB\n");
+        for sf in folders {
+            if sf.folder_type.as_deref() == Some("smb") && !sf.disabled {
+                let name = sf
+                    .guest_path
+                    .replace('/', "_")
+                    .trim_start_matches('_')
+                    .to_string();
+                let share_name = if name.is_empty() {
+                    "vagrant".to_string()
+                } else {
+                    name
+                };
+                conf.push_str(&format!(
+                    "[{}]\npath = {}\nbrowsable = yes\nwritable = yes\nguest ok = yes\nread only = no\n\n",
+                    share_name, sf.host_path
+                ));
+            }
+        }
+        conf.push_str("# VAGRANT-END-SMB\n");
+        conf
+    }
 }
 
 #[cfg(test)]
@@ -371,5 +457,62 @@ mod tests {
 
         assert!(caps.contains(&"virtualbox".to_string()));
         assert!(missing_caps.is_empty());
+    }
+
+    #[test]
+    fn test_linux_nfs_and_smb_generation() {
+        let folders = vec![
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/project".to_string(),
+                guest_path: "/vagrant".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: false,
+                mount_options: Some(vec!["rw".to_string(), "no_root_squash".to_string()]),
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/default_nfs".to_string(),
+                guest_path: "/default".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: false,
+                mount_options: None,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/smb_share".to_string(),
+                guest_path: "/shared".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/root_share".to_string(),
+                guest_path: "/".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/disabled".to_string(),
+                guest_path: "/disabled".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: true,
+                ..Default::default()
+            },
+        ];
+
+        let exports = LinuxHost::generate_nfs_exports(&folders, "1000", "1000");
+        assert!(exports.contains("# VAGRANT-BEGIN"));
+        assert!(exports.contains("\"/home/user/project\" *(rw,no_root_squash)"));
+        assert!(exports.contains("\"/home/user/default_nfs\" *(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)"));
+        assert!(!exports.contains("/home/user/disabled"));
+        assert!(exports.contains("# VAGRANT-END"));
+
+        let smb = LinuxHost::generate_smb_conf(&folders);
+        assert!(smb.contains("# VAGRANT-BEGIN-SMB"));
+        assert!(smb.contains("[shared]"));
+        assert!(smb.contains("path = /home/user/smb_share"));
+        assert!(smb.contains("browsable = yes"));
+        assert!(smb.contains("# VAGRANT-END-SMB"));
     }
 }

@@ -422,6 +422,37 @@ impl Provider for VirtualBoxProvider {
         let _ = execute_vboxmanage(&["snapshot", id, "delete", name])?;
         Ok(())
     }
+
+    /// Exports the machine as an OVF appliance to the specified directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_dir` - Directory where `box.ovf` and disk image files are written.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if the export command fails or the machine ID is missing.
+    #[coverage(off)]
+    fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
+        let id = self.require_id()?;
+        let ovf_path = output_dir.join("box.ovf");
+        let ovf_str = ovf_path.to_string_lossy();
+        if cfg!(test) {
+            if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR").is_ok() {
+                return Err(MigratoryError::Generic("Mock VBoxManage error".to_string()));
+            }
+            std::fs::write(&ovf_path, "<ovf/>").map_err(MigratoryError::Io)?;
+            std::fs::write(output_dir.join("box-disk001.vmdk"), "mock vmdk")
+                .map_err(MigratoryError::Io)?;
+            return Ok(());
+        }
+        let _ = execute_vboxmanage(&["export", id, "--output", &ovf_str])?;
+        Ok(())
+    }
 }
 
 impl VirtualBoxProvider {
@@ -1048,6 +1079,7 @@ exit 0",
         let _ = provider.clone_machine("base-id", "vm-2");
 
         let _ = provider.status();
+        let _ = provider.export(temp_dir.path());
 
         unsafe {
             std::env::set_var("PATH", old_path);
@@ -1069,6 +1101,11 @@ exit 0",
         assert!(provider_no_id.destroy().is_err());
         assert!(provider_no_id.suspend().is_err());
         assert!(provider_no_id.resume().is_err());
+        assert!(
+            provider_no_id
+                .export(std::path::Path::new("/dummy"))
+                .is_err()
+        );
         assert!(provider_no_id.check_guest_additions().is_err());
         assert_eq!(
             provider_no_id.status().expect("operation should succeed"),

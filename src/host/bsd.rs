@@ -71,13 +71,7 @@ impl Host for BsdHost {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|_| "1000".to_string());
 
-            let export_line = format!(
-                "# VAGRANT-BEGIN
-/tmp -alldirs -mapall={}:{} 127.0.0.1
-# VAGRANT-END
-",
-                uid, gid
-            );
+            let export_line = Self::generate_nfs_exports(_folders, &uid, &gid);
             let cmd = format!(
                 "echo '{}' | sudo tee -a /etc/exports > /dev/null",
                 export_line
@@ -113,6 +107,28 @@ impl Host for BsdHost {
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
+        #[cfg(not(test))]
+        {
+            let conf_block = Self::generate_smb_conf(_folders);
+            let cmd = format!(
+                "echo '{}' | sudo tee -a /usr/local/etc/smb4.conf > /dev/null",
+                conf_block
+            );
+            let _ = Command::new("sh").arg("-c").arg(cmd).status();
+
+            let status = Command::new("sudo")
+                .arg("service")
+                .arg("samba_server")
+                .arg("reload")
+                .status()
+                .map_err(MigratoryError::Io)?;
+
+            if !status.success() {
+                return Err(MigratoryError::Generic(
+                    "Failed to reload Samba server on BSD host".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -240,6 +256,70 @@ impl BsdHost {
         }
         caps
     }
+
+    /// Generates the NFS export configuration block for BSD hosts.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    /// * `uid` - Anonymous user ID.
+    /// * `gid` - Anonymous group ID.
+    ///
+    /// # Returns
+    ///
+    /// Returns the formatted export lines.
+    pub fn generate_nfs_exports(
+        folders: &[crate::config::SyncedFolderConfig],
+        uid: &str,
+        gid: &str,
+    ) -> String {
+        let mut lines = String::new();
+        lines.push_str("# VAGRANT-BEGIN\n");
+        for sf in folders {
+            if sf.folder_type.as_deref() == Some("nfs") && !sf.disabled {
+                lines.push_str(&format!(
+                    "\"{}\" -alldirs -mapall={}:{} 127.0.0.1\n",
+                    sf.host_path, uid, gid
+                ));
+            }
+        }
+        lines.push_str("# VAGRANT-END\n");
+        lines
+    }
+
+    /// Generates Samba share definitions for BSD hosts.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    ///
+    /// # Returns
+    ///
+    /// Returns the Samba configuration block.
+    pub fn generate_smb_conf(folders: &[crate::config::SyncedFolderConfig]) -> String {
+        let mut conf = String::new();
+        conf.push_str("# VAGRANT-BEGIN-SMB\n");
+        for sf in folders {
+            if sf.folder_type.as_deref() == Some("smb") && !sf.disabled {
+                let name = sf
+                    .guest_path
+                    .replace('/', "_")
+                    .trim_start_matches('_')
+                    .to_string();
+                let share_name = if name.is_empty() {
+                    "vagrant".to_string()
+                } else {
+                    name
+                };
+                conf.push_str(&format!(
+                    "[{}]\npath = {}\nread only = no\nguest ok = yes\n\n",
+                    share_name, sf.host_path
+                ));
+            }
+        }
+        conf.push_str("# VAGRANT-END-SMB\n");
+        conf
+    }
 }
 
 #[cfg(test)]
@@ -299,5 +379,51 @@ mod tests {
 
         let caps = host.capabilities();
         let _ = caps;
+    }
+
+    #[test]
+    fn test_bsd_nfs_and_smb_generation() {
+        let folders = vec![
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/project".to_string(),
+                guest_path: "/vagrant".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/share".to_string(),
+                guest_path: "/shared".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/root_share".to_string(),
+                guest_path: "/".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/disabled".to_string(),
+                guest_path: "/disabled".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: true,
+                ..Default::default()
+            },
+        ];
+
+        let exports = BsdHost::generate_nfs_exports(&folders, "1000", "1000");
+        assert!(exports.contains("# VAGRANT-BEGIN"));
+        assert!(exports.contains("\"/home/user/project\" -alldirs -mapall=1000:1000 127.0.0.1"));
+        assert!(!exports.contains("/home/user/disabled"));
+        assert!(exports.contains("# VAGRANT-END"));
+
+        let smb = BsdHost::generate_smb_conf(&folders);
+        assert!(smb.contains("# VAGRANT-BEGIN-SMB"));
+        assert!(smb.contains("[shared]"));
+        assert!(smb.contains("path = /home/user/share"));
+        assert!(smb.contains("# VAGRANT-END-SMB"));
     }
 }

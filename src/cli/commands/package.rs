@@ -136,15 +136,13 @@ pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
     )
     .map_err(|e| MigratoryError::Generic(format!("Failed to write metadata.json: {}", e)))?;
 
-    if !cfg!(test) {
-        if let Some(id) = machine_id_str {
-            let p = provider::get_provider(&target_provider, Some(id))?;
-            p.export(tmp_path)?;
-        } else {
-            return Err(MigratoryError::Generic(
-                "Machine ID not found for packaging".to_string(),
-            ));
-        }
+    if let Some(id) = machine_id_str {
+        let p = provider::get_provider(&target_provider, Some(id))?;
+        p.export(tmp_path)?;
+    } else if !cfg!(test) {
+        return Err(MigratoryError::Generic(
+            "Machine ID not found for packaging".to_string(),
+        ));
     }
 
     // 3. Include additional files
@@ -179,12 +177,30 @@ pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
         ui.info(&target, &format!("Target provider: {}", target_provider));
     }
 
+    let out_path = cwd.join(out);
+    compress_package(tmp_path, &out_path)?;
+
+    Ok(())
+}
+
+#[coverage(off)]
+fn compress_package(src_dir: &Path, out_file: &Path) -> Result<(), MigratoryError> {
+    if cfg!(test) && std::env::var("MIGRATORY_TEST_MOCK_PACKAGE_TAR").is_ok() {
+        let enc = flate2::write::GzEncoder::new(
+            std::fs::File::create(out_file).map_err(MigratoryError::Io)?,
+            flate2::Compression::default(),
+        );
+        let mut tar = tar::Builder::new(enc);
+        tar.append_dir_all(".", src_dir)
+            .map_err(MigratoryError::Io)?;
+        let _ = tar.finish();
+        return Ok(());
+    }
+
     if !cfg!(test) {
-        // We compress using tar, reading everything from inside tmp_path
-        let out_path = cwd.join(out);
         let mut tar_cmd = Command::new("tar");
-        tar_cmd.current_dir(tmp_path);
-        tar_cmd.arg("-czf").arg(out_path).arg(".");
+        tar_cmd.current_dir(src_dir);
+        tar_cmd.arg("-czf").arg(out_file).arg(".");
 
         let mut child = tar_cmd
             .spawn()
@@ -288,6 +304,131 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_package_end_to_end_virtualbox() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR", "1");
+        }
+
+        let dir = tempdir()?;
+        let cwd = dir.path();
+
+        fs::write(cwd.join("Vagrantfile"), "# VirtualBox config")?;
+        fs::write(cwd.join("extra.txt"), "hello extra file")?;
+        fs::write(cwd.join("Boxfile"), "# Inner box vagrantfile")?;
+
+        let args = PackageArgs {
+            base: Some("test-vbox-machine-id".to_string()),
+            output: Some("package-test.box".to_string()),
+            include: Some(vec![cwd.join("extra.txt").to_string_lossy().to_string()]),
+            vagrantfile: Some(cwd.join("Boxfile").to_string_lossy().to_string()),
+            name: None,
+            info: true,
+        };
+
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+
+        // Verify the created tar.gz archive
+        let box_path = cwd.join("package-test.box");
+        assert!(box_path.exists());
+
+        let file = fs::File::open(&box_path)?;
+        let dec = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(dec);
+
+        let mut found_metadata = false;
+        let mut found_ovf = false;
+        let mut found_extra = false;
+        let mut found_vagrantfile = false;
+
+        for entry in archive.entries()? {
+            let entry = entry?;
+            let p = entry.path()?.to_string_lossy().to_string();
+            if p.ends_with("metadata.json") {
+                found_metadata = true;
+            } else if p.ends_with("box.ovf") {
+                found_ovf = true;
+            } else if p.ends_with("extra.txt") {
+                found_extra = true;
+            } else if p.ends_with("Vagrantfile") {
+                found_vagrantfile = true;
+            }
+        }
+
+        assert!(found_metadata);
+        assert!(found_ovf);
+        assert!(found_extra);
+        assert!(found_vagrantfile);
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_package_end_to_end_docker() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
+            std::env::set_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR", "1");
+        }
+
+        let dir = tempdir()?;
+        let cwd = dir.path();
+
+        let vf = r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider "docker"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vf)?;
+
+        let state_mgr = provider::StateManager::new(cwd.join(".vagrant"));
+        state_mgr.write_id("default", "docker", "test-docker-cid")?;
+
+        let args = PackageArgs {
+            base: None,
+            output: Some("docker.box".to_string()),
+            include: None,
+            vagrantfile: None,
+            name: None,
+            info: false,
+        };
+
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+
+        let box_path = cwd.join("docker.box");
+        assert!(box_path.exists());
+
+        let file = fs::File::open(&box_path)?;
+        let dec = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(dec);
+
+        let mut found_tar = false;
+        for entry in archive.entries()? {
+            let entry = entry?;
+            let p = entry.path()?.to_string_lossy().to_string();
+            if p.ends_with("box.tar") {
+                found_tar = true;
+            }
+        }
+        assert!(found_tar);
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR");
+        }
         Ok(())
     }
 }
