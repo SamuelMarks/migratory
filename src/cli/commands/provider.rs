@@ -145,10 +145,17 @@ pub fn install_provider_with(
             "qemu" => Some("qemu-kvm"),
             _ => None,
         };
-        if let Some(pkg) = pkg
-            && std::path::Path::new("/usr/bin/apt-get").exists()
-        {
-            let _ = installer("sudo", &["apt-get", "install", "-y", pkg]);
+        if let Some(pkg) = pkg {
+            let cmd = std::env::var("MIGRATORY_TEST_LINUX_INSTALL_CMD")
+                .unwrap_or_else(|_| "sudo".to_string());
+            let success = installer(&cmd, &["apt-get", "install", "-y", pkg])
+                .map_err(|e| MigratoryError::Generic(format!("Apt execution failed: {}", e)))?;
+            if !success {
+                return Err(MigratoryError::Generic(format!(
+                    "Apt failed to install provider package '{}'",
+                    pkg
+                )));
+            }
         }
     }
 
@@ -160,7 +167,16 @@ pub fn install_provider_with(
             _ => None,
         };
         if let Some(pkg) = pkg {
-            let _ = installer("winget", &["install", "-e", "--id", pkg]);
+            let cmd = std::env::var("MIGRATORY_TEST_WINDOWS_INSTALL_CMD")
+                .unwrap_or_else(|_| "winget".to_string());
+            let success = installer(&cmd, &["install", "-e", "--id", pkg])
+                .map_err(|e| MigratoryError::Generic(format!("Winget execution failed: {}", e)))?;
+            if !success {
+                return Err(MigratoryError::Generic(format!(
+                    "Winget failed to install provider package '{}'",
+                    pkg
+                )));
+            }
         }
     }
 
@@ -466,6 +482,107 @@ end
             assert!(install_provider("virtualbox").is_err());
             unsafe {
                 std::env::remove_var("MIGRATORY_TEST_BREW_CMD");
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Runner returns io error
+            let err_io = install_provider_with("virtualbox", "", &mut |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "sudo missing",
+                ))
+            });
+            assert!(err_io.is_err());
+
+            // Runner returns false (apt command failed)
+            let err_fail = install_provider_with("virtualbox", "", &mut |_, _| Ok(false));
+            assert!(err_fail.is_err());
+
+            // Runner returns true for all mapped providers
+            assert!(install_provider_with("virtualbox", "", &mut |_, _| Ok(true)).is_ok());
+            assert!(install_provider_with("docker", "", &mut |_, _| Ok(true)).is_ok());
+            assert!(install_provider_with("qemu", "", &mut |_, _| Ok(true)).is_ok());
+
+            // Runner returns true for unmapped provider
+            assert!(install_provider_with("unknown_xyz", "", &mut |_, _| Ok(true)).is_ok());
+
+            // Real install_provider with mock success env var
+            unsafe {
+                std::env::set_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS", "1");
+            }
+            assert!(install_provider("virtualbox").is_ok());
+            unsafe {
+                std::env::remove_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS");
+            }
+
+            // Real install_provider with custom linux command "true" (tests closure execution)
+            unsafe {
+                std::env::set_var("MIGRATORY_TEST_LINUX_INSTALL_CMD", "true");
+            }
+            assert!(install_provider("virtualbox").is_ok());
+
+            // Real install_provider with nonexistent binary (tests ? operator on status())
+            unsafe {
+                std::env::set_var(
+                    "MIGRATORY_TEST_LINUX_INSTALL_CMD",
+                    "nonexistent_binary_12345",
+                );
+            }
+            assert!(install_provider("virtualbox").is_err());
+            unsafe {
+                std::env::remove_var("MIGRATORY_TEST_LINUX_INSTALL_CMD");
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Runner returns io error
+            let err_io = install_provider_with("virtualbox", "", &mut |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "winget missing",
+                ))
+            });
+            assert!(err_io.is_err());
+
+            // Runner returns false (winget command failed)
+            let err_fail = install_provider_with("virtualbox", "", &mut |_, _| Ok(false));
+            assert!(err_fail.is_err());
+
+            // Runner returns true for all mapped providers
+            assert!(install_provider_with("virtualbox", "", &mut |_, _| Ok(true)).is_ok());
+            assert!(install_provider_with("docker", "", &mut |_, _| Ok(true)).is_ok());
+
+            // Runner returns true for unmapped provider
+            assert!(install_provider_with("unknown_xyz", "", &mut |_, _| Ok(true)).is_ok());
+
+            // Real install_provider with mock success env var
+            unsafe {
+                std::env::set_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS", "1");
+            }
+            assert!(install_provider("virtualbox").is_ok());
+            unsafe {
+                std::env::remove_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS");
+            }
+
+            // Real install_provider with custom command
+            unsafe {
+                std::env::set_var("MIGRATORY_TEST_WINDOWS_INSTALL_CMD", "cmd.exe");
+            }
+            let _ = install_provider("virtualbox");
+
+            // Real install_provider with nonexistent binary
+            unsafe {
+                std::env::set_var(
+                    "MIGRATORY_TEST_WINDOWS_INSTALL_CMD",
+                    "nonexistent_binary_12345",
+                );
+            }
+            assert!(install_provider("virtualbox").is_err());
+            unsafe {
+                std::env::remove_var("MIGRATORY_TEST_WINDOWS_INSTALL_CMD");
             }
         }
     }
