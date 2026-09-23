@@ -26,7 +26,7 @@ def get_test_coverage() -> str:
             check=False,
         )
         result = subprocess.run(
-            ["cargo", "llvm-cov"],
+            ["cargo", "llvm-cov", "--", "--test-threads=1"],
             capture_output=True,
             text=True,
             check=False,

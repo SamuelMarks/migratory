@@ -55,7 +55,7 @@ class TestUpdateShields(unittest.TestCase):
             check=False,
         )
         mock_run.assert_any_call(
-            ["cargo", "llvm-cov"],
+            ["cargo", "llvm-cov", "--", "--test-threads=1"],
             capture_output=True,
             text=True,
             check=False,
@@ -95,9 +95,13 @@ class TestUpdateShields(unittest.TestCase):
         )
         self.assertEqual(update_shields.get_doc_coverage(), "98.5%")
 
+    @patch("update_shields.Path.exists")
     @patch("update_shields.subprocess.run")
-    def test_get_doc_coverage_no_total(self, mock_run: MagicMock) -> None:
+    def test_get_doc_coverage_no_total(
+        self, mock_run: MagicMock, mock_exists: MagicMock
+    ) -> None:
         """Test get_doc_coverage when output has no total line."""
+        mock_exists.return_value = False
         mock_result = MagicMock()
         mock_result.stdout = "Header line\nNo matching summary"
         mock_run.return_value = mock_result

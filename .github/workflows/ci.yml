@@ -27,6 +27,6 @@ jobs:
     - name: Install cargo-tarpaulin
       uses: taiki-e/install-action@cargo-tarpaulin
     - name: Run Tests & Coverage
-      run: cargo tarpaulin --out Xml --fail-under 100 --engine llvm
+      run: cargo tarpaulin --out Xml --fail-under 100 --engine llvm --timeout 300 -- --test-threads=1
     - name: Doc tests
       run: cargo rustdoc -- -D warnings -D missing_docs

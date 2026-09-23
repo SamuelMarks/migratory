@@ -53,7 +53,12 @@ impl ShellProvisioner {
 /// Returns a `MigratoryError` if downloading, reading, or writing fails.
 #[coverage(off)]
 fn download_remote_script(url: &str) -> Result<tempfile::NamedTempFile, MigratoryError> {
-    let response = reqwest::blocking::get(url).map_err(|e| {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .build()
+        .map_err(|e| MigratoryError::Generic(format!("Failed to build HTTP client: {}", e)))?;
+    let response = client.get(url).send().map_err(|e| {
         MigratoryError::Generic(format!(
             "Failed to download remote shell script {}: {}",
             url, e
@@ -65,6 +70,15 @@ fn download_remote_script(url: &str) -> Result<tempfile::NamedTempFile, Migrator
     let mut temp = tempfile::NamedTempFile::new().map_err(MigratoryError::Io)?;
     std::io::Write::write_all(&mut temp, content.as_bytes()).map_err(MigratoryError::Io)?;
     Ok(temp)
+}
+
+/// Sleeps briefly to allow the connection to drop during reboot.
+#[coverage(off)]
+fn sleep_for_reboot() {
+    #[cfg(not(test))]
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    #[cfg(test)]
+    std::thread::sleep(std::time::Duration::from_millis(1));
 }
 
 impl Provisioner for ShellProvisioner {
@@ -180,7 +194,7 @@ impl Provisioner for ShellProvisioner {
             let _ = comm.execute("sudo reboot");
             // Wait for it to come back up. We sleep briefly to allow the connection to drop,
             // then wait for SSH/WinRM to become available again.
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            sleep_for_reboot();
             comm.wait_for_ready(std::time::Duration::from_secs(300))?;
         }
         Ok(())
