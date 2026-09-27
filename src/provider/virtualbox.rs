@@ -983,6 +983,15 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
         if std::env::var("MIGRATORY_TEST_MOCK_RUNNING").is_ok() {
             return Ok("VMState=\"running\"\n".to_string());
         }
+        if std::env::var("MIGRATORY_TEST_MOCK_POWEROFF").is_ok() {
+            return Ok("VMState=\"poweroff\"\n".to_string());
+        }
+        if std::env::var("MIGRATORY_TEST_MOCK_ABORTED").is_ok() {
+            return Ok("VMState=\"aborted\"\n".to_string());
+        }
+        if std::env::var("MIGRATORY_TEST_MOCK_SAVED").is_ok() {
+            return Ok("VMState=\"saved\"\n".to_string());
+        }
         if std::env::var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID").is_ok() {
             return Ok("name=\"vm\"\nUUID=\"\"\nUUID=noquotes\nUUID=\"12345678-1234-5678-1234-567812345678\"\n".to_string());
         }

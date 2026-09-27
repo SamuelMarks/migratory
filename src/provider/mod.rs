@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 pub mod docker;
 pub mod hyperv;
+pub mod libvirt;
+pub mod parallels;
 pub mod qemu;
+pub mod utm;
 pub mod virtualbox;
 pub mod vmware;
 
@@ -277,8 +280,13 @@ pub fn get_provider(
         "virtualbox" => Ok(Box::new(virtualbox::VirtualBoxProvider::new(machine_id))),
         "qemu" => Ok(Box::new(qemu::QemuProvider::new(machine_id))),
         "hyperv" => Ok(Box::new(hyperv::HypervProvider::new(machine_id))),
-        "vmware" => Ok(Box::new(vmware::VmwareProvider::new(machine_id))),
+        "vmware" | "vmware_desktop" | "vmware_fusion" | "vmware_workstation" => {
+            Ok(Box::new(vmware::VmwareProvider::new(machine_id)))
+        }
         "docker" => Ok(Box::new(docker::DockerProvider::new(machine_id))),
+        "utm" => Ok(Box::new(utm::UtmProvider::new(machine_id))),
+        "libvirt" => Ok(Box::new(libvirt::LibvirtProvider::new(machine_id))),
+        "parallels" => Ok(Box::new(parallels::ParallelsProvider::new(machine_id))),
         _ => Err(MigratoryError::Generic(format!(
             "Unknown provider: {}",
             name
@@ -738,7 +746,11 @@ mod tests {
         assert!(get_provider("qemu", None).is_ok());
         assert!(get_provider("hyperv", None).is_ok());
         assert!(get_provider("vmware", None).is_ok());
+        assert!(get_provider("vmware_desktop", None).is_ok());
         assert!(get_provider("docker", None).is_ok());
+        assert!(get_provider("utm", None).is_ok());
+        assert!(get_provider("libvirt", None).is_ok());
+        assert!(get_provider("parallels", None).is_ok());
         assert!(get_provider("unknown_provider", None).is_err());
     }
 }

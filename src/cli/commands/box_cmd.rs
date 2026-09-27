@@ -182,8 +182,59 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
                 return Err(MigratoryError::NotFound(format!("Box '{}'", args.name)));
             }
 
-            std::fs::remove_dir_all(&box_dir)?;
-            writeln!(writer, "Box '{}' removed.", args.name)?;
+            if args.all || (args.provider.is_none() && args.box_version.is_none()) {
+                std::fs::remove_dir_all(&box_dir)?;
+                writeln!(writer, "Box '{}' removed.", args.name)?;
+            } else {
+                let mut removed_any = false;
+                for ver_entry in std::fs::read_dir(&box_dir).into_iter().flatten().flatten() {
+                    let version_name = ver_entry.file_name().to_string_lossy().to_string();
+                    if let Some(target_ver) = &args.box_version
+                        && &version_name != target_ver
+                    {
+                        continue;
+                    }
+                    if let Some(target_prov) = &args.provider {
+                        let prov_dir = ver_entry.path().join(target_prov);
+                        if prov_dir.exists() {
+                            let _ = std::fs::remove_dir_all(&prov_dir);
+                            removed_any = true;
+                        }
+                    } else {
+                        let _ = std::fs::remove_dir_all(ver_entry.path());
+                        removed_any = true;
+                    }
+
+                    if ver_entry.path().exists()
+                        && std::fs::read_dir(ver_entry.path())
+                            .into_iter()
+                            .flatten()
+                            .next()
+                            .is_none()
+                    {
+                        let _ = std::fs::remove_dir(ver_entry.path());
+                    }
+                }
+
+                if box_dir.exists()
+                    && std::fs::read_dir(&box_dir)
+                        .into_iter()
+                        .flatten()
+                        .next()
+                        .is_none()
+                {
+                    let _ = std::fs::remove_dir(&box_dir);
+                }
+
+                if !removed_any {
+                    return Err(MigratoryError::NotFound(format!(
+                        "Box '{}' with matching provider/version",
+                        args.name
+                    )));
+                }
+
+                writeln!(writer, "Box '{}' removed.", args.name)?;
+            }
         }
         BoxCommands::Outdated(args) => {
             let manager = BoxManager::new(global_dir);
@@ -573,10 +624,181 @@ pub mod tests {
     #[test]
     fn test_execute_box_remove_write_error() {
         let _guard = ENV_LOCK.lock().expect("operation should succeed");
+        let temp = tempfile::tempdir().expect("operation should succeed");
+        unsafe {
+            std::env::set_var("VAGRANT_HOME", temp.path());
+        }
+        let box_dir = temp.path().join("boxes").join("test-VAGRANTSLASH-box");
+        std::fs::create_dir_all(&box_dir).expect("operation should succeed");
+
         let cmd = BoxCommands::Remove(mock_remove_args());
         let mut out = FailingWriter;
         let result = execute(&cmd, &mut out);
-        let _err = result.expect_err("operation should fail");
+        assert!(result.is_err());
+
+        let box_ver_dir = temp
+            .path()
+            .join("boxes")
+            .join("test-VAGRANTSLASH-box2")
+            .join("1.0.0");
+        std::fs::create_dir_all(box_ver_dir.join("virtualbox")).expect("operation should succeed");
+        let cmd2 = BoxCommands::Remove(BoxRemoveArgs {
+            name: "test/box2".to_string(),
+            provider: Some("virtualbox".to_string()),
+            box_version: None,
+            all: false,
+            force: true,
+            architecture: None,
+            all_providers: false,
+            all_architectures: false,
+        });
+        let mut out2 = FailingWriter;
+        let result2 = execute(&cmd2, &mut out2);
+        assert!(result2.is_err());
+
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+        }
+    }
+
+    #[test]
+    fn test_execute_box_remove_by_provider_and_all() {
+        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+        let temp = tempfile::tempdir().expect("operation should succeed");
+        unsafe {
+            std::env::set_var("VAGRANT_HOME", temp.path());
+        }
+
+        let box_dir = temp
+            .path()
+            .join("boxes")
+            .join("test-VAGRANTSLASH-box")
+            .join("1.0.0");
+        std::fs::create_dir_all(box_dir.join("virtualbox")).expect("operation should succeed");
+        std::fs::create_dir_all(box_dir.join("qemu")).expect("operation should succeed");
+
+        // 1. Remove non-existent provider returns error
+        let cmd_nonexistent_prov = BoxCommands::Remove(BoxRemoveArgs {
+            name: "test/box".to_string(),
+            provider: Some("hyperv".to_string()),
+            box_version: None,
+            all: false,
+            force: true,
+            architecture: None,
+            all_providers: false,
+            all_architectures: false,
+        });
+        let mut out1 = Vec::new();
+        assert!(execute(&cmd_nonexistent_prov, &mut out1).is_err());
+
+        // 2. Remove with version mismatch
+        let cmd_version_mismatch = BoxCommands::Remove(BoxRemoveArgs {
+            name: "test/box".to_string(),
+            provider: Some("virtualbox".to_string()),
+            box_version: Some("9.9.9".to_string()),
+            all: false,
+            force: true,
+            architecture: None,
+            all_providers: false,
+            all_architectures: false,
+        });
+        let mut out2 = Vec::new();
+        assert!(execute(&cmd_version_mismatch, &mut out2).is_err());
+
+        // 3. Remove specific provider virtualbox succeeds
+        let cmd_remove_vbox = BoxCommands::Remove(BoxRemoveArgs {
+            name: "test/box".to_string(),
+            provider: Some("virtualbox".to_string()),
+            box_version: Some("1.0.0".to_string()),
+            all: false,
+            force: true,
+            architecture: None,
+            all_providers: false,
+            all_architectures: false,
+        });
+        let mut out3 = Vec::new();
+        assert!(execute(&cmd_remove_vbox, &mut out3).is_ok());
+        assert!(!box_dir.join("virtualbox").exists());
+        assert!(box_dir.join("qemu").exists());
+
+        // 3b. Remove remaining provider qemu, emptying version dir and box dir
+        let cmd_remove_qemu = BoxCommands::Remove(BoxRemoveArgs {
+            name: "test/box".to_string(),
+            provider: Some("qemu".to_string()),
+            box_version: Some("1.0.0".to_string()),
+            all: false,
+            force: true,
+            architecture: None,
+            all_providers: false,
+            all_architectures: false,
+        });
+        let mut out3b = Vec::new();
+        assert!(execute(&cmd_remove_qemu, &mut out3b).is_ok());
+        assert!(
+            !temp
+                .path()
+                .join("boxes")
+                .join("test-VAGRANTSLASH-box")
+                .exists()
+        );
+
+        // 3c. Recreate with version 2.0.0 and test remove by box_version without provider (lines 204-205)
+        let box_dir_v2 = temp
+            .path()
+            .join("boxes")
+            .join("test-VAGRANTSLASH-box")
+            .join("2.0.0");
+        std::fs::create_dir_all(box_dir_v2.join("hyperv")).expect("operation should succeed");
+        let cmd_remove_version_only = BoxCommands::Remove(BoxRemoveArgs {
+            name: "test/box".to_string(),
+            provider: None,
+            box_version: Some("2.0.0".to_string()),
+            all: false,
+            force: true,
+            architecture: None,
+            all_providers: false,
+            all_architectures: false,
+        });
+        let mut out3c = Vec::new();
+        assert!(execute(&cmd_remove_version_only, &mut out3c).is_ok());
+        assert!(
+            !temp
+                .path()
+                .join("boxes")
+                .join("test-VAGRANTSLASH-box")
+                .exists()
+        );
+
+        // 4. Remove all remaining providers and versions
+        let box_dir_v3 = temp
+            .path()
+            .join("boxes")
+            .join("test-VAGRANTSLASH-box")
+            .join("3.0.0");
+        std::fs::create_dir_all(box_dir_v3.join("utm")).expect("operation should succeed");
+        let cmd_remove_all = BoxCommands::Remove(BoxRemoveArgs {
+            name: "test/box".to_string(),
+            provider: None,
+            box_version: None,
+            all: true,
+            force: true,
+            architecture: None,
+            all_providers: false,
+            all_architectures: false,
+        });
+        let mut out4 = Vec::new();
+        assert!(execute(&cmd_remove_all, &mut out4).is_ok());
+        assert!(
+            !temp
+                .path()
+                .join("boxes")
+                .join("test-VAGRANTSLASH-box")
+                .exists()
+        );
+
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+        }
     }
 
     #[test]

@@ -169,8 +169,11 @@ use tracing_subscriber::EnvFilter;
 ///
 /// Initializes logging via `tracing_subscriber`, parses the command line arguments,
 pub fn run(cli: cli::Cli) -> Result<(), MigratoryError> {
+    migratory::ui::set_machine_readable(cli.machine_readable);
+
     if cli.version {
-        return execute_command(&Commands::Version);
+        println!("Vagrant {}", cli::commands::version::compat_version());
+        return Ok(());
     }
 
     if let Some(cmd) = &cli.command {

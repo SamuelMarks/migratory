@@ -36,6 +36,26 @@ thread_local! {
     pub static MOCK_STDIN: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+static MACHINE_READABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Sets whether global machine-readable CSV output is enabled.
+///
+/// # Arguments
+///
+/// * `enabled` - Boolean flag toggling machine readable output.
+pub fn set_machine_readable(enabled: bool) {
+    MACHINE_READABLE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Checks whether global machine-readable CSV output is enabled.
+///
+/// # Returns
+///
+/// Returns `true` if machine readable output is enabled, `false` otherwise.
+pub fn is_machine_readable() -> bool {
+    MACHINE_READABLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Helper function to read a line from stdin (or mock in tests).
 #[coverage(off)]
 pub fn read_stdin(buf: &mut String) -> std::io::Result<usize> {
@@ -623,5 +643,13 @@ mod tests {
         ui.log_box_info("default", "ubuntu/jammy64", "virtualbox", "1.0.0");
         ui.log_forwarded_port("default", 80, 8080);
         ui.log_error_exit("Vagrant::Errors::MachineNotFound", "Machine not found");
+    }
+
+    #[test]
+    fn test_machine_readable_toggle() {
+        set_machine_readable(true);
+        assert!(is_machine_readable());
+        set_machine_readable(false);
+        assert!(!is_machine_readable());
     }
 }

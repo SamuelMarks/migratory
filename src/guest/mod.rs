@@ -9,7 +9,9 @@ use crate::error::MigratoryError;
 use std::path::Path;
 
 pub mod bsd;
+pub mod darwin;
 pub mod linux;
+pub mod solaris;
 pub mod windows;
 
 /// Core interface for interacting with the VM's OS.
@@ -413,6 +415,14 @@ pub trait Guest {
 /// Returns a `MigratoryError` if no known OS can be detected, or if an
 /// underlying communication error occurs during detection.
 pub fn detect_guest(comm: &dyn Communicator) -> Result<Box<dyn Guest>, MigratoryError> {
+    let darwin = darwin::DarwinGuest;
+    if matches!(darwin.detect(comm), Ok(true)) {
+        return Ok(Box::new(darwin));
+    }
+    let solaris = solaris::SolarisGuest;
+    if matches!(solaris.detect(comm), Ok(true)) {
+        return Ok(Box::new(solaris));
+    }
     let linux = linux::LinuxGuest;
     if matches!(linux.detect(comm), Ok(true)) {
         return Ok(Box::new(linux));
@@ -434,6 +444,8 @@ pub fn detect_guest(comm: &dyn Communicator) -> Result<Box<dyn Guest>, Migratory
 /// Resolves a guest OS implementation, respecting an optional explicit override.
 ///
 /// If `override_name` is Some, it attempts to match common guest names:
+/// - "darwin", "macos", "osx" -> Darwin
+/// - "solaris", "omnios", "illumos", "smartos" -> Solaris
 /// - "linux", "debian", "ubuntu", "centos", "redhat", "fedora", "arch", "alpine", "suse" -> Linux
 /// - "windows" -> Windows
 /// - "bsd", "freebsd", "openbsd", "netbsd" -> BSD
@@ -459,6 +471,10 @@ pub fn resolve_guest(
     if let Some(name) = override_name {
         let lower = name.trim().to_ascii_lowercase();
         match lower.as_str() {
+            "darwin" | "macos" | "osx" => return Ok(Box::new(darwin::DarwinGuest)),
+            "solaris" | "omnios" | "illumos" | "smartos" => {
+                return Ok(Box::new(solaris::SolarisGuest));
+            }
             "linux" | "debian" | "ubuntu" | "centos" | "redhat" | "fedora" | "arch" | "alpine"
             | "suse" => return Ok(Box::new(linux::LinuxGuest)),
             "windows" => return Ok(Box::new(windows::WindowsGuest)),
@@ -486,7 +502,11 @@ mod tests {
                 return Err(MigratoryError::Generic("Force failed".to_string()));
             }
 
-            if command == "uname -s" && self.os == "linux" {
+            if command == "uname -s" && self.os == "darwin" {
+                Ok("Darwin\n".to_string())
+            } else if command == "uname -s" && self.os == "solaris" {
+                Ok("SunOS\n".to_string())
+            } else if command == "uname -s" && self.os == "linux" {
                 Ok("Linux\n".to_string())
             } else if command == "uname -s" && self.os == "bsd" {
                 Ok("FreeBSD\n".to_string())
@@ -524,6 +544,26 @@ mod tests {
         let _ = comm.download("", std::path::Path::new(""));
         let _ = comm.execute_interactive();
         let _ = comm.wait_for_ready(std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_detect_darwin() {
+        let comm = MockComm {
+            os: "darwin".to_string(),
+            error_on_detect: false,
+        };
+        let guest = detect_guest(&comm);
+        assert!(guest.is_ok());
+    }
+
+    #[test]
+    fn test_detect_solaris() {
+        let comm = MockComm {
+            os: "solaris".to_string(),
+            error_on_detect: false,
+        };
+        let guest = detect_guest(&comm);
+        assert!(guest.is_ok());
     }
 
     #[test]
@@ -585,6 +625,12 @@ mod tests {
             os: "unknown".to_string(),
             error_on_detect: false,
         };
+        assert!(resolve_guest(&comm, Some("darwin")).is_ok());
+        assert!(resolve_guest(&comm, Some("macos")).is_ok());
+        assert!(resolve_guest(&comm, Some("osx")).is_ok());
+        assert!(resolve_guest(&comm, Some("solaris")).is_ok());
+        assert!(resolve_guest(&comm, Some("omnios")).is_ok());
+        assert!(resolve_guest(&comm, Some("illumos")).is_ok());
         assert!(resolve_guest(&comm, Some("linux")).is_ok());
         assert!(resolve_guest(&comm, Some("ubuntu")).is_ok());
         assert!(resolve_guest(&comm, Some("windows")).is_ok());

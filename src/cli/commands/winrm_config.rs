@@ -52,22 +52,23 @@ pub fn execute(cwd: &Path, args: &WinrmConfigArgs) -> Result<(), MigratoryError>
         .cloned()
         .unwrap_or_default();
 
-    if let Some(host) = &args.host {
-        println!("Host: {}", host);
+    let host_val = if let Some(host) = &args.host {
+        host.as_str()
     } else {
-        println!("Host: {}", machine_config.winrm.host);
-    }
+        machine_config.winrm.host.as_str()
+    };
 
-    println!("Port: {}", machine_config.winrm.port);
-    println!("User: {}", machine_config.winrm.username);
+    println!("HostName {}", host_val);
+    println!("Port {}", machine_config.winrm.port);
+    println!("User {}", machine_config.winrm.username);
     if let Some(pass) = &machine_config.winrm.password {
-        println!("Password: {}", pass);
+        println!("Password {}", pass);
     }
     println!(
-        "Transport: {}",
+        "Transport {}",
         machine_config.winrm.transport.as_deref().unwrap_or("ntlm")
     );
-    println!("Certificates: managed");
+    println!("Certificates managed");
     Ok(())
 }
 

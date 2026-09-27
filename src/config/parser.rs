@@ -459,10 +459,14 @@ class VagrantConfigMock < BasicMock
   end
   
   def merge_vagrant(global, local)
+    g_plugins = global.plugins.is_a?(Array) ? global.plugins : (global.plugins.nil? ? [] : [global.plugins.to_s])
+    l_plugins = local.plugins.is_a?(Array) ? local.plugins : (local.plugins.nil? ? [] : [local.plugins.to_s])
+    g_sens = global.sensitive.is_a?(Array) ? global.sensitive : (global.sensitive.nil? ? [] : [global.sensitive.to_s])
+    l_sens = local.sensitive.is_a?(Array) ? local.sensitive : (local.sensitive.nil? ? [] : [local.sensitive.to_s])
     {
       "host" => local.host.nil? ? global.host : local.host,
-      "plugins" => (global.plugins + local.plugins).uniq,
-      "sensitive" => (global.sensitive + local.sensitive).uniq
+      "plugins" => (g_plugins + l_plugins).uniq,
+      "sensitive" => (g_sens + l_sens).uniq
     }
   end
   

@@ -35,7 +35,15 @@ pub fn execute(cwd: &Path, args: &StatusArgs) -> Result<(), MigratoryError> {
     let env = config::evaluate_vagrantfile(path_str).unwrap_or_default();
     let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(cwd));
 
-    println!("Current machine states:\n");
+    let is_machine_readable = crate::ui::is_machine_readable();
+    let machine_ui = crate::ui::MachineReadableUi;
+
+    if !is_machine_readable {
+        println!("Current machine states:\n");
+    } else {
+        use crate::ui::Ui;
+        machine_ui.info("", "Current machine states:\n");
+    }
 
     let machines = if env.machines.is_empty() {
         let mut m = std::collections::HashMap::new();
@@ -77,16 +85,38 @@ pub fn execute(cwd: &Path, args: &StatusArgs) -> Result<(), MigratoryError> {
 
         let p = get_provider_or_default(target_provider_name_str, machine_id.clone());
 
-        let state = if machine_id.is_none() {
-            "not created".to_string()
+        let (state_id, state_human) = if machine_id.is_none() {
+            ("not_created".to_string(), "not created".to_string())
         } else {
-            p.status().unwrap_or("unknown".to_string())
+            let st = p.status().unwrap_or("unknown".to_string());
+            let st_lower = st.to_lowercase();
+            let id = if st_lower.starts_with("run") {
+                "running".to_string()
+            } else if st_lower.starts_with("poweroff")
+                || st_lower.starts_with("stop")
+                || st_lower.starts_with("shut")
+            {
+                "poweroff".to_string()
+            } else if st_lower.starts_with("abort") {
+                "aborted".to_string()
+            } else if st_lower.starts_with("save") || st_lower.starts_with("suspend") {
+                "saved".to_string()
+            } else {
+                st_lower.replace(' ', "_")
+            };
+            (id, st)
         };
 
-        println!("{:<25} {} ({})", name, state, target_provider_name);
+        if is_machine_readable {
+            machine_ui.log_state(name, &state_id);
+            machine_ui.log_csv(name, "state-title", &[&state_human]);
+            machine_ui.log_csv(name, "provider-name", &[target_provider_name_str]);
+        } else {
+            println!("{:<25} {} ({})", name, state_human, target_provider_name);
+        }
     }
 
-    if args.name.is_none() {
+    if !is_machine_readable && args.name.is_none() {
         println!(
             "\nThis environment represents multiple VMs. The VMs are all listed\nabove with their current state. For more information about a specific\nVM, run `migratory status NAME`."
         );
@@ -297,6 +327,71 @@ end
 
         unsafe {
             std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+        }
+    }
+
+    #[test]
+    fn test_execute_status_machine_readable() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+
+        let vf_content = r#"
+Vagrant.configure("2") do |config|
+  config.vm.define "web"
+  config.vm.define "db"
+  config.vm.define "other"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vf_content).expect("operation should succeed");
+
+        let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(cwd));
+        state_mgr
+            .write_id("web", "virtualbox", "uuid-web")
+            .expect("operation should succeed");
+
+        crate::ui::set_machine_readable(true);
+
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
+            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
+        }
+
+        let args = StatusArgs { name: None };
+        let res = execute(cwd, &args);
+        assert!(res.is_ok());
+
+        // Test with poweroff mock
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
+            std::env::set_var("MIGRATORY_TEST_MOCK_POWEROFF", "1");
+        }
+        let res_poweroff = execute(cwd, &args);
+        assert!(res_poweroff.is_ok());
+
+        // Test with aborted state
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_POWEROFF");
+            std::env::set_var("MIGRATORY_TEST_MOCK_ABORTED", "1");
+        }
+        let res_aborted = execute(cwd, &args);
+        assert!(res_aborted.is_ok());
+
+        // Test with saved state
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_ABORTED");
+            std::env::set_var("MIGRATORY_TEST_MOCK_SAVED", "1");
+        }
+        let res_saved = execute(cwd, &args);
+        assert!(res_saved.is_ok());
+
+        crate::ui::set_machine_readable(false);
+
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_SAVED");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
         }
     }
 }

@@ -628,11 +628,11 @@ impl BoxManager {
     }
 }
 
-/// Unpacks a `.box` file (tar gzip) to a destination directory.
+/// Unpacks a `.box` file (tar gzip or uncompressed tar) to a destination directory.
 ///
 /// # Arguments
 ///
-/// * `box_path` - The path to the `.box` (tar.gz) file to unpack.
+/// * `box_path` - The path to the `.box` file to unpack.
 /// * `dest_dir` - The path to the directory where the contents should be unpacked.
 ///
 /// # Returns
@@ -640,10 +640,15 @@ impl BoxManager {
 /// Returns `Ok(())` on successful unpacking, or a `MigratoryError` if the file
 /// cannot be read or unpacked.
 pub fn unpack_box(box_path: &Path, dest_dir: &Path) -> Result<(), MigratoryError> {
-    let file = File::open(box_path)?;
-    let tar = GzDecoder::new(file);
+    use std::io::Seek;
+    let mut file = File::open(box_path)?;
+    let tar = GzDecoder::new(&file);
     let mut archive = Archive::new(tar);
-    archive.unpack(dest_dir)?;
+    if archive.unpack(dest_dir).is_err() {
+        let _ = file.rewind();
+        let mut plain_archive = Archive::new(&file);
+        plain_archive.unpack(dest_dir)?;
+    }
     Ok(())
 }
 
@@ -852,6 +857,47 @@ mod tests {
         let file_contents =
             std::fs::read_to_string(dest_dir.join("test.txt")).expect("operation should succeed");
         assert_eq!(file_contents, "hello world");
+    }
+
+    #[test]
+    fn test_unpack_plain_tar_success() {
+        let dir = tempdir().expect("operation should succeed");
+        let box_path = dir.path().join("plain.box");
+        let dest_dir = dir.path().join("dest_plain");
+        std::fs::create_dir(&dest_dir).expect("operation should succeed");
+
+        let file = File::create(&box_path).expect("operation should succeed");
+        {
+            let mut builder = tar::Builder::new(file);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(19);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "metadata.json",
+                    &b"{\"provider\":\"qemu\"}"[..],
+                )
+                .expect("operation should succeed");
+            builder.into_inner().expect("operation should succeed");
+        }
+
+        let result = unpack_box(&box_path, &dest_dir);
+        assert!(result.is_ok());
+
+        let contents = std::fs::read_to_string(dest_dir.join("metadata.json"))
+            .expect("operation should succeed");
+        assert_eq!(contents, "{\"provider\":\"qemu\"}");
+    }
+
+    #[test]
+    fn test_unpack_empty_file() {
+        let dir = tempdir().expect("operation should succeed");
+        let empty_path = dir.path().join("empty.box");
+        File::create(&empty_path).expect("operation should succeed");
+        let dest = dir.path().join("dest_empty");
+        std::fs::create_dir(&dest).expect("operation should succeed");
+        let _ = unpack_box(&empty_path, &dest);
     }
 
     #[test]
