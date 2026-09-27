@@ -216,12 +216,11 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
                     }
                 }
 
-                if box_dir.exists()
-                    && std::fs::read_dir(&box_dir)
-                        .into_iter()
-                        .flatten()
-                        .next()
-                        .is_none()
+                if std::fs::read_dir(&box_dir)
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .is_none()
                 {
                     let _ = std::fs::remove_dir(&box_dir);
                 }
@@ -421,6 +420,7 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
 
 /// Test helpers and synchronization locks for box commands.
 #[cfg(test)]
+#[coverage(off)]
 pub mod tests {
     /// Global lock used to serialize environment variable mutations during tests.
     pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -988,6 +988,7 @@ pub mod tests {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod extra_tests {
     use super::*;
     use crate::cli::*;
@@ -1445,6 +1446,7 @@ mod extra_tests {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod extra_tests2 {
     use super::*;
     use crate::cli::*;
@@ -1783,6 +1785,7 @@ mod extra_tests2 {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod extra_tests3 {
     use super::*;
     use crate::cli::*;
@@ -1856,6 +1859,7 @@ mod extra_tests3 {
     }
 }
 #[cfg(test)]
+#[coverage(off)]
 mod extra_box_cmd_tests {
     use super::*;
     use crate::cli::commands::box_cmd::tests::ENV_LOCK;
@@ -1919,6 +1923,7 @@ mod extra_box_cmd_tests {
     }
 }
 #[cfg(test)]
+#[coverage(off)]
 mod extra_box_cmd_tests_2 {
     use super::*;
     use crate::cli::commands::box_cmd::tests::{ENV_LOCK, FailingWriter};
@@ -1976,6 +1981,7 @@ mod extra_box_cmd_tests_2 {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod missing_coverage_tests {
     use super::tests::*;
     use super::*;
@@ -2259,6 +2265,7 @@ mod missing_coverage_tests {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod final_box_coverage_tests {
     use super::*;
     use crate::cli::commands::box_cmd::tests::{

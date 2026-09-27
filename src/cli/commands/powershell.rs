@@ -426,7 +426,10 @@ mod tests {
     /// Tests fallback when machines map is empty.
     #[test]
     fn test_execute_powershell_empty_machines() {
-        let dir = tempdir().expect("tempdir failed");
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempdir().expect("operation should succeed");
         let cwd = dir.path();
 
         fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")
@@ -512,6 +515,9 @@ end
 
     #[test]
     fn test_execute_powershell_success_elevated_command() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
         let dir = tempdir().expect("tempdir failed");
         let cwd = dir.path();
 
@@ -528,6 +534,9 @@ end
 
     #[test]
     fn test_execute_powershell_success_unelevated_session() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
         let dir = tempdir().expect("tempdir failed");
         let cwd = dir.path();
 
@@ -544,6 +553,9 @@ end
 
     #[test]
     fn test_execute_powershell_with_triggers() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
         let dir = tempdir().expect("tempdir failed");
         let cwd = dir.path();
 
@@ -838,5 +850,21 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_ssh_command_nonexistent_key() {
+        let session = PowerShellSession::new(
+            "default".to_string(),
+            crate::config::MachineConfig::default(),
+            false,
+            Some("Get-Process".to_string()),
+        );
+        let cmd = session.build_ssh_command(Some(Path::new("/nonexistent/key/path/id_rsa")));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(!args.contains(&"-i".to_string()));
     }
 }

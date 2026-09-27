@@ -58,12 +58,33 @@ pub fn execute(cwd: &Path, args: &WinrmConfigArgs) -> Result<(), MigratoryError>
         machine_config.winrm.host.as_str()
     };
 
+    let effective_port = if host_val == "127.0.0.1" {
+        machine_config
+            .vm
+            .networks
+            .iter()
+            .find_map(|net| match net {
+                crate::config::NetworkConfig::ForwardedPort { guest, host, .. }
+                    if *guest == machine_config.winrm.port =>
+                {
+                    Some(*host)
+                }
+                _ => None,
+            })
+            .unwrap_or(machine_config.winrm.port)
+    } else {
+        machine_config.winrm.port
+    };
+
     println!("HostName {}", host_val);
-    println!("Port {}", machine_config.winrm.port);
+    println!("Port {}", effective_port);
     println!("User {}", machine_config.winrm.username);
-    if let Some(pass) = &machine_config.winrm.password {
-        println!("Password {}", pass);
-    }
+    let pass = machine_config
+        .winrm
+        .password
+        .as_deref()
+        .unwrap_or("vagrant");
+    println!("Password {}", pass);
     println!(
         "Transport {}",
         machine_config.winrm.transport.as_deref().unwrap_or("ntlm")
@@ -165,6 +186,54 @@ end
 
         // An empty json or syntax that evaluates to 0 machines
         fs::write(cwd.join("Vagrantfile"), "").expect("operation should succeed");
+
+        let args = WinrmConfigArgs {
+            name: None,
+            host: None,
+        };
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_winrm_config_forwarded_port() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+
+        let ruby = r#"
+Vagrant.configure("2") do |config|
+  config.vm.network "forwarded_port", guest: 80, host: 8080
+  config.vm.network "forwarded_port", guest: 5985, host: 55985, id: "winrm"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), ruby).expect("operation should succeed");
+
+        let args = WinrmConfigArgs {
+            name: None,
+            host: None,
+        };
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_winrm_config_remote_host() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+
+        let ruby = r#"
+Vagrant.configure("2") do |config|
+  config.winrm.host = "10.0.0.5"
+  config.winrm.port = 5986
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), ruby).expect("operation should succeed");
 
         let args = WinrmConfigArgs {
             name: None,

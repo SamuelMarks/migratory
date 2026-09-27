@@ -298,33 +298,42 @@ impl BoxManager {
         Ok(())
     }
 
-    /// Adds a .box file to the global cache.
+    /// Adds a .box file to the global cache with optional architecture specification.
     ///
     /// # Arguments
     ///
-    /// * name - The box name.
-    /// * version - The version string.
-    /// * provider - The provider name.
-    /// * box_file - The local path to the box file.
+    /// * `name` - The box name.
+    /// * `version` - The version string.
+    /// * `provider` - The provider name.
+    /// * `architecture` - Optional target processor architecture.
+    /// * `box_file` - The local path to the box file.
     ///
     /// # Returns
     ///
-    /// Returns Ok(()) on success.
-    pub fn add_box(
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` on IO, permission, decompression, or provider mismatch failure.
+    pub fn add_box_with_arch(
         &self,
         name: &str,
         version: &str,
         provider: &str,
+        architecture: Option<&str>,
         box_file: &Path,
     ) -> Result<(), MigratoryError> {
-        // Replace slashes in name for directory structure, e.g. hashicorp/bionic64 -> hashicorp-VAGRANTSLASH-bionic64
-        // Vagrant uses `-VAGRANTSLASH-` for namespaced boxes.
         let safe_name = name.replace('/', "-VAGRANTSLASH-");
+        let provider_dirname = if let Some(arch) = architecture {
+            format!("{}-{}", provider, arch)
+        } else {
+            provider.to_string()
+        };
         let dest_dir = self
             .global_boxes_dir
             .join(safe_name)
             .join(version)
-            .join(provider);
+            .join(&provider_dirname);
 
         fs::create_dir_all(&dest_dir)?;
 
@@ -334,7 +343,62 @@ impl BoxManager {
                 fs::read_to_string(sig_path).map_err(|e| MigratoryError::Generic(e.to_string()))?;
         }
 
-        unpack_box(box_file, &dest_dir)
+        unpack_box(box_file, &dest_dir)?;
+
+        // Validate and alias provider/architecture in metadata.json if present
+        let metadata_path = dest_dir.join("metadata.json");
+        if let Ok(content) = fs::read_to_string(&metadata_path)
+            && let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            if let Some(box_provider) = val.get("provider").and_then(|p| p.as_str())
+                && box_provider != provider
+            {
+                let is_qemu_libvirt_alias = (box_provider == "libvirt" && provider == "qemu")
+                    || (box_provider == "qemu" && provider == "libvirt");
+                if is_qemu_libvirt_alias {
+                    val["provider"] = serde_json::Value::String(provider.to_string());
+                } else {
+                    return Err(MigratoryError::Generic(format!(
+                        "The box you're attempting to add has provider '{}', but requested provider is '{}'",
+                        box_provider, provider
+                    )));
+                }
+            }
+
+            if let Some(arch) = architecture {
+                val["architecture"] = serde_json::Value::String(arch.to_string());
+            }
+
+            let _ = fs::write(&metadata_path, val.to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Adds a .box file to the global cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The box name.
+    /// * `version` - The version string.
+    /// * `provider` - The provider name.
+    /// * `box_file` - The local path to the box file.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` on IO, permission, decompression, or provider mismatch failure.
+    pub fn add_box(
+        &self,
+        name: &str,
+        version: &str,
+        provider: &str,
+        box_file: &Path,
+    ) -> Result<(), MigratoryError> {
+        self.add_box_with_arch(name, version, provider, None, box_file)
     }
 
     /// Prunes old versions of boxes.
@@ -653,6 +717,7 @@ pub fn unpack_box(box_path: &Path, dest_dir: &Path) -> Result<(), MigratoryError
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use flate2::Compression;
@@ -777,6 +842,134 @@ mod tests {
             .join("virtualbox");
         assert!(expected_dir.exists());
         assert!(expected_dir.join("metadata.json").exists());
+    }
+
+    #[test]
+    fn test_add_box_provider_validation_and_aliasing() {
+        let dir = tempdir().expect("operation should succeed");
+        let manager = BoxManager::new(dir.path());
+
+        // Helper to create a .box with custom metadata.json content
+        let make_box = |filename: &str, content: &[u8]| -> std::path::PathBuf {
+            let p = dir.path().join(filename);
+            let file = File::create(&p).expect("operation should succeed");
+            let mut encoder = GzEncoder::new(file, Compression::default());
+            {
+                let mut builder = tar::Builder::new(&mut encoder);
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, "metadata.json", content)
+                    .expect("operation should succeed");
+                builder.into_inner().expect("operation should succeed");
+            }
+            encoder.finish().expect("operation should succeed");
+            p
+        };
+
+        // 1. Box with provider "virtualbox" added as "virtualbox" (matches)
+        let box_vb = make_box("vb.box", br#"{"provider": "virtualbox"}"#);
+        assert!(
+            manager
+                .add_box("test/match", "1.0.0", "virtualbox", &box_vb)
+                .is_ok()
+        );
+
+        // 2. Box with provider "libvirt" added as "qemu" (aliased and rewritten)
+        let box_libvirt = make_box("libvirt.box", br#"{"provider": "libvirt"}"#);
+        assert!(
+            manager
+                .add_box("test/alias", "1.0.0", "qemu", &box_libvirt)
+                .is_ok()
+        );
+        let qemu_meta_path = dir
+            .path()
+            .join("boxes")
+            .join("test-VAGRANTSLASH-alias")
+            .join("1.0.0")
+            .join("qemu")
+            .join("metadata.json");
+        let qemu_meta_str = fs::read_to_string(qemu_meta_path).expect("operation should succeed");
+        assert!(qemu_meta_str.contains("\"provider\"") && qemu_meta_str.contains("\"qemu\""));
+
+        // 3. Box with provider "qemu" added as "libvirt" (reverse aliased and rewritten)
+        let box_qemu = make_box("qemu.box", br#"{"provider": "qemu"}"#);
+        assert!(
+            manager
+                .add_box("test/rev-alias", "1.0.0", "libvirt", &box_qemu)
+                .is_ok()
+        );
+        // 4. Box with provider "virtualbox" added as "hyperv" (mismatch error)
+        let box_mismatch = make_box("mismatch.box", br#"{"provider": "virtualbox"}"#);
+        let err_res = manager.add_box("test/mismatch", "1.0.0", "hyperv", &box_mismatch);
+        assert!(err_res.is_err());
+        let err_msg = err_res.unwrap_err().to_string();
+        assert!(err_msg.contains("The box you're attempting to add has provider 'virtualbox'"));
+
+        // 5. Box with provider "libvirt" added as "hyperv" (box_provider == "libvirt" but provider != "qemu")
+        let box_libvirt_hyperv = make_box("libvirt_hyperv.box", br#"{"provider": "libvirt"}"#);
+        let err_res2 = manager.add_box(
+            "test/libvirt-hyperv",
+            "1.0.0",
+            "hyperv",
+            &box_libvirt_hyperv,
+        );
+        assert!(err_res2.is_err());
+
+        // 6. Box with invalid non-JSON metadata.json
+        let box_bad_json = make_box("bad_json.box", b"not valid json {{{");
+        assert!(
+            manager
+                .add_box("test/bad-json", "1.0.0", "virtualbox", &box_bad_json)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_add_box_with_arch() {
+        let dir = tempdir().expect("operation should succeed");
+        let manager = BoxManager::new(dir.path());
+
+        let p = dir.path().join("arm64.box");
+        let file = File::create(&p).expect("operation should succeed");
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            let content = br#"{"provider": "utm"}"#;
+            header.set_size(content.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "metadata.json", &content[..])
+                .expect("operation should succeed");
+            builder.into_inner().expect("operation should succeed");
+        }
+        encoder.finish().expect("operation should succeed");
+
+        assert!(
+            manager
+                .add_box_with_arch(
+                    "bento/ubuntu-24.04",
+                    "202410.27.0",
+                    "utm",
+                    Some("arm64"),
+                    &p
+                )
+                .is_ok()
+        );
+
+        let expected_dir = dir
+            .path()
+            .join("boxes")
+            .join("bento-VAGRANTSLASH-ubuntu-24.04")
+            .join("202410.27.0")
+            .join("utm-arm64");
+        assert!(expected_dir.exists());
+
+        let meta_content =
+            fs::read_to_string(expected_dir.join("metadata.json")).expect("read metadata");
+        assert!(meta_content.contains("\"architecture\":\"arm64\""));
     }
 
     #[test]
@@ -1025,6 +1218,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod additional_tests {
     use super::*;
     use crate::ui::ConsoleUi;
@@ -1139,6 +1333,7 @@ mod additional_tests {
     }
 }
 #[cfg(test)]
+#[coverage(off)]
 mod extra_coverage_tests {
     use super::*;
     use httpmock::MockServer;

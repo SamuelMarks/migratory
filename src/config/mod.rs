@@ -11,6 +11,304 @@ use std::collections::HashMap;
 pub mod in_process;
 /// Module defining the embedded ruby parser logic.
 pub mod parser;
+
+/// Machine processor architecture.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Architecture {
+    /// 64-bit x86 architecture (x86_64 / amd64).
+    Amd64,
+    /// 64-bit ARM architecture (aarch64 / arm64).
+    Arm64,
+    /// Unknown or custom architecture.
+    Unknown(String),
+}
+
+impl Architecture {
+    /// Parses an architecture string into an [`Architecture`] variant.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The architecture name string.
+    ///
+    /// # Returns
+    ///
+    /// Returns the parsed [`Architecture`].
+    pub fn from_str_lenient(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "x86_64" | "amd64" | "x64" => Self::Amd64,
+            "aarch64" | "arm64" => Self::Arm64,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    /// Returns the canonical string slice representation.
+    ///
+    /// # Returns
+    ///
+    /// String slice of the architecture name.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Amd64 => "amd64",
+            Self::Arm64 => "arm64",
+            Self::Unknown(s) => s.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for Architecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Supported virtual machine guest operating system types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum GuestKind {
+    /// Linux distributions (Ubuntu, Debian, RHEL, Fedora, etc.).
+    Linux,
+    /// macOS / Darwin.
+    Darwin,
+    /// Solaris and illumos-derived systems (e.g. OmniOS).
+    Solaris,
+    /// Microsoft Windows.
+    Windows,
+    /// BSD systems (FreeBSD, OpenBSD, NetBSD).
+    Bsd,
+}
+
+impl GuestKind {
+    /// Parses a guest identifier string into a [`GuestKind`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The guest operating system name or symbol.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(GuestKind)` if recognized, or `None`.
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        let clean = s.trim_start_matches(':').to_ascii_lowercase();
+        match clean.as_str() {
+            "linux" | "ubuntu" | "debian" | "centos" | "fedora" | "rhel" | "arch" | "alpine" => {
+                Some(Self::Linux)
+            }
+            "darwin" | "macos" | "osx" => Some(Self::Darwin),
+            "solaris" | "illumos" | "omnios" => Some(Self::Solaris),
+            "windows" => Some(Self::Windows),
+            "bsd" | "freebsd" | "openbsd" | "netbsd" => Some(Self::Bsd),
+            _ => None,
+        }
+    }
+
+    /// Returns canonical guest name slice.
+    ///
+    /// # Returns
+    ///
+    /// String slice representing the guest OS name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Darwin => "darwin",
+            Self::Solaris => "solaris",
+            Self::Windows => "windows",
+            Self::Bsd => "bsd",
+        }
+    }
+}
+
+impl std::fmt::Display for GuestKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Supported communicator transport protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CommunicatorKind {
+    /// SSH communicator.
+    Ssh,
+    /// WinRM communicator.
+    Winrm,
+    /// Docker exec communicator.
+    Docker,
+}
+
+impl CommunicatorKind {
+    /// Parses a communicator identifier string into a [`CommunicatorKind`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Communicator name string.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(CommunicatorKind)` if recognized, or `None`.
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        let clean = s.trim_start_matches(':').to_ascii_lowercase();
+        match clean.as_str() {
+            "ssh" => Some(Self::Ssh),
+            "winrm" => Some(Self::Winrm),
+            "docker" => Some(Self::Docker),
+            _ => None,
+        }
+    }
+
+    /// Returns canonical communicator name slice.
+    ///
+    /// # Returns
+    ///
+    /// String slice representing the communicator protocol.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Winrm => "winrm",
+            Self::Docker => "docker",
+        }
+    }
+}
+
+impl std::fmt::Display for CommunicatorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Supported hypervisor and container virtualization providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ProviderKind {
+    /// UTM provider (Apple Silicon / macOS).
+    Utm,
+    /// QEMU provider.
+    Qemu,
+    /// Oracle VirtualBox provider.
+    VirtualBox,
+    /// VMware Desktop / Fusion / Workstation provider.
+    Vmware,
+    /// Parallels Desktop provider.
+    Parallels,
+    /// Libvirt (KVM / QEMU) provider.
+    Libvirt,
+    /// Microsoft Hyper-V provider.
+    Hyperv,
+    /// Docker container provider.
+    Docker,
+}
+
+impl ProviderKind {
+    /// Parses a provider identifier string into a [`ProviderKind`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Provider name string or symbol.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(ProviderKind)` if recognized, or `None`.
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        let clean = s.trim_start_matches(':').to_ascii_lowercase();
+        match clean.as_str() {
+            "utm" => Some(Self::Utm),
+            "qemu" => Some(Self::Qemu),
+            "virtualbox" | "vbox" => Some(Self::VirtualBox),
+            "vmware" | "vmware_desktop" | "vmware_fusion" | "vmware_workstation" => {
+                Some(Self::Vmware)
+            }
+            "parallels" => Some(Self::Parallels),
+            "libvirt" => Some(Self::Libvirt),
+            "hyperv" | "hyper_v" => Some(Self::Hyperv),
+            "docker" => Some(Self::Docker),
+            _ => None,
+        }
+    }
+
+    /// Returns canonical provider name slice.
+    ///
+    /// # Returns
+    ///
+    /// String slice representing the canonical provider name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Utm => "utm",
+            Self::Qemu => "qemu",
+            Self::VirtualBox => "virtualbox",
+            Self::Vmware => "vmware_desktop",
+            Self::Parallels => "parallels",
+            Self::Libvirt => "libvirt",
+            Self::Hyperv => "hyperv",
+            Self::Docker => "docker",
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Synced folder backend mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SyncedFolderType {
+    /// Disabled synced folder.
+    Disabled,
+    /// Rsync one-way synchronization.
+    Rsync,
+    /// VirtioFS / VirtFS shared filesystem.
+    Virtiofs,
+    /// SMB / CIFS network share.
+    Smb,
+    /// VirtualBox Shared Folders (vboxsf).
+    VirtualBox,
+    /// Network File System (NFS).
+    Nfs,
+}
+
+impl SyncedFolderType {
+    /// Parses a synced folder type string into a [`SyncedFolderType`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Synced folder type identifier.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(SyncedFolderType)` if recognized, or `None`.
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        let clean = s.trim_start_matches(':').to_ascii_lowercase();
+        match clean.as_str() {
+            "disabled" => Some(Self::Disabled),
+            "rsync" => Some(Self::Rsync),
+            "virtiofs" | "virtfs" => Some(Self::Virtiofs),
+            "smb" => Some(Self::Smb),
+            "virtualbox" | "vbox" | "vboxsf" => Some(Self::VirtualBox),
+            "nfs" => Some(Self::Nfs),
+            _ => None,
+        }
+    }
+
+    /// Returns canonical synced folder type string slice.
+    ///
+    /// # Returns
+    ///
+    /// String slice representing the synced folder type.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Rsync => "rsync",
+            Self::Virtiofs => "virtiofs",
+            Self::Smb => "smb",
+            Self::VirtualBox => "virtualbox",
+            Self::Nfs => "nfs",
+        }
+    }
+}
+
+impl std::fmt::Display for SyncedFolderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Global Vagrant configuration.
 ///
 /// Contains settings that apply globally to the Vagrant environment, such as
@@ -1235,6 +1533,7 @@ pub fn execute_triggers(
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::communicator::Communicator;
@@ -1657,6 +1956,13 @@ mod tests {
         }
         assert_eq!(get_vagrant_home(), home_dir.join(".vagrant.d"));
 
+        // Test with whitespace HOME
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+            std::env::set_var("HOME", "   ");
+        }
+        assert_eq!(get_vagrant_home(), std::path::PathBuf::from(".vagrant.d"));
+
         // Test with empty VAGRANT_HOME and empty HOME
         unsafe {
             std::env::remove_var("VAGRANT_HOME");
@@ -1850,6 +2156,9 @@ mod tests {
         // 13. Single slash (starts and ends with / but len < 2), invalid regex, and default on non-empty map
         let slash_res = resolve_target_machines(&plain, Some("/"));
         assert!(slash_res.is_err());
+        let starts_with_slash_only =
+            resolve_target_machines(&plain, Some("/not_ending_with_slash"));
+        assert!(starts_with_slash_only.is_err());
         let bad_regex = resolve_target_machines(&plain, Some("/[unclosed/"));
         assert!(bad_regex.is_err());
         let def_non_empty = resolve_target_machines(&plain, Some("default"));
@@ -1942,6 +2251,16 @@ mod tests {
             .expect("operation should succeed");
         assert_eq!(ghost_sorted, vec!["ghost".to_string()]);
 
+        // Self-dependent machine (dep == t)
+        let mut self_dep_machines = HashMap::new();
+        let mut self_node = MachineConfig::default();
+        self_node.depends_on = vec!["self".to_string()];
+        self_dep_machines.insert("self".to_string(), self_node);
+        let self_sorted =
+            sort_machines_by_dependencies(&["self".to_string()], &self_dep_machines, false)
+                .expect("operation should succeed");
+        assert_eq!(self_sorted, vec!["self".to_string()]);
+
         // Diamond dependency
         let mut diamond = HashMap::new();
         let a = MachineConfig::default();
@@ -1988,6 +2307,9 @@ mod tests {
         let files_missing =
             resolve_vagrantfile_hierarchy_with_cli(&project_dir, None, Some(&non_existent));
         assert!(!files_missing.contains(&non_existent));
+
+        let files_none = resolve_vagrantfile_hierarchy_with_cli(&project_dir, None, None);
+        assert!(!files_none.contains(&cli_vf));
     }
 
     #[test]
@@ -2293,5 +2615,189 @@ mod tests {
         let merged_none = merge_environment_configs(&base_for_none, &over_for_none);
         assert_eq!(merged_none.machines["m"].ssh.guest_port, Some(22));
         assert_eq!(merged_none.machines["m"].winrm.guest_port, Some(5985));
+    }
+
+    #[test]
+    fn test_strongly_typed_enums() {
+        // Architecture
+        assert_eq!(Architecture::from_str_lenient("amd64"), Architecture::Amd64);
+        assert_eq!(
+            Architecture::from_str_lenient("x86_64"),
+            Architecture::Amd64
+        );
+        assert_eq!(Architecture::from_str_lenient("x64"), Architecture::Amd64);
+        assert_eq!(Architecture::from_str_lenient("arm64"), Architecture::Arm64);
+        assert_eq!(
+            Architecture::from_str_lenient("aarch64"),
+            Architecture::Arm64
+        );
+        assert_eq!(
+            Architecture::from_str_lenient("riscv64"),
+            Architecture::Unknown("riscv64".to_string())
+        );
+        assert_eq!(Architecture::Amd64.as_str(), "amd64");
+        assert_eq!(Architecture::Arm64.as_str(), "arm64");
+        assert_eq!(
+            Architecture::Unknown("riscv64".to_string()).as_str(),
+            "riscv64"
+        );
+        assert_eq!(format!("{}", Architecture::Amd64), "amd64");
+        assert_eq!(format!("{}", Architecture::Arm64), "arm64");
+        assert_eq!(
+            format!("{}", Architecture::Unknown("mips".to_string())),
+            "mips"
+        );
+
+        // GuestKind
+        assert_eq!(GuestKind::from_str_lenient("linux"), Some(GuestKind::Linux));
+        assert_eq!(
+            GuestKind::from_str_lenient(":ubuntu"),
+            Some(GuestKind::Linux)
+        );
+        assert_eq!(
+            GuestKind::from_str_lenient("darwin"),
+            Some(GuestKind::Darwin)
+        );
+        assert_eq!(
+            GuestKind::from_str_lenient(":macos"),
+            Some(GuestKind::Darwin)
+        );
+        assert_eq!(
+            GuestKind::from_str_lenient("solaris"),
+            Some(GuestKind::Solaris)
+        );
+        assert_eq!(
+            GuestKind::from_str_lenient(":omnios"),
+            Some(GuestKind::Solaris)
+        );
+        assert_eq!(
+            GuestKind::from_str_lenient("windows"),
+            Some(GuestKind::Windows)
+        );
+        assert_eq!(
+            GuestKind::from_str_lenient(":freebsd"),
+            Some(GuestKind::Bsd)
+        );
+        assert_eq!(GuestKind::from_str_lenient("unknown_os"), None);
+        assert_eq!(GuestKind::Linux.as_str(), "linux");
+        assert_eq!(GuestKind::Darwin.as_str(), "darwin");
+        assert_eq!(GuestKind::Solaris.as_str(), "solaris");
+        assert_eq!(GuestKind::Windows.as_str(), "windows");
+        assert_eq!(GuestKind::Bsd.as_str(), "bsd");
+        assert_eq!(format!("{}", GuestKind::Linux), "linux");
+
+        // CommunicatorKind
+        assert_eq!(
+            CommunicatorKind::from_str_lenient("ssh"),
+            Some(CommunicatorKind::Ssh)
+        );
+        assert_eq!(
+            CommunicatorKind::from_str_lenient(":winrm"),
+            Some(CommunicatorKind::Winrm)
+        );
+        assert_eq!(
+            CommunicatorKind::from_str_lenient("docker"),
+            Some(CommunicatorKind::Docker)
+        );
+        assert_eq!(CommunicatorKind::from_str_lenient("telnet"), None);
+        assert_eq!(CommunicatorKind::Ssh.as_str(), "ssh");
+        assert_eq!(CommunicatorKind::Winrm.as_str(), "winrm");
+        assert_eq!(CommunicatorKind::Docker.as_str(), "docker");
+        assert_eq!(format!("{}", CommunicatorKind::Ssh), "ssh");
+
+        // ProviderKind
+        assert_eq!(
+            ProviderKind::from_str_lenient("utm"),
+            Some(ProviderKind::Utm)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient(":qemu"),
+            Some(ProviderKind::Qemu)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient("virtualbox"),
+            Some(ProviderKind::VirtualBox)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient("vbox"),
+            Some(ProviderKind::VirtualBox)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient(":vmware_desktop"),
+            Some(ProviderKind::Vmware)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient("parallels"),
+            Some(ProviderKind::Parallels)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient(":libvirt"),
+            Some(ProviderKind::Libvirt)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient("hyperv"),
+            Some(ProviderKind::Hyperv)
+        );
+        assert_eq!(
+            ProviderKind::from_str_lenient(":docker"),
+            Some(ProviderKind::Docker)
+        );
+        assert_eq!(ProviderKind::from_str_lenient("bhyve"), None);
+        assert_eq!(ProviderKind::Utm.as_str(), "utm");
+        assert_eq!(ProviderKind::Qemu.as_str(), "qemu");
+        assert_eq!(ProviderKind::VirtualBox.as_str(), "virtualbox");
+        assert_eq!(ProviderKind::Vmware.as_str(), "vmware_desktop");
+        assert_eq!(ProviderKind::Parallels.as_str(), "parallels");
+        assert_eq!(ProviderKind::Libvirt.as_str(), "libvirt");
+        assert_eq!(ProviderKind::Hyperv.as_str(), "hyperv");
+        assert_eq!(ProviderKind::Docker.as_str(), "docker");
+        assert_eq!(format!("{}", ProviderKind::Utm), "utm");
+
+        // SyncedFolderType
+        assert_eq!(
+            SyncedFolderType::from_str_lenient("disabled"),
+            Some(SyncedFolderType::Disabled)
+        );
+        assert_eq!(
+            SyncedFolderType::from_str_lenient(":rsync"),
+            Some(SyncedFolderType::Rsync)
+        );
+        assert_eq!(
+            SyncedFolderType::from_str_lenient("virtiofs"),
+            Some(SyncedFolderType::Virtiofs)
+        );
+        assert_eq!(
+            SyncedFolderType::from_str_lenient("virtfs"),
+            Some(SyncedFolderType::Virtiofs)
+        );
+        assert_eq!(
+            SyncedFolderType::from_str_lenient(":smb"),
+            Some(SyncedFolderType::Smb)
+        );
+        assert_eq!(
+            SyncedFolderType::from_str_lenient("virtualbox"),
+            Some(SyncedFolderType::VirtualBox)
+        );
+        assert_eq!(
+            SyncedFolderType::from_str_lenient(":nfs"),
+            Some(SyncedFolderType::Nfs)
+        );
+        assert_eq!(SyncedFolderType::from_str_lenient("sshfs"), None);
+        assert_eq!(SyncedFolderType::Disabled.as_str(), "disabled");
+        assert_eq!(SyncedFolderType::Rsync.as_str(), "rsync");
+        assert_eq!(SyncedFolderType::Virtiofs.as_str(), "virtiofs");
+        assert_eq!(SyncedFolderType::Smb.as_str(), "smb");
+        assert_eq!(SyncedFolderType::VirtualBox.as_str(), "virtualbox");
+        assert_eq!(SyncedFolderType::Nfs.as_str(), "nfs");
+        assert_eq!(format!("{}", SyncedFolderType::Rsync), "rsync");
+
+        // Serde roundtrip checks
+        let json_arch = serde_json::to_string(&Architecture::Arm64).expect("serialize arch");
+        let de_arch: Architecture = serde_json::from_str(&json_arch).expect("deserialize arch");
+        assert_eq!(de_arch, Architecture::Arm64);
+
+        let json_prov = serde_json::to_string(&ProviderKind::Utm).expect("serialize prov");
+        let de_prov: ProviderKind = serde_json::from_str(&json_prov).expect("deserialize prov");
+        assert_eq!(de_prov, ProviderKind::Utm);
     }
 }

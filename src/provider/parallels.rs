@@ -250,7 +250,6 @@ impl Provider for ParallelsProvider {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if let Some(name) = parts.last()
                 && !name.starts_with('{')
-                && !name.is_empty()
             {
                 list.push((*name).to_string());
             }

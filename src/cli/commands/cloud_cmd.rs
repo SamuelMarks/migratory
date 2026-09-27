@@ -47,11 +47,40 @@ pub fn execute(cmd: &CloudCommands, writer: &mut dyn Write) -> Result<(), Migrat
                 args.short_description.as_deref(),
             )?;
             client.create_version(box_name, version, args.version_description.as_deref())?;
-            client.create_provider(box_name, version, provider)?;
+
+            let default_arch = if args.default_architecture {
+                Some(true)
+            } else if args.no_default_architecture {
+                Some(false)
+            } else {
+                None
+            };
+
+            client.create_provider(
+                box_name,
+                version,
+                provider,
+                args.architecture.as_deref(),
+                default_arch,
+            )?;
+
+            if args.checksum.is_some() || args.checksum_type.is_some() {
+                client.update_provider(
+                    box_name,
+                    version,
+                    provider,
+                    args.checksum.as_deref(),
+                    args.checksum_type.as_deref(),
+                )?;
+            }
 
             if let Some(file_path) = &args.file_path {
                 let upload_url = client.get_upload_url(box_name, version, provider)?;
                 client.upload_file(&upload_url, std::path::Path::new(file_path))?;
+            }
+
+            if args.release {
+                client.release_version(box_name, version)?;
             }
 
             writeln!(writer, "Box published successfully!")?;
@@ -156,7 +185,7 @@ fn execute_provider(
             let name = args.name.as_deref().unwrap_or("");
             let version = args.version.as_deref().unwrap_or("");
             let provider = args.provider.as_deref().unwrap_or("");
-            client.create_provider(name, version, provider)?;
+            client.create_provider(name, version, provider, None, None)?;
             writeln!(writer, "Provider created successfully.")?;
         }
         CloudProviderCommands::Delete(args) => {
@@ -236,6 +265,7 @@ fn execute_version(
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use httpmock::prelude::*;
@@ -2124,5 +2154,123 @@ mod extra_cloud_cmd_coverage_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_execute_cloud_publish_full_features() {
+        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        let server = MockServer::start();
+        unsafe {
+            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
+            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
+        }
+
+        server.mock(|when, then| {
+            when.method(POST).path("/api/v2/boxes");
+            then.status(200);
+        });
+        server.mock(|when, then| {
+            when.method(POST).path("/api/v2/boxes/test/box/versions");
+            then.status(200);
+        });
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v2/boxes/test/box/versions/1.0.0/providers");
+            then.status(200);
+        });
+        server.mock(|when, then| {
+            when.method(PUT)
+                .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox");
+            then.status(200);
+        });
+        server.mock(|when, then| {
+            when.method(PUT)
+                .path("/api/v2/boxes/test/box/versions/1.0.0/release");
+            then.status(200);
+        });
+
+        let mut args = tests::mock_publish_args();
+        args.architecture = Some("arm64".to_string());
+        args.default_architecture = true;
+        args.checksum = Some("sha256sum".to_string());
+        args.checksum_type = Some("sha256".to_string());
+        args.release = true;
+
+        let mut out = Vec::new();
+        assert!(execute(&CloudCommands::Publish(args), &mut out).is_ok());
+
+        // Test with no_default_architecture
+        let mut args_no_def = tests::mock_publish_args();
+        args_no_def.no_default_architecture = true;
+        let mut out2 = Vec::new();
+        assert!(execute(&CloudCommands::Publish(args_no_def), &mut out2).is_ok());
+        let mut args_checksum_only = tests::mock_publish_args();
+        args_checksum_only.checksum = Some("sha256sum".to_string());
+        let mut args_type_only = tests::mock_publish_args();
+        args_type_only.checksum_type = Some("sha256".to_string());
+        let mut out_type = Vec::new();
+        assert!(execute(&CloudCommands::Publish(args_type_only), &mut out_type).is_ok());
+        let mut out_cs = Vec::new();
+        assert!(execute(&CloudCommands::Publish(args_checksum_only), &mut out_cs).is_ok());
+
+        // Test update_provider failure
+        let server_err = MockServer::start();
+        unsafe {
+            std::env::set_var("VAGRANT_CLOUD_URL", server_err.url("/api/v2"));
+        }
+        server_err.mock(|when, then| {
+            when.method(POST).path("/api/v2/boxes");
+            then.status(200);
+        });
+        server_err.mock(|when, then| {
+            when.method(POST).path("/api/v2/boxes/test/box/versions");
+            then.status(200);
+        });
+        server_err.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v2/boxes/test/box/versions/1.0.0/providers");
+            then.status(200);
+        });
+        server_err.mock(|when, then| {
+            when.method(PUT)
+                .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox");
+            then.status(500);
+        });
+
+        let mut args_err = tests::mock_publish_args();
+        args_err.checksum = Some("sum".to_string());
+        let mut out3 = Vec::new();
+        assert!(execute(&CloudCommands::Publish(args_err), &mut out3).is_err());
+
+        // Test release_version failure
+        let server_rel_err = MockServer::start();
+        unsafe {
+            std::env::set_var("VAGRANT_CLOUD_URL", server_rel_err.url("/api/v2"));
+        }
+        server_rel_err.mock(|when, then| {
+            when.method(POST).path("/api/v2/boxes");
+            then.status(200);
+        });
+        server_rel_err.mock(|when, then| {
+            when.method(POST).path("/api/v2/boxes/test/box/versions");
+            then.status(200);
+        });
+        server_rel_err.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v2/boxes/test/box/versions/1.0.0/providers");
+            then.status(200);
+        });
+        server_rel_err.mock(|when, then| {
+            when.method(PUT)
+                .path("/api/v2/boxes/test/box/versions/1.0.0/release");
+            then.status(500);
+        });
+
+        let mut args_rel_err = tests::mock_publish_args();
+        args_rel_err.release = true;
+        let mut out4 = Vec::new();
+        assert!(execute(&CloudCommands::Publish(args_rel_err), &mut out4).is_err());
     }
 }

@@ -77,6 +77,25 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
             .unwrap_or_else(|| "virtualbox".to_string());
         let _ = state_mgr.read_id(target, &target_provider)?;
 
+        let effective_port = if machine.ssh.host == "127.0.0.1" {
+            let target_guest_port = machine.ssh.guest_port.unwrap_or(22);
+            machine
+                .vm
+                .networks
+                .iter()
+                .find_map(|net| match net {
+                    crate::config::NetworkConfig::ForwardedPort { guest, host, .. }
+                        if *guest == target_guest_port =>
+                    {
+                        Some(*host)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(machine.ssh.port)
+        } else {
+            machine.ssh.port
+        };
+
         let priv_key = if let Some(p) = &machine.ssh.private_key_path {
             p.clone()
         } else {
@@ -88,6 +107,11 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
                 .join("private_key");
             if provider_key.exists() {
                 provider_key.to_string_lossy().to_string()
+            } else if !machine.ssh.insert_key {
+                let insecure_key = crate::communicator::ssh::ensure_insecure_private_key(
+                    &crate::config::get_vagrant_home(),
+                )?;
+                insecure_key.to_string_lossy().to_string()
             } else {
                 ensure_keys(cwd, target)?
             }
@@ -99,7 +123,7 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
         println!("Host {}", host_alias);
         println!("  HostName {}", machine.ssh.host);
         println!("  User {}", machine.ssh.username);
-        println!("  Port {}", machine.ssh.port);
+        println!("  Port {}", effective_port);
         println!("  UserKnownHostsFile /dev/null");
         println!("  StrictHostKeyChecking no");
         println!("  PasswordAuthentication no");
@@ -371,5 +395,83 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_ssh_config_insert_key_false() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.ssh.insert_key = false
+  config.vm.network "forwarded_port", guest: 80, host: 8080
+  config.vm.network "forwarded_port", guest: 22, host: 2222, id: "ssh"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+
+        let args = SshConfigArgs {
+            name: None,
+            host: None,
+        };
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_ssh_config_remote_host() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.ssh.host = "192.168.122.100"
+  config.ssh.port = 22
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+
+        let args = SshConfigArgs {
+            name: None,
+            host: None,
+        };
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_execute_ssh_config_insecure_key_err() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("lock failed");
+        let dir = tempdir().expect("operation should succeed");
+        let cwd = dir.path();
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.ssh.insert_key = false
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+
+        let blocker = dir.path().join("blocker_file");
+        fs::write(&blocker, "blocking").expect("operation should succeed");
+        unsafe {
+            std::env::set_var("VAGRANT_HOME", blocker.join("sub"));
+        }
+
+        let args = SshConfigArgs {
+            name: None,
+            host: None,
+        };
+        let result = execute(cwd, &args);
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+        }
+        assert!(result.is_err());
     }
 }

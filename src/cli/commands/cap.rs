@@ -353,6 +353,7 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use std::fs;

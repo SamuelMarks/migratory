@@ -110,6 +110,7 @@ fn execute_utmctl_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryErr
             if std::env::var("MIGRATORY_TEST_MOCK_UTMCTL_SNAPSHOT_LIST").is_ok() {
                 return Ok("test-vm-snapshot-snap1 (started)
 test-vm-snapshot-snap2 (stopped)
+test-vm-snapshot- (stopped)
 other-vm (stopped)
 "
                 .to_string());

@@ -197,3 +197,106 @@ fn test_kitchen_lifecycle_flow() -> Result<(), migratory::error::MigratoryError>
 
     Ok(())
 }
+
+#[test]
+fn test_bento_templates_evaluation() -> Result<(), migratory::error::MigratoryError> {
+    // 1. Bento macOS UTM template
+    let macos_utm = r#"
+Vagrant.configure(2) do |config|
+  config.vm.guest = :darwin
+  config.vm.communicator = "ssh"
+  config.ssh.username = "vagrant"
+  config.ssh.password = "vagrant"
+  config.ssh.insert_key = false
+  config.vm.synced_folder ".", "/vagrant", type: "rsync"
+  config.vm.provider "utm" do |utm|
+    utm.cpus = 4
+    utm.memory = 4096
+    utm.check_guest_additions = false
+    utm.directory_share_mode = "virtFS"
+  end
+end
+"#;
+    let config = migratory::config::in_process::evaluate_in_process(macos_utm)?;
+    let default_machine = config.machines.get("default").ok_or_else(|| {
+        migratory::error::MigratoryError::NotFound("default machine missing".to_string())
+    })?;
+    assert_eq!(default_machine.ssh.username, "vagrant");
+    assert!(!default_machine.ssh.insert_key);
+    assert_eq!(default_machine.vm.synced_folders.len(), 1);
+    assert_eq!(
+        default_machine.vm.synced_folders[0].folder_type.as_deref(),
+        Some("rsync")
+    );
+    let utm_provider = default_machine
+        .vm
+        .providers
+        .iter()
+        .find(|p| p.name == "utm")
+        .ok_or_else(|| {
+            migratory::error::MigratoryError::NotFound("utm provider missing".to_string())
+        })?;
+    assert_eq!(
+        utm_provider.options.get("cpus").map(|s| s.as_str()),
+        Some("4")
+    );
+    assert_eq!(
+        utm_provider.options.get("memory").map(|s| s.as_str()),
+        Some("4096")
+    );
+    assert_eq!(
+        utm_provider
+            .options
+            .get("directory_share_mode")
+            .map(|s| s.as_str()),
+        Some("virtFS")
+    );
+
+    // 2. Bento Windows template
+    let win_utm = r#"
+Vagrant.configure(2) do |config|
+  config.vm.guest = :windows
+  config.vm.communicator = "winrm"
+  config.winrm.username = "vagrant"
+  config.winrm.password = "vagrant"
+  config.vm.boot_timeout = 600
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.provider "utm" do |utm|
+    utm.cpus = 4
+    utm.memory = 4096
+    utm.check_guest_additions = false
+  end
+end
+"#;
+    let win_config = migratory::config::in_process::evaluate_in_process(win_utm)?;
+    let win_machine = win_config.machines.get("default").ok_or_else(|| {
+        migratory::error::MigratoryError::NotFound("default machine missing".to_string())
+    })?;
+    assert_eq!(win_machine.winrm.username, "vagrant");
+    assert_eq!(win_machine.winrm.password.as_deref(), Some("vagrant"));
+    assert_eq!(win_machine.vm.boot_timeout, Some(600));
+    assert!(win_machine.vm.synced_folders[0].disabled);
+
+    // 3. Bento OmniOS / FreeBSD template
+    let omnios_utm = r#"
+Vagrant.configure(2) do |config|
+  config.vm.guest = :solaris
+  config.ssh.shell = "sh"
+  config.vm.synced_folder ".", "/vagrant", type: "rsync"
+  config.vm.provider "utm" do |utm|
+    utm.directory_share_mode = "virtFS"
+  end
+end
+"#;
+    let omni_config = migratory::config::in_process::evaluate_in_process(omnios_utm)?;
+    let omni_machine = omni_config.machines.get("default").ok_or_else(|| {
+        migratory::error::MigratoryError::NotFound("default machine missing".to_string())
+    })?;
+    assert_eq!(omni_machine.ssh.shell.as_deref(), Some("sh"));
+    assert_eq!(
+        omni_machine.vm.synced_folders[0].folder_type.as_deref(),
+        Some("rsync")
+    );
+
+    Ok(())
+}

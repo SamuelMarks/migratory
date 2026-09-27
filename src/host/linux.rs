@@ -340,6 +340,7 @@ impl LinuxHost {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 
@@ -452,11 +453,33 @@ mod tests {
         }
         let missing_caps = host.capabilities();
         unsafe {
-            std::env::set_var("PATH", old_path);
+            std::env::set_var("PATH", &old_path);
         }
 
         assert!(caps.contains(&"virtualbox".to_string()));
         assert!(missing_caps.is_empty());
+
+        // Test with scripts returning non-zero status
+        #[cfg(unix)]
+        {
+            std::fs::write(&vbox, "#!/bin/sh\nexit 1").expect("operation should succeed");
+            std::fs::write(&virsh, "#!/bin/sh\nexit 1").expect("operation should succeed");
+        }
+        #[cfg(windows)]
+        {
+            let vbox_bat = temp_dir.path().join("VBoxManage.bat");
+            std::fs::write(&vbox_bat, "@echo off\nexit /b 1").expect("operation should succeed");
+            let virsh_bat = temp_dir.path().join("virsh.bat");
+            std::fs::write(&virsh_bat, "@echo off\nexit /b 1").expect("operation should succeed");
+        }
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+        let failed_caps = host.capabilities();
+        unsafe {
+            std::env::set_var("PATH", old_path);
+        }
+        assert!(failed_caps.is_empty());
     }
 
     #[test]
@@ -468,6 +491,14 @@ mod tests {
                 folder_type: Some("nfs".to_string()),
                 disabled: false,
                 mount_options: Some(vec!["rw".to_string(), "no_root_squash".to_string()]),
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/empty_opts_nfs".to_string(),
+                guest_path: "/empty_opts".to_string(),
+                folder_type: Some("nfs".to_string()),
+                disabled: false,
+                mount_options: Some(Vec::new()),
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {
@@ -490,6 +521,13 @@ mod tests {
                 guest_path: "/".to_string(),
                 folder_type: Some("smb".to_string()),
                 disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/disabled_smb".to_string(),
+                guest_path: "/disabled_smb".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: true,
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {

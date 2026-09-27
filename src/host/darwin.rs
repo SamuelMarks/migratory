@@ -431,12 +431,34 @@ mod tests {
         }
         let missing_caps = host.capabilities();
         unsafe {
-            std::env::set_var("PATH", old_path);
+            std::env::set_var("PATH", &old_path);
         }
 
         assert!(caps.contains(&"virtualbox".to_string()));
         assert!(caps.contains(&"vmware".to_string()));
         assert!(missing_caps.is_empty());
+
+        // Test with scripts returning non-zero status
+        #[cfg(unix)]
+        {
+            std::fs::write(&vbox, "#!/bin/sh\nexit 1").expect("operation should succeed");
+            std::fs::write(&vmrun, "#!/bin/sh\nexit 1").expect("operation should succeed");
+        }
+        #[cfg(windows)]
+        {
+            let vbox_bat = temp_dir.path().join("VBoxManage.bat");
+            std::fs::write(&vbox_bat, "@echo off\nexit /b 1").expect("operation should succeed");
+            let vmrun_bat = temp_dir.path().join("vmrun.bat");
+            std::fs::write(&vmrun_bat, "@echo off\nexit /b 1").expect("operation should succeed");
+        }
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+        let failed_caps = host.capabilities();
+        unsafe {
+            std::env::set_var("PATH", &old_path);
+        }
+        assert!(failed_caps.is_empty());
     }
 
     #[test]
@@ -456,12 +478,20 @@ mod tests {
                 disabled: true,
                 ..Default::default()
             },
+            crate::config::SyncedFolderConfig {
+                host_path: "/Users/user/rsync".to_string(),
+                guest_path: "/rsync".to_string(),
+                folder_type: Some("rsync".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
         ];
 
         let exports = DarwinHost::generate_nfs_exports(&folders, "501", "20");
         assert!(exports.contains("# VAGRANT-BEGIN"));
         assert!(exports.contains("\"/Users/user/project\" -alldirs -mapall=501:20 127.0.0.1"));
         assert!(!exports.contains("/Users/user/disabled"));
+        assert!(!exports.contains("/Users/user/rsync"));
         assert!(exports.contains("# VAGRANT-END"));
 
         let smb_cmd = DarwinHost::generate_smb_sharing_command("/Users/user/project", "vagrant");

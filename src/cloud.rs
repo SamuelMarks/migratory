@@ -471,16 +471,52 @@ impl CloudClient {
     }
 
     /// Creates a provider for a version on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Name of the box (e.g., "hashicorp/bionic64").
+    /// * `version` - Version of the box.
+    /// * `provider` - Provider name (e.g., "virtualbox").
+    /// * `architecture` - Optional target architecture (e.g., "amd64", "arm64").
+    /// * `default_architecture` - Optional flag marking this provider as default architecture.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if the provider cannot be created.
     pub fn create_provider(
         &self,
         box_name: &str,
         version: &str,
         provider: &str,
+        architecture: Option<&str>,
+        default_architecture: Option<bool>,
     ) -> Result<(), MigratoryError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}/providers", base, box_name, version);
 
-        let payload = serde_json::json!({ "provider": { "name": provider } });
+        let mut provider_obj = serde_json::Map::new();
+        provider_obj.insert(
+            "name".to_string(),
+            serde_json::Value::String(provider.to_string()),
+        );
+        if let Some(arch) = architecture {
+            provider_obj.insert(
+                "architecture".to_string(),
+                serde_json::Value::String(arch.to_string()),
+            );
+        }
+        if let Some(def_arch) = default_architecture {
+            provider_obj.insert(
+                "default_architecture".to_string(),
+                serde_json::Value::Bool(def_arch),
+            );
+        }
+
+        let payload = serde_json::json!({ "provider": provider_obj });
 
         println!("URL: {}", url);
         let resp = self
@@ -1101,13 +1137,23 @@ mod tests {
 
         assert!(
             client
-                .create_provider("user/box", "1.0", "virtualbox")
+                .create_provider("user/box", "1.0", "virtualbox", None, None)
                 .is_ok()
         );
         assert!(
             client
-                .create_provider("user/box2", "1.0", "virtualbox")
+                .create_provider("user/box2", "1.0", "virtualbox", None, None)
                 .is_err()
+        );
+        assert!(
+            client
+                .create_provider("user/box", "1.0", "virtualbox", Some("arm64"), Some(true))
+                .is_ok()
+        );
+        assert!(
+            client
+                .create_provider("user/box", "1.0", "virtualbox", Some("amd64"), Some(false))
+                .is_ok()
         );
     }
 
@@ -1304,7 +1350,7 @@ mod tests {
         assert!(client.revoke_version("user/box", "1.0").is_err());
         assert!(
             client
-                .create_provider("user/box", "1.0", "virtualbox")
+                .create_provider("user/box", "1.0", "virtualbox", None, None)
                 .is_err()
         );
         assert!(

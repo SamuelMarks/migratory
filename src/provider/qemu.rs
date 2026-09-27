@@ -1023,6 +1023,8 @@ if echo "$cmd" | grep -q "domdisplay"; then
         echo "vnc://127.0.0.1:5902"
     elif echo "$cmd" | grep -q "bad-port"; then
         echo "vnc://127.0.0.1:invalid"
+    elif echo "$cmd" | grep -q "no-colon"; then
+        echo "vnc_no_port"
     else
         echo "127.0.0.1:1"
     fi
@@ -1036,6 +1038,8 @@ if echo "$cmd" | grep -q "qemu-agent-command"; then
         echo '{"return":[{"ip-addresses":[{"ip-address":"fe80::1"}]}]}'
     elif echo "$cmd" | grep -q "colon-vm"; then
         echo '{"return":[{"ip-addresses":[{"ip-address":"::1"}]}]}'
+    elif echo "$cmd" | grep -q "no-ip-vm"; then
+        echo '{"return":[]}'
     elif echo "$cmd" | grep -q "malformed-vm"; then
         echo '{"ip-address":"unterminated'
     else
@@ -1045,6 +1049,10 @@ if echo "$cmd" | grep -q "qemu-agent-command"; then
 fi
 
 if echo "$cmd" | grep -q "net-dhcp-leases"; then
+    if echo "$cmd" | grep -q "no-leases"; then
+        echo "header"
+        exit 0
+    fi
     echo "header"
     echo "2026-09-07 10:00:00 52:54:00:12:34:56 ipv6 fe80::1/64 guest-vm 01:52:54:00:12:34:56"
     echo "2026-09-07 10:00:00 52:54:00:12:34:56 ipv4 192.168.122.75/24 guest-vm 01:52:54:00:12:34:56"
@@ -1132,12 +1140,23 @@ exit 0
             None
         );
 
+        let prov_no_ip = QemuProvider::new(Some("no-ip-vm".to_string()));
+        assert_eq!(
+            prov_no_ip
+                .get_guest_ip_from_agent()
+                .expect("operation should succeed"),
+            None
+        );
+
         // DHCP leases IP
         let ip_dhcp = provider.get_guest_ip_from_leases("default");
         assert_eq!(
             ip_dhcp.expect("operation should succeed"),
             Some("192.168.122.75".to_string())
         );
+
+        let ip_no_leases = provider.get_guest_ip_from_leases("no-leases");
+        assert_eq!(ip_no_leases.expect("operation should succeed"), None);
 
         // Display ports
         assert_eq!(
@@ -1158,6 +1177,14 @@ exit 0
         let prov_bad = QemuProvider::new(Some("bad-port".to_string()));
         assert_eq!(
             prov_bad
+                .get_display_port()
+                .expect("operation should succeed"),
+            None
+        );
+
+        let prov_no_colon = QemuProvider::new(Some("no-colon".to_string()));
+        assert_eq!(
+            prov_no_colon
                 .get_display_port()
                 .expect("operation should succeed"),
             None

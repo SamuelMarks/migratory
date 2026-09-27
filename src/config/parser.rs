@@ -205,6 +205,9 @@ class VagrantConfigMock < BasicMock
       def mock_provider.customize(*args)
         (@options["customize"] ||= []) << args
       end
+      def mock_provider.vmx
+        @options["vmx"] ||= {}
+      end
       def mock_provider.get_options
         @options
       end
@@ -1363,6 +1366,7 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use std::fs;
@@ -1712,6 +1716,7 @@ end
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod parse_json_tests {
     use super::*;
 
@@ -2204,6 +2209,22 @@ end
             .expect("operation should succeed");
         assert_eq!(m.vm.guest.as_deref(), Some("freebsd"));
         assert_eq!(m.vm.usable_port_range, (2200, 2300));
+
+        // Test invalid length usable_port_range to cover false branch
+        let invalid_range_json = serde_json::json!({
+            "machines": {
+                "default": {
+                    "vm": {
+                        "usable_port_range": [2200]
+                    }
+                }
+            }
+        });
+        let env_invalid = parse_json_config(&invalid_range_json);
+        assert_eq!(
+            env_invalid.machines["default"].vm.usable_port_range,
+            (2200, 2250)
+        );
         assert_eq!(
             m.vm.allowed_synced_folder_types.as_deref(),
             Some(&["nfs".to_string(), "rsync".to_string()][..])

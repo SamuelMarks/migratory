@@ -132,6 +132,7 @@ fn get_provider_or_default(name: &str, id: Option<String>) -> Box<dyn crate::pro
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use std::fs;
@@ -371,9 +372,25 @@ end
         let res_poweroff = execute(cwd, &args);
         assert!(res_poweroff.is_ok());
 
-        // Test with aborted state
+        // Test with stopped state
         unsafe {
             std::env::remove_var("MIGRATORY_TEST_MOCK_POWEROFF");
+            std::env::set_var("MIGRATORY_TEST_MOCK_STOPPED", "1");
+        }
+        let res_stopped = execute(cwd, &args);
+        assert!(res_stopped.is_ok());
+
+        // Test with shutdown state
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_STOPPED");
+            std::env::set_var("MIGRATORY_TEST_MOCK_SHUTDOWN", "1");
+        }
+        let res_shutdown = execute(cwd, &args);
+        assert!(res_shutdown.is_ok());
+
+        // Test with aborted state
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_SHUTDOWN");
             std::env::set_var("MIGRATORY_TEST_MOCK_ABORTED", "1");
         }
         let res_aborted = execute(cwd, &args);
@@ -387,10 +404,18 @@ end
         let res_saved = execute(cwd, &args);
         assert!(res_saved.is_ok());
 
+        // Test with suspended state
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_SAVED");
+            std::env::set_var("MIGRATORY_TEST_MOCK_SUSPENDED", "1");
+        }
+        let res_suspended = execute(cwd, &args);
+        assert!(res_suspended.is_ok());
+
         crate::ui::set_machine_readable(false);
 
         unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_SAVED");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_SUSPENDED");
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
         }
     }

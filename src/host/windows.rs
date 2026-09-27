@@ -296,6 +296,7 @@ impl WindowsHost {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 
@@ -390,6 +391,13 @@ mod tests {
                 host_path: r"C:\Users\user\disabled".to_string(),
                 guest_path: "/disabled".to_string(),
                 folder_type: Some("smb".to_string()),
+                disabled: true,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: r"C:\Users\user\disabled_nfs".to_string(),
+                guest_path: "/disabled_nfs".to_string(),
+                folder_type: Some("nfs".to_string()),
                 disabled: true,
                 ..Default::default()
             },

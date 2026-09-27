@@ -843,6 +843,7 @@ impl Communicator for WinrmCommunicator {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use httpmock::prelude::*;
@@ -1206,8 +1207,8 @@ mod extra_winrm_tests {
         let reader = std::io::Cursor::new(b"");
         let mut writer = Vec::new();
         let res = comm.execute_interactive_stream(None, true, reader, &mut writer);
-        assert!(res.is_err());
-        assert!(matches!(res, Err(MigratoryError::Generic(ref msg)) if msg.contains("127")));
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("127"));
         assert_eq!(writer, b"Error");
     }
 

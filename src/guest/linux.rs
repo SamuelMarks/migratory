@@ -398,7 +398,7 @@ impl LinuxGuest {
         let out = comm.execute(&mount_and_run);
         match out {
             Ok(output) => {
-                if output.contains("failed") || output.contains("Execution failed") {
+                if output.contains("failed") {
                     return Err(MigratoryError::Generic(format!(
                         "VirtualBox Guest Additions compilation or installation failed: {}",
                         output.trim()
@@ -749,6 +749,7 @@ impl Guest for LinuxGuest {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use std::time::Duration;

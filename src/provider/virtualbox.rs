@@ -229,6 +229,18 @@ impl Provider for VirtualBoxProvider {
                         .and_then(|p| p.parse::<u16>().ok());
                     let _ = self.enable_vrde(port);
                 }
+
+                let memory = provider
+                    .options
+                    .get("memory")
+                    .and_then(|m| m.parse::<u64>().ok());
+                let cpus = provider
+                    .options
+                    .get("cpus")
+                    .and_then(|c| c.parse::<u32>().ok());
+                if memory.is_some() || cpus.is_some() {
+                    let _ = self.customize_hardware(memory, cpus, false, None);
+                }
             }
         }
 
@@ -986,14 +998,23 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
         if std::env::var("MIGRATORY_TEST_MOCK_POWEROFF").is_ok() {
             return Ok("VMState=\"poweroff\"\n".to_string());
         }
+        if std::env::var("MIGRATORY_TEST_MOCK_STOPPED").is_ok() {
+            return Ok("VMState=\"stopped\"\n".to_string());
+        }
+        if std::env::var("MIGRATORY_TEST_MOCK_SHUTDOWN").is_ok() {
+            return Ok("VMState=\"shutdown\"\n".to_string());
+        }
         if std::env::var("MIGRATORY_TEST_MOCK_ABORTED").is_ok() {
             return Ok("VMState=\"aborted\"\n".to_string());
         }
         if std::env::var("MIGRATORY_TEST_MOCK_SAVED").is_ok() {
             return Ok("VMState=\"saved\"\n".to_string());
         }
+        if std::env::var("MIGRATORY_TEST_MOCK_SUSPENDED").is_ok() {
+            return Ok("VMState=\"suspended\"\n".to_string());
+        }
         if std::env::var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID").is_ok() {
-            return Ok("name=\"vm\"\nUUID=\"\"\nUUID=noquotes\nUUID=\"12345678-1234-5678-1234-567812345678\"\n".to_string());
+            return Ok("name=\"vm\"\nUUID=\"notrailingquote\nUUID=\"\"\nUUID=noquotes\nUUID=\"12345678-1234-5678-1234-567812345678\"\n".to_string());
         }
         return Ok(String::new());
     }
@@ -1015,6 +1036,7 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -1423,6 +1445,9 @@ exit 0",
 
         let none_sample = "0%...100%\nSuccessfully imported\n";
         assert_eq!(parse_vbox_uuid_from_output(none_sample), None);
+
+        let empty_sample = "Suggested VM UUID: \n";
+        assert_eq!(parse_vbox_uuid_from_output(empty_sample), None);
 
         let short_sample = "Suggested VM UUID: short\n";
         assert_eq!(parse_vbox_uuid_from_output(short_sample), None);

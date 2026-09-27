@@ -448,9 +448,7 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
     // Check Vagrant.require_version
     for line in content.lines() {
         let clean = strip_line_comment(line).trim();
-        if clean.starts_with("Vagrant.require_version")
-            && let Some(arg) = clean.strip_prefix("Vagrant.require_version")
-        {
+        if let Some(arg) = clean.strip_prefix("Vagrant.require_version") {
             let req_str = extract_string_value(arg, &vars);
             let satisfied = check_version_requirement(&req_str, current_migratory_version);
             if !satisfied {
@@ -481,12 +479,14 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
         }
 
         // Variable assignment: e.g. "BOX_IMAGE = 'ubuntu/focal64'"
-        if !clean.contains("config.") && clean.contains('=') && !clean.contains("==") {
-            let parts: Vec<&str> = clean.splitn(2, '=').map(|s| s.trim()).collect();
-            if parts.len() == 2 && !parts[0].contains(' ') && !parts[0].contains('.') {
-                let key = parts[0].to_string();
-                let val = extract_string_value(parts[1], &vars);
-                vars.insert(key, val);
+        if !clean.contains("config.")
+            && !clean.contains("==")
+            && let Some((raw_key, raw_val)) = clean.split_once('=')
+        {
+            let key = raw_key.trim();
+            if !key.contains(' ') && !key.contains('.') {
+                let val = extract_string_value(raw_val, &vars);
+                vars.insert(key.to_string(), val);
                 continue;
             }
         }
@@ -576,7 +576,6 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
             };
 
             if let Some((lhs, rhs)) = clean.split_once('=')
-                && !lhs.ends_with('=')
                 && !rhs.starts_with('=')
                 && let Some(last_push) = machine_ref.pushes.last_mut()
             {
@@ -624,12 +623,16 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
             };
 
             if let Some((lhs, rhs)) = clean.split_once('=')
-                && !lhs.ends_with('=')
                 && !rhs.starts_with('=')
             {
                 let key = lhs.split('.').next_back().unwrap_or(lhs).trim();
                 let val = extract_string_value(rhs, &vars);
                 prov_entry.options.insert(key.to_string(), val);
+            } else if clean.contains(".customize") {
+                let after = clean.split(".customize").nth(1).unwrap_or("").trim();
+                prov_entry
+                    .options
+                    .insert("customize".to_string(), after.to_string());
             }
             continue;
         }
@@ -998,22 +1001,22 @@ fn expand_loops(content: &str, vars: &mut HashMap<String, String>) -> String {
         let line = lines[i];
         let trimmed = strip_line_comment(line).trim();
 
-        if !trimmed.contains("config.") && trimmed.contains('=') && !trimmed.contains("==") {
-            let parts: Vec<&str> = trimmed.splitn(2, '=').map(|s| s.trim()).collect();
-            if parts.len() == 2 && !parts[0].contains(' ') && !parts[0].contains('.') {
-                let key = parts[0].to_string();
-                let val = extract_string_value(parts[1], vars);
-                vars.insert(key, val);
+        if !trimmed.contains("config.")
+            && !trimmed.contains("==")
+            && let Some((raw_key, raw_val)) = trimmed.split_once('=')
+        {
+            let key = raw_key.trim();
+            if !key.contains(' ') && !key.contains('.') {
+                let val = extract_string_value(raw_val, vars);
+                vars.insert(key.to_string(), val);
             }
         }
 
         // Check for (start..end).each do |var| or (1..N).each do |var|
-        if (trimmed.contains(").each do |") || trimmed.contains(").each do|"))
-            && trimmed.starts_with('(')
-            && let Some(each_idx) = trimmed.find(".each do")
+        if trimmed.starts_with('(')
+            && let Some((range_part, after_each)) = trimmed[1..].split_once(").each do")
         {
-            let range_part = &trimmed[1..each_idx - 1];
-            let var_part = trimmed.split('|').nth(1).unwrap_or("").trim();
+            let var_part = after_each.split('|').nth(1).unwrap_or("").trim();
 
             let (start, end) = parse_range(range_part, vars);
 
@@ -1068,12 +1071,14 @@ fn evaluate_conditionals(content: &str, vars: &mut HashMap<String, String>) -> S
         let line = lines[i];
         let trimmed = strip_line_comment(line).trim();
 
-        if !trimmed.contains("config.") && trimmed.contains('=') && !trimmed.contains("==") {
-            let parts: Vec<&str> = trimmed.splitn(2, '=').map(|s| s.trim()).collect();
-            if parts.len() == 2 && !parts[0].contains(' ') && !parts[0].contains('.') {
-                let key = parts[0].to_string();
-                let val = extract_string_value(parts[1], vars);
-                vars.insert(key, val);
+        if !trimmed.contains("config.")
+            && !trimmed.contains("==")
+            && let Some((raw_key, raw_val)) = trimmed.split_once('=')
+        {
+            let key = raw_key.trim();
+            if !key.contains(' ') && !key.contains('.') {
+                let val = extract_string_value(raw_val, vars);
+                vars.insert(key.to_string(), val);
             }
         }
 
@@ -1162,6 +1167,7 @@ fn parse_range(range_str: &str, vars: &HashMap<String, String>) -> (i64, i64) {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 
@@ -1846,5 +1852,261 @@ end
         assert_eq!(web.pushes[0].name, "deploy");
         assert_eq!(web.pushes[1].name, "custom");
         assert_eq!(web.pushes[2].name, "deploy");
+    }
+
+    #[test]
+    fn test_evaluate_in_process_provider_customizations() {
+        let vf = r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider :virtualbox do |vb|
+    vb.customize ["modifyvm", :id, "--nictype1", "82540EM"]
+    vb.memory = "4096"
+    vb.cpus = "4"
+  end
+
+  config.vm.provider :vmware_desktop do |vmw|
+    vmw.vmx["ethernet0.virtualDev"] = "e1000e"
+  end
+
+  config.vm.provider "utm" do |utm|
+    utm.directory_share_mode = "virtFS"
+  end
+end
+"#;
+        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let m = &env.machines["default"];
+        assert_eq!(m.vm.providers.len(), 3);
+
+        let vb =
+            m.vm.providers
+                .iter()
+                .find(|p| p.name == "virtualbox")
+                .expect("operation should succeed");
+        assert_eq!(vb.options.get("memory").map(|s| s.as_str()), Some("4096"));
+        assert_eq!(vb.options.get("cpus").map(|s| s.as_str()), Some("4"));
+        assert!(vb.options.contains_key("customize"));
+
+        let vmw =
+            m.vm.providers
+                .iter()
+                .find(|p| p.name == "vmware_desktop")
+                .expect("operation should succeed");
+        assert!(
+            vmw.options.contains_key("vmx[\"ethernet0.virtualDev\"]")
+                || vmw.options.contains_key("virtualDev\"]")
+        );
+
+        let utm =
+            m.vm.providers
+                .iter()
+                .find(|p| p.name == "utm")
+                .expect("operation should succeed");
+        assert_eq!(
+            utm.options.get("directory_share_mode").map(|s| s.as_str()),
+            Some("virtFS")
+        );
+    }
+
+    #[test]
+    fn test_branch_coverage_interpolate_and_env() {
+        let vars = HashMap::new();
+        // ch == '#' with chars.peek() != '{'
+        let s = interpolate_string("hash #tag and #", &vars);
+        assert_eq!(s, "hash #tag and #");
+
+        // ENV[ without closing ]
+        let res_unclosed_env = evaluate_interpolation_expr("ENV[unclosed", &vars);
+        assert_eq!(res_unclosed_env, "ENV[unclosed");
+
+        // ENV.fetch without closing )
+        let res_unclosed_fetch = evaluate_interpolation_expr("ENV.fetch(unclosed", &vars);
+        assert_eq!(res_unclosed_fetch, "ENV.fetch(unclosed");
+    }
+
+    #[test]
+    fn test_branch_coverage_execute_subshell_empty_path() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_path = std::env::var("PATH").ok();
+        // SAFETY: Synchronized via ENV_LOCK.
+        unsafe {
+            std::env::set_var("PATH", "");
+        }
+        let res = execute_subshell_command("echo test_fail");
+        // SAFETY: Synchronized via ENV_LOCK.
+        unsafe {
+            if let Some(p) = original_path {
+                std::env::set_var("PATH", p);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+        assert_eq!(res, "");
+    }
+
+    #[test]
+    fn test_branch_coverage_evaluate_condition_empty_env() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: Synchronized via ENV_LOCK.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_EMPTY_VAR", "   ");
+        }
+        let vars = HashMap::new();
+        let res = evaluate_condition(
+            "ENV.fetch('MIGRATORY_TEST_EMPTY_VAR', 'default_val')",
+            &vars,
+        );
+        // SAFETY: Synchronized via ENV_LOCK.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_EMPTY_VAR");
+        }
+        assert!(!res);
+    }
+
+    #[test]
+    fn test_branch_coverage_strip_line_comment_quotes_and_escapes() {
+        // Single quote inside double quotes: !in_double is false
+        let l1 = strip_line_comment(r#" "it's working" # comment "#);
+        assert_eq!(l1, r#" "it's working""#);
+
+        // Escaped single quote: prev_char != '\\' is false
+        let l2 = strip_line_comment(r#" 'escaped \' quote' # comment "#);
+        assert_eq!(l2, r#" 'escaped \' quote'"#);
+
+        // Double quote inside single quotes: !in_single is false
+        let l3 = strip_line_comment(r#" 'said "hello"' # comment "#);
+        assert_eq!(l3, r#" 'said "hello"'"#);
+
+        // Escaped double quote: prev_char != '\\' is false
+        let l4 = strip_line_comment(r#" "escaped \" quote" # comment "#);
+        assert_eq!(l4, r#" "escaped \" quote""#);
+    }
+
+    #[test]
+    fn test_branch_coverage_extract_string_value_unclosed_quotes() {
+        let vars = HashMap::new();
+        // starts with '"' but does not end with '"'
+        let s1 = extract_string_value("\"unclosed double", &vars);
+        assert_eq!(s1, "\"unclosed double");
+
+        // starts with '\'' but does not end with '\''
+        let s2 = extract_string_value("'unclosed single", &vars);
+        assert_eq!(s2, "'unclosed single");
+    }
+
+    #[test]
+    fn test_branch_coverage_in_process_syntax_variations() {
+        let vf = r#"
+Vagrant.configure("2") do |config|
+  # Line with == to cover !clean.contains("==") false branch
+  SOME_FLAG == "true"
+  # Line with space in key to cover !key.contains(' ') false branch
+  KEY WITH SPACE = "value"
+  # Line with dot in key to cover !key.contains('.') false branch
+  key.with.dot = "value"
+  # Line without '=' to cover split_once None branch
+  NO_EQUALS_HERE
+
+  # Push block with == inside to cover !rhs.starts_with('=') false branch
+  config.push.define "ftp" do |p|
+    p == "something"
+    p.dir = "."
+  end
+
+  # Provider block with == inside to cover !rhs.starts_with('=') false branch
+  config.vm.provider :virtualbox do |vb|
+    vb == "something"
+    vb.gui = true
+  end
+
+  # Depends on with unclosed bracket (starts with [ but does not end with ])
+  config.vm.depends_on = ['unclosed_machine
+
+  # Single quoted plugins and sensitive items
+  config.vagrant.plugins = ['single_quote_plugin']
+  config.vagrant.sensitive = ['single_quote_secret']
+end
+"#;
+        let env = evaluate_in_process(vf);
+        assert!(env.is_ok());
+    }
+
+    #[test]
+    fn test_branch_coverage_push_block_empty_pushes() {
+        let vf = r#"
+Vagrant.configure("2") do |config|
+  config.vm.define "node_a" do |a|
+    config.push.define "deploy" do |p|
+      # Defining another machine switches current_target to node_b, which inherits empty root_machine.pushes!
+      config.vm.define "node_b" do |b|
+        p.dir = "."
+      end
+    end
+  end
+end
+"#;
+        let env = evaluate_in_process(vf);
+        assert!(env.is_ok());
+    }
+
+    #[test]
+    fn test_branch_coverage_expand_loops_and_conditionals() {
+        let mut vars = HashMap::new();
+
+        // 1. Starts with '(' but does not contain ').each do'
+        let content1 = "(1 + 2)\nconfig.vm.box = 'ubuntu'";
+        let res1 = expand_loops_and_conditionals(content1, &mut vars);
+        assert!(res1.contains("config.vm.box = 'ubuntu'"));
+
+        // 2. Unclosed .each block at EOF (while i < lines.len() exits on false)
+        let content2 = "(1..2).each do |i|\n  config.vm.define \"node#{i}\"";
+        let res2 = expand_loops_and_conditionals(content2, &mut vars);
+        assert!(res2.contains("node1") || res2.contains("node2"));
+
+        // 3. Nested block in .each ending with ' do'
+        let content3 = r#"
+(1..1).each do |i|
+  custom_block do
+    config.vm.box = "nested_box"
+  end
+end
+"#;
+        let res3 = expand_loops_and_conditionals(content3, &mut vars);
+        assert!(res3.contains("nested_box"));
+
+        // 4. Unclosed if at EOF (while i < lines.len() exits on false)
+        let content4 = "if true\n  config.vm.box = 'ubuntu'";
+        let res4 = expand_loops_and_conditionals(content4, &mut vars);
+        assert!(res4.contains("config.vm.box = 'ubuntu'"));
+
+        // 5. Nested block in if containing ' do |'
+        let content5 = r#"
+if true
+  custom_iter.each do |i|
+    config.vm.box = "box_in_if"
+  end
+end
+"#;
+        let res5 = expand_loops_and_conditionals(content5, &mut vars);
+        assert!(res5.contains("box_in_if"));
+
+        // 6. Nested if with else (depth > 1 when cur == "else")
+        let content6 = r#"
+if true
+  if false
+    config.vm.box = "inner_if"
+  else
+    config.vm.box = "inner_else"
+  end
+else
+  config.vm.box = "outer_else"
+end
+"#;
+        let res6 = expand_loops_and_conditionals(content6, &mut vars);
+        assert!(res6.contains("inner_else"));
+        assert!(!res6.contains("outer_else"));
     }
 }

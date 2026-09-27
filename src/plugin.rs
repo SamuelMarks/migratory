@@ -713,6 +713,9 @@ mod tests {
 
     #[test]
     fn test_ruby_plugin_adapter() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
         // Use a standard ruby module that we know exists
         let mut adapter = RubyPluginAdapter::new("json_plugin", "json");
         assert_eq!(adapter.name(), "json_plugin");
@@ -727,6 +730,9 @@ mod tests {
 
     #[test]
     fn test_ruby_plugin_adapter_init_failure() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
         // Use a non-existent gem to force a LoadError
         let mut adapter = RubyPluginAdapter::new("bad_plugin", "does_not_exist_gem_12345");
         assert_eq!(adapter.name(), "bad_plugin");

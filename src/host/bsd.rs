@@ -412,6 +412,20 @@ mod tests {
                 disabled: true,
                 ..Default::default()
             },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/root_share".to_string(),
+                guest_path: "/".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: "/home/user/disabled_smb".to_string(),
+                guest_path: "/disabled_smb".to_string(),
+                folder_type: Some("smb".to_string()),
+                disabled: true,
+                ..Default::default()
+            },
         ];
 
         let exports = BsdHost::generate_nfs_exports(&folders, "1000", "1000");
@@ -423,7 +437,10 @@ mod tests {
         let smb = BsdHost::generate_smb_conf(&folders);
         assert!(smb.contains("# VAGRANT-BEGIN-SMB"));
         assert!(smb.contains("[shared]"));
+        assert!(smb.contains("[vagrant]"));
         assert!(smb.contains("path = /home/user/share"));
+        assert!(smb.contains("path = /home/user/root_share"));
+        assert!(!smb.contains("disabled_smb"));
         assert!(smb.contains("# VAGRANT-END-SMB"));
     }
 }

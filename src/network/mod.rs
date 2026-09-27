@@ -778,6 +778,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod extra_network_tests {
     use super::*;
     use crate::config::NetworkConfig;
@@ -875,6 +876,7 @@ mod extra_network_tests {
         );
         assert_eq!(parse_created_vbox_adapter("no adapter here"), None);
         assert_eq!(parse_created_vbox_adapter("''"), None);
+        assert_eq!(parse_created_vbox_adapter("'only_one_quote"), None);
 
         // 3. find_matching_vbox_hostonly
         let list_out = "\
@@ -903,6 +905,17 @@ NetworkMask:     255.255.255.0
             Some("vboxnet1".to_string())
         );
         assert_eq!(find_matching_vbox_hostonly(list_out, "172.16.0.1"), None);
+        assert_eq!(find_matching_vbox_hostonly(list_out, "192.168.99.1"), None);
+        assert_eq!(
+            find_matching_vbox_hostonly(list_out, "invalid_no_dots"),
+            None
+        );
+
+        let list_out_nodot = "Name: vboxnet2\nIPAddress: nodotsinip\n";
+        assert_eq!(
+            find_matching_vbox_hostonly(list_out_nodot, "192.168.56.1"),
+            None
+        );
 
         // 4. configure_private_network_for_provider
         let priv_cfg = NetworkConfig::PrivateNetwork {

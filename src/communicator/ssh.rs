@@ -12,7 +12,7 @@ use crate::error::MigratoryError;
 use ssh2::Session;
 use std::io::Read;
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -92,6 +92,33 @@ impl SshCommunicator {
         }
     }
 
+    /// Formats a command string using the configured guest shell.
+    ///
+    /// If `config.shell` is configured, wraps the command appropriately for the shell.
+    /// Otherwise returns the command unchanged.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - Raw command string.
+    ///
+    /// # Returns
+    ///
+    /// Formatted command string.
+    pub fn format_command(&self, command: &str) -> String {
+        if let Some(shell) = &self.config.shell {
+            if shell == "powershell" || shell == "powershell.exe" {
+                format!(
+                    "powershell -ExecutionPolicy Bypass -OutputFormat Text -Command \"{}\"",
+                    command.replace('"', "`\"")
+                )
+            } else {
+                format!("{} -c '{}'", shell, command.replace('\'', "'\\''"))
+            }
+        } else {
+            command.to_string()
+        }
+    }
+
     /// Executes a command allocated within a pseudo-terminal (PTY).
     ///
     /// # Arguments
@@ -115,8 +142,9 @@ impl SshCommunicator {
             .request_pty("xterm", None, None)
             .wrap_err("Failed to request PTY")?;
 
+        let formatted = self.format_command(command);
         channel
-            .exec(command)
+            .exec(&formatted)
             .wrap_err("Failed to execute command")?;
 
         let mut stdout = String::new();
@@ -221,8 +249,9 @@ impl SshCommunicator {
             .channel_session()
             .wrap_err("Failed to open channel")?;
 
+        let formatted = self.format_command(command);
         channel
-            .exec(command)
+            .exec(&formatted)
             .wrap_err("Failed to execute command")?;
 
         let mut stdout_buf = [0u8; 4096];
@@ -281,7 +310,8 @@ impl SshCommunicator {
         cmd.arg("-t").arg("-t");
 
         cmd.arg(format!("{}@{}", self.config.username, self.config.host));
-        cmd.arg(command);
+        let formatted = self.format_command(command);
+        cmd.arg(&formatted);
 
         let output = cmd
             .output()
@@ -316,7 +346,67 @@ impl SshCommunicator {
             path.to_string_lossy().contains("insecure_private_key")
         }
     }
+}
 
+/// Canonical HashiCorp Vagrant insecure private key.
+pub const VAGRANT_INSECURE_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
+MIIEogIBAAKCAQEA6NF8iallvQVp22WDkTkyrtvp9eWW6A8YVr+kz4TjGYe7gHzI\n\
+w+niNltGEFHzD8+v1I2YJ6oXevct1YeS0o9HZyN1Q9qgCgzUFtdOKLv6IedplqoP\n\
+kcmF0aYet2PkEDo3MlTBckFXPITAMzF8dJSIFo9D8HfdOV0IAdx4O7PtixWKn5y2\n\
+hMNG0zQPyUecp4pzC6kivAIhyfHilFR61RGL+GPXQ2MWZWFYbAGjyiYJnAmCP3NO\n\
+Td0jMZEnDkbUvxhMmBYSdETk1rRgm+R4LOzFUGaHqHDLKLX+FIPKcF96hrucXzcW\n\
+yLbIbEgE98OHlnVYCzRdK8jlqm8tehUc9c9WhQIBIwKCAQEA4iqWPJXtzZA68mKd\n\
+ELs4jJsdyky+ewdZeNds5tjcnHU5zUYE25K+ffJED9qUWICcLZDc81TGWjHyAqD1\n\
+Bw7XpgUwFgeUJwUlzQurAv+/ySnxiwuaGJfhFM1CaQHzfXphgVml+fZUvnJUTvzf\n\
+TK2Lg6EdbUE9TarUlBf/xPfuEhMSlIE5keb/Zz3/LUlRg8yDqz5w+QWVJ4utnKnK\n\
+iqwZN0mwpwU7YSyJhlT4YV1F3n4YjLswM5wJs2oqm0jssQu/BT0tyEXNDYBLEF4A\n\
+sClaWuSJ2kjq7KhrrYXzagqhnSei9ODYFShJu8UWVec3Ihb5ZXlzO6vdNQ1J9Xsf\n\
+4m+2ywKBgQD6qFxx/Rv9CNN96l/4rb14HKirC2o/orApiHmHDsURs5rUKDx0f9iP\n\
+cXN7S1uePXuJRK/5hsubaOCx3Owd2u9gD6Oq0CsMkE4CUSiJcYrMANtx54cGH7Rk\n\
+EjFZxK8xAv1ldELEyxrFqkbE4BKd8QOt414qjvTGyAK+OLD3M2QdCQKBgQDtx8pN\n\
+CAxR7yhHbIWT1AH66+XWN8bXq7l3RO/ukeaci98JfkbkxURZhtxV/HHuvUhnPLdX\n\
+3TwygPBYZFNo4pzVEhzWoTtnEtrFueKxyc3+LjZpuo+mBlQ6ORtfgkr9gBVphXZG\n\
+YEzkCD3lVdl8L4cw9BVpKrJCs1c5taGjDgdInQKBgHm/fVvv96bJxc9x1tffXAcj\n\
+3OVdUN0UgXNCSaf/3A/phbeBQe9xS+3mpc4r6qvx+iy69mNBeNZ0xOitIjpjBo2+\n\
+dBEjSBwLk5q5tJqHmy/jKMJL4n9ROlx93XS+njxgibTvU6Fp9w+NOFD/HvxB3Tcz\n\
+6+jJF85D5BNAG3DBMKBjAoGBAOAxZvgsKN+JuENXsST7F89Tck2iTcQIT8g5rwWC\n\
+P9Vt74yboe2kDT531w8+egz7nAmRBKNM751U/95P9t88EDacDI/Z2OwnuFQHCPDF\n\
+llYOUI+SpLJ6/vURRbHSnnn8a/XG+nzedGH5JGqEJNQsz+xT2axM0/W/CRknmGaJ\n\
+kda/AoGANWrLCz708y7VYgAtW2Uf1DPOIYMdvo6fxIB5i9ZfISgcJ/bbCUkFrhoH\n\
++vq/5CIWxCPp0f85R4qxxQ5ihxJ0YDQT9Jpx4TMss4PSavPaBH3RXow5Ohe+bYoQ\n\
+NE5OgEXk2wVfZczCZpigBKbKZHNYcelXtTt/nP3rsCuGcM4h53s=\n\
+-----END RSA PRIVATE KEY-----\n";
+
+/// Ensures that the default insecure private key exists in the specified directory.
+///
+/// If `insecure_private_key` does not exist in `dir`, it is written with 0600 permissions.
+///
+/// # Arguments
+///
+/// * `dir` - Directory where `insecure_private_key` should be placed (e.g. `~/.vagrant.d`).
+///
+/// # Returns
+///
+/// Returns a `PathBuf` to the insecure private key file on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if directory creation or file writing fails.
+pub fn ensure_insecure_private_key(dir: &Path) -> Result<PathBuf, MigratoryError> {
+    let key_path = dir.join("insecure_private_key");
+    if !key_path.exists() {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(&key_path, VAGRANT_INSECURE_PRIVATE_KEY)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    Ok(key_path)
+}
+
+impl SshCommunicator {
     /// Generates a fresh keypair for replacing default insecure keys.
     ///
     /// # Returns
@@ -515,8 +605,9 @@ impl Communicator for SshCommunicator {
             .channel_session()
             .wrap_err("Failed to open channel")?;
 
+        let formatted = self.format_command(command);
         channel
-            .exec(command)
+            .exec(&formatted)
             .wrap_err("Failed to execute command")?;
 
         let mut stdout = String::new();
@@ -2104,5 +2195,71 @@ mod tests {
             s.borrow_mut().fail_scp_recv = true;
         });
         assert!(comm.download_dir("/remote/dir", &dst).is_err());
+    }
+
+    #[test]
+    fn test_ensure_insecure_private_key() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let key_path = ensure_insecure_private_key(temp_dir.path()).expect("ensure key");
+        assert!(key_path.exists());
+        let content = std::fs::read_to_string(&key_path).expect("read");
+        assert!(content.contains("BEGIN RSA PRIVATE KEY"));
+
+        // Call again when it already exists
+        let key_path_again =
+            ensure_insecure_private_key(temp_dir.path()).expect("ensure key again");
+        assert_eq!(key_path, key_path_again);
+
+        // Error path: create inside a file as directory
+        let file_path = temp_dir.path().join("file_blocker");
+        std::fs::write(&file_path, "blocker").expect("write");
+        let err_res = ensure_insecure_private_key(&file_path.join("sub"));
+        assert!(err_res.is_err());
+
+        // Error path: read-only directory where write fails
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro_dir = temp_dir.path().join("ro_dir");
+            std::fs::create_dir(&ro_dir).expect("mkdir");
+            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o500))
+                .expect("chmod");
+            let ro_res = ensure_insecure_private_key(&ro_dir);
+            assert!(ro_res.is_err());
+            let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    #[test]
+    fn test_format_command() {
+        let comm_default = SshCommunicator::new(SshConfig::default());
+        assert_eq!(comm_default.format_command("echo hello"), "echo hello");
+
+        let comm_sh = SshCommunicator::new(SshConfig {
+            shell: Some("sh".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            comm_sh.format_command("echo 'hello world'"),
+            "sh -c 'echo '\\''hello world'\\'''"
+        );
+
+        let comm_pwsh = SshCommunicator::new(SshConfig {
+            shell: Some("powershell".to_string()),
+            ..Default::default()
+        });
+        assert!(comm_pwsh
+            .format_command("Write-Output \"hello\"")
+            .contains("powershell -ExecutionPolicy Bypass -OutputFormat Text -Command \"Write-Output `\"hello`\"\""));
+
+        let comm_pwshexe = SshCommunicator::new(SshConfig {
+            shell: Some("powershell.exe".to_string()),
+            ..Default::default()
+        });
+        assert!(
+            comm_pwshexe
+                .format_command("dir")
+                .starts_with("powershell -ExecutionPolicy")
+        );
     }
 }

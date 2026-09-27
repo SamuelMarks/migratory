@@ -939,6 +939,9 @@ exit 0",
 
     #[test]
     fn test_vmware_network_no_env() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
         let provider = VmwareProvider::new(Some("test-id".to_string()));
         let mut config = VmConfig::default();
         config.networks.push(NetworkConfig::ForwardedPort {
