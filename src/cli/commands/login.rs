@@ -73,7 +73,6 @@ pub fn execute(args: &LoginArgs) -> Result<(), MigratoryError> {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if reading from stdin fails.
-#[coverage(off)]
 fn prompt_line(prompt: &str) -> Result<String, MigratoryError> {
     print!("{}", prompt);
     let _ = std::io::stdout().flush();
@@ -96,6 +95,13 @@ fn prompt_line(prompt: &str) -> Result<String, MigratoryError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]
@@ -340,7 +346,7 @@ mod tests {
         // Username is Some(""), so it will ask for it via stdin.
         let args = LoginArgs {
             check: false,
-            username: Some("".to_string()),
+            username: Some(String::new()),
             token: None,
             description: None,
         };

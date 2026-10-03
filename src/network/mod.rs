@@ -222,7 +222,6 @@ pub fn parse_created_vbox_adapter(text: &str) -> Option<String> {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if creation fails.
-#[coverage(off)]
 pub fn ensure_virtualbox_hostonly_adapter(
     guest_ip: &str,
     netmask: &str,
@@ -292,7 +291,6 @@ pub fn ensure_virtualbox_hostonly_adapter(
 /// # Errors
 ///
 /// Returns a `MigratoryError` if creation fails.
-#[coverage(off)]
 pub fn ensure_qemu_private_network(
     net_name: &str,
     gateway_ip: &str,
@@ -358,7 +356,6 @@ pub fn ensure_qemu_private_network(
 /// # Errors
 ///
 /// Returns a `MigratoryError` if creation fails.
-#[coverage(off)]
 pub fn ensure_hyperv_internal_switch(switch_name: &str) -> Result<String, MigratoryError> {
     #[cfg(test)]
     if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_HYPERV_SWITCH") {
@@ -519,8 +516,14 @@ pub fn generate_guest_network_script(configs: &[NetworkConfig]) -> String {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]
@@ -626,17 +629,11 @@ mod tests {
 
     struct MockUi;
     impl crate::ui::Ui for MockUi {
-        #[coverage(off)]
         fn info(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn success(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn warn(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn error(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn detail(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn create_progress(
             &self,
             _target: &str,
@@ -657,17 +654,11 @@ mod tests {
 
     struct MockFailingUi;
     impl crate::ui::Ui for MockFailingUi {
-        #[coverage(off)]
         fn info(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn success(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn warn(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn error(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn detail(&self, _target: &str, _msg: &str) {}
-        #[coverage(off)]
         fn create_progress(
             &self,
             _target: &str,
@@ -715,7 +706,7 @@ mod tests {
         assert!(configure_private_network(&priv_net, &HashMap::new()).is_ok());
 
         let invalid_priv_net = NetworkConfig::PrivateNetwork {
-            ip: Some("".to_string()),
+            ip: Some(String::new()),
             netmask: None,
             dhcp: false,
             virtualbox_intnet: None,
@@ -778,8 +769,14 @@ mod tests {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod extra_network_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::config::NetworkConfig;
 

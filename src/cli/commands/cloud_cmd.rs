@@ -106,7 +106,20 @@ pub fn execute(cmd: &CloudCommands, writer: &mut dyn Write) -> Result<(), Migrat
     Ok(())
 }
 
-#[coverage(off)]
+/// Executes the `execute_auth` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `writer` - The `writer` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_auth(cmd: &CloudAuthCommands, writer: &mut dyn Write) -> Result<(), MigratoryError> {
     let client = crate::cloud::CloudClient::new()?;
     match cmd {
@@ -133,6 +146,20 @@ fn execute_auth(cmd: &CloudAuthCommands, writer: &mut dyn Write) -> Result<(), M
     Ok(())
 }
 
+/// Executes the `execute_box` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `writer` - The `writer` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_box(cmd: &CloudBoxCommands, writer: &mut dyn Write) -> Result<(), MigratoryError> {
     let client = crate::cloud::CloudClient::new()?;
     match cmd {
@@ -175,6 +202,20 @@ fn execute_box(cmd: &CloudBoxCommands, writer: &mut dyn Write) -> Result<(), Mig
     Ok(())
 }
 
+/// Executes the `execute_provider` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `writer` - The `writer` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_provider(
     cmd: &CloudProviderCommands,
     writer: &mut dyn Write,
@@ -224,6 +265,20 @@ fn execute_provider(
     Ok(())
 }
 
+/// Executes the `execute_version` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `writer` - The `writer` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_version(
     cmd: &CloudVersionCommands,
     writer: &mut dyn Write,
@@ -265,8 +320,14 @@ fn execute_version(
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::prelude::*;
 
@@ -1264,6 +1325,13 @@ Description: short
 
 #[cfg(test)]
 mod extra_cloud_cmd_coverage_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::Method::{DELETE, GET, POST, PUT};
     use httpmock::MockServer;

@@ -125,15 +125,30 @@ pub fn execute(cwd: &Path, args: &StatusArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-#[coverage(off)]
+/// Executes the `get_provider_or_default` function.
+///
+/// # Arguments
+///
+/// * `name` - The `name` argument.
+/// * `id` - The `id` argument.
+///
+/// # Returns
+///
+/// Returns `Box<dyn crate::provider::Provider>`.
 fn get_provider_or_default(name: &str, id: Option<String>) -> Box<dyn crate::provider::Provider> {
     crate::provider::get_provider(name, id)
         .unwrap_or_else(|_| Box::new(crate::provider::virtualbox::VirtualBoxProvider::new(None)))
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

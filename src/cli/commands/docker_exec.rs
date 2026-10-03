@@ -19,7 +19,6 @@ use std::process::Command;
 /// # Returns
 ///
 /// Returns a `MigratoryError::Generic` containing the error message.
-#[coverage(off)]
 fn map_docker_error(e: std::io::Error) -> MigratoryError {
     MigratoryError::Generic(e.to_string())
 }
@@ -113,7 +112,6 @@ pub fn execute(cwd: &Path, args: &DockerExecArgs) -> Result<(), MigratoryError> 
 /// # Errors
 ///
 /// Returns a `MigratoryError` if spawning the process fails or the process exits with a non-zero status.
-#[coverage(off)]
 fn run_docker_exec(
     cmd_args: &[&str],
     ui: &ConsoleUi,
@@ -145,8 +143,14 @@ fn run_docker_exec(
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

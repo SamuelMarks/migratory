@@ -29,7 +29,6 @@ impl Host for DarwinHost {
     /// # Returns
     ///
     /// Returns `true` if `std::env::consts::OS` is `"macos"`.
-    #[coverage(off)]
     fn is_match(&self) -> bool {
         if let Ok(mock) = std::env::var("MOCK_OS") {
             return mock == "macos" || mock == "darwin";
@@ -46,7 +45,6 @@ impl Host for DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if manipulating `/etc/exports` fails (currently a no-op).
-    #[coverage(off)]
     fn configure_nfs(
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
@@ -96,7 +94,6 @@ impl Host for DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the configuration fails (currently a no-op).
-    #[coverage(off)]
     fn configure_smb(
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
@@ -146,7 +143,6 @@ impl Host for DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the check cannot be completed (currently a mocked `Ok(true)`).
-    #[coverage(off)]
     fn check_admin(&self) -> Result<bool, MigratoryError> {
         #[cfg(not(test))]
         {
@@ -184,7 +180,6 @@ impl Host for DarwinHost {
 ///
 /// Returns a `MigratoryError` if network interfaces cannot be inspected.
 #[cfg(not(test))]
-#[coverage(off)]
 fn resolve_darwin_host_ip() -> Result<String, MigratoryError> {
     if let Ok(output) = std::process::Command::new("route")
         .args(["-n", "get", "default"])
@@ -230,7 +225,19 @@ fn resolve_darwin_host_ip() -> Result<String, MigratoryError> {
 }
 
 #[cfg(not(test))]
-#[coverage(off)]
+/// Executes the `list_darwin_bridge_interfaces` function.
+///
+/// # Arguments
+///
+/// * None
+///
+/// # Returns
+///
+/// Returns `Result<Vec<String>, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn list_darwin_bridge_interfaces() -> Result<Vec<String>, MigratoryError> {
     let output = std::process::Command::new("ifconfig")
         .arg("-l")
@@ -251,7 +258,6 @@ fn list_darwin_bridge_interfaces() -> Result<Vec<String>, MigratoryError> {
 
 impl DarwinHost {
     /// Checks for Hypervisor framework privileges (entitlements check).
-    #[coverage(off)]
     pub fn check_hypervisor_privileges(&self) -> Result<bool, MigratoryError> {
         #[cfg(not(test))]
         {
@@ -336,9 +342,15 @@ impl DarwinHost {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
-    #[coverage(off)]
     fn restore_mock_os(orig: Option<String>) {
         unsafe {
             if let Some(val) = orig {

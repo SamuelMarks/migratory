@@ -7,11 +7,17 @@ use std::collections::HashMap;
 
 /// Puppet provisioner.
 pub struct PuppetProvisioner {
+    /// Represents the `manifest_file` field.
     manifest_file: Option<String>,
+    /// Represents the `manifests_path` field.
     manifests_path: Option<String>,
+    /// Represents the `module_path` field.
     module_path: Option<String>,
+    /// Represents the `options` field.
     options: Option<String>,
+    /// Represents the `puppet_server` field.
     puppet_server: Option<String>,
+    /// Represents the `hiera_config_path` field.
     hiera_config_path: Option<String>,
 }
 
@@ -46,7 +52,6 @@ impl Default for PuppetProvisioner {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if archive creation, upload, or remote extraction fails.
-#[coverage(off)]
 fn upload_dir(
     comm: &dyn Communicator,
     local_dir: &str,
@@ -175,6 +180,13 @@ impl Provisioner for PuppetProvisioner {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::path::Path;
@@ -184,21 +196,17 @@ mod tests {
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -312,12 +320,11 @@ mod tests {
         struct TrackUploadsComm;
         impl Communicator for TrackUploadsComm {
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-                Ok("".to_string())
+                Ok(String::new())
             }
             fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn download(
                 &self,
                 _remote_path: &str,
@@ -325,11 +332,9 @@ mod tests {
             ) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn execute_interactive(&self) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
                 Ok(())
             }
@@ -346,15 +351,13 @@ mod tests {
             fail_execute: bool,
         }
         impl Communicator for FailingComm {
-            #[coverage(off)]
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 if self.fail_execute {
                     Err(MigratoryError::Generic("execute failed".to_string()))
                 } else {
-                    Ok("".to_string())
+                    Ok(String::new())
                 }
             }
-            #[coverage(off)]
             fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
                 if self.fail_upload {
                     Err(MigratoryError::Generic("upload failed".to_string()))
@@ -362,7 +365,6 @@ mod tests {
                     Ok(())
                 }
             }
-            #[coverage(off)]
             fn download(
                 &self,
                 _remote_path: &str,
@@ -370,11 +372,9 @@ mod tests {
             ) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn execute_interactive(&self) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
                 Ok(())
             }

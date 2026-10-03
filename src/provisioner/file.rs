@@ -8,7 +8,9 @@ use std::path::Path;
 
 /// File upload provisioner.
 pub struct FileProvisioner {
+    /// Represents the `source` field.
     source: Option<String>,
+    /// Represents the `destination` field.
     destination: Option<String>,
 }
 
@@ -146,6 +148,13 @@ impl Provisioner for FileProvisioner {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::fs::File;
@@ -165,7 +174,7 @@ mod tests {
             if self.fail_execute {
                 return Err(MigratoryError::Generic("mock execute failed".to_string()));
             }
-            Ok("".to_string())
+            Ok(String::new())
         }
 
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
@@ -175,15 +184,12 @@ mod tests {
             Ok(())
         }
 
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }

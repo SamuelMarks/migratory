@@ -22,7 +22,6 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns a `MigratoryError` on execution error.
-#[coverage(off)]
 fn do_execute(
     machine_config: &crate::config::MachineConfig,
     cmd: &str,
@@ -67,7 +66,6 @@ fn do_execute(
 /// # Errors
 ///
 /// Returns a `MigratoryError` on session or execution failure.
-#[coverage(off)]
 fn do_interactive(
     machine_config: &crate::config::MachineConfig,
     elevated: bool,
@@ -110,7 +108,6 @@ fn do_interactive(
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found, machine is missing or in wrong state, or communication fails.
-#[coverage(off)]
 pub fn execute(cwd: &Path, args: &WinrmArgs) -> Result<(), MigratoryError> {
     let path = crate::config::get_vagrantfile_path(cwd);
     if !path.exists() {
@@ -190,6 +187,13 @@ pub fn execute(cwd: &Path, args: &WinrmArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

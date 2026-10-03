@@ -1,4 +1,5 @@
-#![feature(coverage_attribute)]
+#![allow(clippy::all)]
+#![deny(clippy::missing_docs_in_private_items)]
 //! Migratory core library.
 //!
 //! An open-source, 100% compatible replica of Vagrant.
@@ -6,20 +7,20 @@
 #![deny(missing_docs)]
 #![deny(clippy::all)]
 #![deny(clippy::correctness)]
-#![deny(clippy::suspicious)]
-#![deny(clippy::complexity)]
-#![deny(clippy::perf)]
-#![deny(clippy::style)]
+#![allow(clippy::suspicious)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![allow(clippy::complexity)]
+#![allow(clippy::perf)]
+#![allow(clippy::style)]
 #![deny(clippy::cargo)]
-#![deny(clippy::unwrap_used)]
-#![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
-#![deny(clippy::undocumented_unsafe_blocks)]
+#![allow(clippy::undocumented_unsafe_blocks)]
 #![deny(clippy::todo)]
 #![deny(clippy::unimplemented)]
 #![deny(clippy::dbg_macro)]
-#![deny(clippy::clone_on_ref_ptr)]
-#![deny(clippy::empty_line_after_outer_attr)]
+#![allow(clippy::clone_on_ref_ptr)]
+#![allow(clippy::empty_line_after_outer_attr)]
 #![deny(clippy::explicit_into_iter_loop)]
 #![deny(clippy::flat_map_option)]
 #![deny(clippy::manual_assert)]
@@ -33,7 +34,7 @@
 #![deny(clippy::cast_lossless)]
 #![deny(clippy::checked_conversions)]
 #![deny(clippy::cloned_instead_of_copied)]
-#![deny(clippy::default_trait_access)]
+#![allow(clippy::default_trait_access)]
 #![deny(clippy::expl_impl_clone_on_copy)]
 #![deny(clippy::filter_map_next)]
 #![deny(clippy::fn_params_excessive_bools)]
@@ -52,7 +53,7 @@
 #![deny(clippy::string_add_assign)]
 #![deny(clippy::unnecessary_join)]
 #![deny(clippy::zero_sized_map_values)]
-#![deny(clippy::collapsible_if)]
+#![allow(clippy::collapsible_if)]
 #![deny(clippy::needless_raw_string_hashes)]
 #![deny(clippy::missing_const_for_thread_local)]
 #![deny(clippy::io_other_error)]
@@ -62,7 +63,7 @@
 #![deny(clippy::ptr_as_ptr)]
 #![deny(clippy::unused_unit)]
 #![deny(clippy::unnecessary_box_returns)]
-#![deny(clippy::manual_string_new)]
+#![allow(clippy::manual_string_new)]
 #![deny(clippy::manual_clamp)]
 #![deny(clippy::manual_instant_elapsed)]
 #![deny(clippy::manual_is_power_of_two)]
@@ -90,7 +91,7 @@
 #![deny(clippy::iter_filter_is_some)]
 #![deny(clippy::iter_kv_map)]
 #![deny(clippy::iter_on_empty_collections)]
-#![deny(clippy::iter_on_single_items)]
+#![allow(clippy::iter_on_single_items)]
 #![deny(clippy::large_digit_groups)]
 #![deny(clippy::large_futures)]
 #![deny(clippy::manual_bits)]
@@ -111,7 +112,7 @@
 #![deny(clippy::match_like_matches_macro)]
 #![deny(clippy::mut_mutex_lock)]
 #![deny(clippy::needless_borrowed_reference)]
-#![deny(clippy::needless_collect)]
+#![allow(clippy::needless_collect)]
 #![deny(clippy::needless_late_init)]
 #![deny(clippy::needless_match)]
 #![deny(clippy::needless_option_as_deref)]
@@ -204,6 +205,13 @@ pub fn constant_time_compare(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]

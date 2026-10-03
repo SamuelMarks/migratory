@@ -10,7 +10,15 @@ use crate::ui::{ConsoleUi, Ui};
 use std::path::Path;
 
 #[cfg(not(test))]
-#[coverage(off)]
+/// Executes the `attempt_graceful_halt` function.
+///
+/// # Arguments
+///
+/// * `communicator` - The `communicator` argument.
+///
+/// # Returns
+///
+/// Returns `bool`.
 fn attempt_graceful_halt(communicator: &crate::communicator::ssh::SshCommunicator) -> bool {
     if let Ok(guest) = crate::guest::detect_guest(communicator) {
         guest.halt(communicator).is_ok()
@@ -132,6 +140,13 @@ pub fn execute(cwd: &Path, args: &HaltArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
 
     #[test]
     #[cfg(unix)]
@@ -742,6 +757,13 @@ end
 }
 #[cfg(test)]
 mod extra_halt_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

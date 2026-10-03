@@ -255,6 +255,13 @@ impl Guest for BsdGuest {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::time::Duration;
 
@@ -286,7 +293,7 @@ mod tests {
     #[test]
     fn test_bsd_guest_network_empty() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let guest = BsdGuest;
         assert!(guest.configure_networks(&comm, &[]).is_ok());
@@ -295,7 +302,7 @@ mod tests {
     #[test]
     fn test_bsd_guest_network_public() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let guest = BsdGuest;
         let nets = vec![
@@ -355,7 +362,7 @@ mod tests {
     #[test]
     fn test_mock_comm_coverage() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let _ = comm.upload(Path::new(""), "");
         let _ = comm.download("", Path::new(""));
@@ -457,23 +464,18 @@ mod tests {
     struct FnComm<F>(F);
 
     impl<F: Fn(&str) -> Result<String, MigratoryError>> Communicator for FnComm<F> {
-        #[coverage(off)]
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             (self.0)(command)
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }

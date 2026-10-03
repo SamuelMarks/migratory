@@ -39,7 +39,6 @@ impl VmwareProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if querying fails.
-    #[coverage(off)]
     pub fn get_guest_ip(&self) -> Result<Option<String>, MigratoryError> {
         let id = self.require_id()?;
         if let Ok(out) = execute_vmrun(&["getGuestIPAddress", id]) {
@@ -73,7 +72,6 @@ impl VmwareProvider {
         Ok(None)
     }
 
-    #[coverage(off)]
     /// Applies network settings to the VM.
     fn configure_networks(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
@@ -166,7 +164,6 @@ impl Provider for VmwareProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if reading or writing .vmx fails.
-    #[coverage(off)]
     fn setup_synced_folders(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let mut vmx = std::fs::read_to_string(id).unwrap_or_default();
@@ -229,7 +226,6 @@ impl Provider for VmwareProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
     fn up(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
 
@@ -368,21 +364,18 @@ impl Provider for VmwareProvider {
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_vmrun(&["snapshot", id, name])?;
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_vmrun(&["revertToSnapshot", id, name])?;
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
         let id = self.require_id()?;
         let out = execute_vmrun(&["listSnapshots", id]).unwrap_or_default();
@@ -394,7 +387,6 @@ impl Provider for VmwareProvider {
             .collect())
     }
 
-    #[coverage(off)]
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_vmrun(&["deleteSnapshot", id, name])?;
@@ -414,7 +406,6 @@ impl Provider for VmwareProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if reading/writing `.vmx` files fails or machine ID is missing.
-    #[coverage(off)]
     fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         if cfg!(test) {
@@ -679,6 +670,20 @@ pub fn execute_vmrun(args: &[&str]) -> Result<String, MigratoryError> {
     execute_vmrun_inner("vmrun", args)
 }
 
+/// Executes the `execute_vmrun_inner` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `args` - The `args` argument.
+///
+/// # Returns
+///
+/// Returns `Result<String, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_vmrun_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryError> {
     if cmd == "vmrun" {
         if std::env::var("MIGRATORY_TEST_MOCK_VMRUN_ERR").is_ok() {
@@ -710,6 +715,13 @@ fn execute_vmrun_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryErro
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]
@@ -725,9 +737,9 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mock_script = r#"#!/bin/sh
+            let mock_script = "#!/bin/sh
             exit 0
-            "#;
+            ";
             std::fs::write(&bin, mock_script).expect("operation should succeed");
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
                 .expect("operation should succeed");
@@ -1047,6 +1059,13 @@ exit 0",
 
 #[cfg(test)]
 mod missing_vmware_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]

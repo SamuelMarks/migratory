@@ -23,7 +23,6 @@ use std::process::Command;
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or if SSH fails.
-#[coverage(off)]
 pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
     let path = crate::config::get_vagrantfile_path(cwd);
     if !path.exists() {
@@ -160,8 +159,14 @@ pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

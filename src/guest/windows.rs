@@ -194,7 +194,6 @@ impl Guest for WindowsGuest {
         Ok(())
     }
 
-    #[coverage(off)]
     fn update_guest_additions(
         &self,
         comm: &dyn Communicator,
@@ -321,6 +320,13 @@ impl Guest for WindowsGuest {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::time::Duration;
 
@@ -352,7 +358,7 @@ mod tests {
     #[test]
     fn test_windows_guest_network_empty() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let guest = WindowsGuest;
         assert!(guest.configure_networks(&comm, &[]).is_ok());
@@ -361,7 +367,7 @@ mod tests {
     #[test]
     fn test_windows_guest_network_forwarded() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let guest = WindowsGuest;
         let nets = vec![crate::config::NetworkConfig::ForwardedPort {
@@ -377,7 +383,7 @@ mod tests {
     #[test]
     fn test_windows_guest_network_public() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let guest = WindowsGuest;
         let nets = vec![
@@ -413,7 +419,6 @@ mod tests {
         handler: F,
     }
 
-    #[coverage(off)]
     impl<F: Fn(&str) -> Result<String, MigratoryError>> Communicator for CommandRouterComm<F> {
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             (self.handler)(command)
@@ -438,7 +443,7 @@ mod tests {
 
         // 1. ISO drive not found
         let comm_no_iso = CommandRouterComm {
-            handler: |_| Ok("".to_string()),
+            handler: |_| Ok(String::new()),
         };
         assert!(
             guest
@@ -454,7 +459,7 @@ mod tests {
                 } else if cmd.contains("Get-Service") {
                     Ok("Running\n".to_string())
                 } else {
-                    Ok("".to_string())
+                    Ok(String::new())
                 }
             },
         };
@@ -470,11 +475,11 @@ mod tests {
                 if cmd.contains("Get-PSDrive") {
                     Ok("E:\\\n".to_string())
                 } else if cmd.contains("Get-Service") {
-                    Ok("".to_string())
+                    Ok(String::new())
                 } else if cmd.contains("Test-Path") {
                     Ok("True\n".to_string())
                 } else {
-                    Ok("".to_string())
+                    Ok(String::new())
                 }
             },
         };
@@ -492,7 +497,7 @@ mod tests {
                 } else if cmd.contains("VBoxWindowsAdditions.exe") {
                     Err(MigratoryError::Generic("installer crashed".to_string()))
                 } else {
-                    Ok("".to_string())
+                    Ok(String::new())
                 }
             },
         };
@@ -508,11 +513,11 @@ mod tests {
                 if cmd.contains("Get-PSDrive") {
                     Ok("D:\\\n".to_string())
                 } else if cmd.contains("Get-Service") {
-                    Ok("".to_string())
+                    Ok(String::new())
                 } else if cmd.contains("Test-Path") {
                     Ok("False\n".to_string())
                 } else {
-                    Ok("".to_string())
+                    Ok(String::new())
                 }
             },
         };
@@ -524,7 +529,7 @@ mod tests {
 
         // 6. Non-virtualbox provider
         let comm_other = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         assert!(
             guest
@@ -536,7 +541,7 @@ mod tests {
     #[test]
     fn test_mock_comm_coverage() {
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let _ = comm.upload(Path::new(""), "");
         let _ = comm.download("", Path::new(""));
@@ -653,7 +658,6 @@ mod tests {
             stage: usize,
         }
         impl Communicator for ProbeComm {
-            #[coverage(off)]
             fn execute(&self, command: &str) -> Result<String, MigratoryError> {
                 if command.contains("cmd.exe /c ver") {
                     if self.stage == 0 {
@@ -674,22 +678,18 @@ mod tests {
                         Err(MigratoryError::Generic("fail".into()))
                     }
                 } else {
-                    Ok("".to_string())
+                    Ok(String::new())
                 }
             }
-            #[coverage(off)]
             fn upload(&self, _: &Path, _: &str) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn download(&self, _: &str, _: &Path) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn execute_interactive(&self) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn wait_for_ready(&self, _: Duration) -> Result<(), MigratoryError> {
                 Ok(())
             }
@@ -706,23 +706,18 @@ mod tests {
     fn test_windows_guest_command_failures() {
         struct FailingComm;
         impl Communicator for FailingComm {
-            #[coverage(off)]
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 Err(MigratoryError::Generic("command failed".to_string()))
             }
-            #[coverage(off)]
             fn upload(&self, _: &Path, _: &str) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn download(&self, _: &str, _: &Path) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn execute_interactive(&self) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn wait_for_ready(&self, _: Duration) -> Result<(), MigratoryError> {
                 Ok(())
             }

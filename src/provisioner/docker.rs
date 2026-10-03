@@ -7,11 +7,17 @@ use std::collections::HashMap;
 
 /// Docker provisioner.
 pub struct DockerProvisioner {
+    /// Represents the `images` field.
     images: Vec<String>,
+    /// Represents the `run` field.
     run: Option<String>,
+    /// Represents the `compose` field.
     compose: Option<String>,
+    /// Represents the `install` field.
     install: bool,
+    /// Represents the `build_image` field.
     build_image: Option<String>,
+    /// Represents the `build_path` field.
     build_path: Option<String>,
 }
 
@@ -41,20 +47,42 @@ impl Provisioner for DockerProvisioner {
     }
 
     fn prepare(&mut self, config: &HashMap<String, String>) -> Result<(), MigratoryError> {
-        if let Some(images) = config.get("images") {
-            self.images = images
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+        let p_cfg = crate::config::ProvisionerConfig {
+            config: config.clone(),
+            ..Default::default()
+        };
+        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { images, .. }) =
+            p_cfg.as_docker()
+            && !images.is_empty()
+        {
+            self.images = images;
         }
-        self.run = config.get("run").cloned();
-        self.compose = config.get("compose").cloned();
-        if let Some(inst) = config.get("install") {
-            self.install = inst.to_lowercase() == "true" || inst == "1";
+        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { run, .. }) =
+            p_cfg.as_docker()
+        {
+            self.run = run;
         }
-        self.build_image = config.get("build_image").cloned();
-        self.build_path = config.get("build_path").cloned();
+        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { compose, .. }) =
+            p_cfg.as_docker()
+        {
+            self.compose = compose;
+        }
+        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { install, .. }) =
+            p_cfg.as_docker()
+        {
+            self.install = install;
+        }
+
+        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { build_image, .. }) =
+            p_cfg.as_docker()
+        {
+            self.build_image = build_image;
+        }
+        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { build_path, .. }) =
+            p_cfg.as_docker()
+        {
+            self.build_path = build_path;
+        }
         Ok(())
     }
 
@@ -130,21 +158,17 @@ mod tests {
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -204,19 +228,15 @@ mod tests {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Err(MigratoryError::Generic("Command failed".to_string()))
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }

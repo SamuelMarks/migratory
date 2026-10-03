@@ -92,6 +92,20 @@ pub(crate) fn execute_prlctl(args: &[&str]) -> Result<String, MigratoryError> {
     execute_prlctl_inner("prlctl", args)
 }
 
+/// Executes the `execute_prlctl_inner` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `args` - The `args` argument.
+///
+/// # Returns
+///
+/// Returns `Result<String, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_prlctl_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryError> {
     if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL").is_ok() {
         if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL_ERROR").is_ok() {
@@ -266,6 +280,13 @@ impl Provider for ParallelsProvider {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]

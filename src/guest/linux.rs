@@ -749,8 +749,14 @@ impl Guest for LinuxGuest {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::time::Duration;
 
@@ -774,22 +780,18 @@ mod tests {
             self.default.clone().map_err(MigratoryError::Generic)
         }
 
-        #[coverage(off)]
         fn upload(&self, _local: &Path, _remote: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
 
-        #[coverage(off)]
         fn download(&self, _remote: &str, _local: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
 
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
 
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -808,19 +810,15 @@ mod tests {
             }
         }
 
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -860,7 +858,7 @@ mod tests {
     fn test_linux_guest_network_fallback() {
         let comm = MockComm {
             fail_commands: vec!["/etc/netplan".into(), "test -d /etc/network".into()],
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let guest = LinuxGuest;
         let nets = vec![crate::config::NetworkConfig::PrivateNetwork {
@@ -876,7 +874,7 @@ mod tests {
     fn test_linux_guest_update_additions() {
         let comm = MockComm {
             fail_commands: vec![],
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let guest = LinuxGuest;
         assert!(
@@ -892,7 +890,7 @@ mod tests {
     fn test_mock_comm_coverage() {
         let comm = MockComm {
             fail_commands: vec![],
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         let _ = comm.upload(Path::new(""), "");
         let _ = comm.download("", Path::new(""));
@@ -922,7 +920,7 @@ mod tests {
     fn test_linux_guest_configure_networks() {
         let comm = MockComm {
             fail_commands: vec![],
-            output: Ok("".to_string()), // Simulate commands succeeding
+            output: Ok(String::new()), // Simulate commands succeeding
         };
         let guest = LinuxGuest;
         let nets = vec![
@@ -1035,22 +1033,18 @@ mod tests {
                     if command.contains(&self.match_file) {
                         Ok("ok".to_string())
                     } else {
-                        Ok("".to_string())
+                        Ok(String::new())
                     }
                 }
-                #[coverage(off)]
                 fn upload(&self, _: &Path, _: &str) -> Result<(), MigratoryError> {
                     Ok(())
                 }
-                #[coverage(off)]
                 fn download(&self, _: &str, _: &Path) -> Result<(), MigratoryError> {
                     Ok(())
                 }
-                #[coverage(off)]
                 fn execute_interactive(&self) -> Result<(), MigratoryError> {
                     Ok(())
                 }
-                #[coverage(off)]
                 fn wait_for_ready(&self, _: Duration) -> Result<(), MigratoryError> {
                     Ok(())
                 }
@@ -1104,7 +1098,7 @@ mod tests {
 
         let fail_comm = MockComm {
             fail_commands: vec!["which rsync".to_string()],
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         assert!(!guest.rsync_installed(&fail_comm).unwrap_or(true));
     }
@@ -1140,7 +1134,7 @@ mod tests {
         // Test mount_shared_folder where mkdir succeeds but mount fails
         let fail_mount_comm = MockComm {
             fail_commands: vec!["mount -t vboxsf".to_string()],
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
         };
         assert!(
             guest
@@ -1210,14 +1204,14 @@ mod tests {
                     Ok("ID=ubuntu\n".to_string()),
                 ),
                 // kernel headers install:
-                ("apt-get".to_string(), Ok("".to_string())),
+                ("apt-get".to_string(), Ok(String::new())),
                 // mount and run fails compilation:
                 (
                     "VBoxLinuxAdditions.run".to_string(),
                     Ok("Building kernel modules... failed".to_string()),
                 ),
             ],
-            default: Ok("".to_string()),
+            default: Ok(String::new()),
         };
         let res = guest.install_virtualbox_guest_additions(&fail_compile_comm, None);
         assert!(res.is_err());
@@ -1237,7 +1231,7 @@ mod tests {
                     "cat /etc/os-release".to_string(),
                     Ok("ID=ubuntu\n".to_string()),
                 ),
-                ("apt-get install".to_string(), Ok("".to_string())),
+                ("apt-get install".to_string(), Ok(String::new())),
                 (
                     "VBoxLinuxAdditions.run".to_string(),
                     Err("No such file".to_string()),
@@ -1247,7 +1241,7 @@ mod tests {
                     Ok("Installed".to_string()),
                 ),
             ],
-            default: Ok("".to_string()),
+            default: Ok(String::new()),
         };
         assert!(
             guest
@@ -1272,7 +1266,7 @@ mod tests {
                         "cat /etc/os-release".to_string(),
                         Ok(format!("ID={}\n", distro_id)),
                     ),
-                    ("test -f".to_string(), Ok("".to_string())),
+                    ("test -f".to_string(), Ok(String::new())),
                     (
                         "VBoxLinuxAdditions.run".to_string(),
                         Err("No such file".to_string()),
@@ -1282,7 +1276,7 @@ mod tests {
                         Ok("Installed successfully".to_string()),
                     ),
                 ],
-                default: Ok("".to_string()),
+                default: Ok(String::new()),
             };
             assert!(
                 guest
@@ -1306,7 +1300,7 @@ mod tests {
                     Ok("Transaction failed".to_string()),
                 ),
             ],
-            default: Ok("".to_string()),
+            default: Ok(String::new()),
         };
         let res = guest.install_virtualbox_guest_additions(&fail_comm, None);
         assert!(matches!(
@@ -1329,7 +1323,7 @@ mod tests {
                     Err("network timeout".to_string()),
                 ),
             ],
-            default: Ok("".to_string()),
+            default: Ok(String::new()),
         };
         let err_res = guest.install_virtualbox_guest_additions(&err_fallback_comm, None);
         assert!(err_res.is_err());
@@ -1346,7 +1340,7 @@ mod tests {
                 ),
                 ("apt-get".to_string(), Ok("0 failed".to_string())),
             ],
-            default: Ok("".to_string()),
+            default: Ok(String::new()),
         };
         assert!(guest.install_vmware_tools(&success_comm).is_ok());
 
@@ -1361,7 +1355,7 @@ mod tests {
                     Ok("Package install failed with error".to_string()),
                 ),
             ],
-            default: Ok("".to_string()),
+            default: Ok(String::new()),
         };
         assert!(guest.install_vmware_tools(&fail_comm).is_err());
     }
@@ -1370,7 +1364,7 @@ mod tests {
     fn test_update_guest_additions_unknown_provider() {
         let guest = LinuxGuest;
         let comm = MockComm {
-            output: Ok("".to_string()),
+            output: Ok(String::new()),
             fail_commands: vec![],
         };
         assert!(guest.update_guest_additions(&comm, "docker", None).is_ok());

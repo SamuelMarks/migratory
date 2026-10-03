@@ -7,6 +7,8 @@
 use crate::error::MigratoryError;
 use std::collections::HashMap;
 
+pub mod options;
+
 /// Pure-Rust in-process Vagrantfile parser and evaluator.
 pub mod in_process;
 /// Module defining the embedded ruby parser logic.
@@ -461,6 +463,74 @@ pub struct ProviderConfig {
     pub options: HashMap<String, String>,
 }
 
+impl ProviderConfig {
+    /// Parses internal map into strong Docker type.
+    pub fn as_docker(
+        &self,
+    ) -> Result<crate::config::options::TypedProviderOptions, crate::error::MigratoryError> {
+        let cmd = self.options.get("cmd").cloned();
+        let build_dir = self.options.get("build_dir").cloned();
+        let init = self
+            .options
+            .get("init")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let has_init = self
+            .options
+            .get("has_init")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let privileged = self
+            .options
+            .get("privileged")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+
+        Ok(crate::config::options::TypedProviderOptions::Docker {
+            cmd,
+            build_dir,
+            init,
+            has_init,
+            privileged,
+        })
+    }
+
+    /// Parses internal map into strong VirtualBox type.
+    pub fn as_virtualbox(
+        &self,
+    ) -> Result<crate::config::options::TypedProviderOptions, crate::error::MigratoryError> {
+        let boot_mode = self.options.get("boot_mode").cloned();
+        let gui = self
+            .options
+            .get("gui")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let separate = self
+            .options
+            .get("separate")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let vrde = self
+            .options
+            .get("vrde")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let vrdeport = self.options.get("vrdeport").cloned();
+        let memory = self.options.get("memory").cloned();
+        let cpus = self.options.get("cpus").cloned();
+
+        Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+            boot_mode,
+            gui,
+            separate,
+            vrde,
+            vrdeport,
+            memory,
+            cpus,
+        })
+    }
+}
+
 /// Provisioner specific configuration.
 ///
 /// Stores configuration details for provisioners (e.g., shell, ansible).
@@ -474,6 +544,83 @@ pub struct ProvisionerConfig {
     pub id: Option<String>,
     /// Execution timing: "once", "always", or "never".
     pub run: Option<String>,
+}
+
+impl ProvisionerConfig {
+    /// Parses internal map into strong Docker type.
+    pub fn as_docker(
+        &self,
+    ) -> Result<crate::config::options::TypedProvisionerConfig, crate::error::MigratoryError> {
+        let build_image = self.config.get("build_image").cloned();
+        let build_path = self.config.get("build_path").cloned();
+        let run = self.config.get("run").cloned();
+        let compose = self.config.get("compose").cloned();
+        let images = if let Some(s) = self.config.get("images") {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        } else {
+            vec![]
+        };
+        let install = self
+            .config
+            .get("install")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(true);
+        Ok(crate::config::options::TypedProvisionerConfig::Docker {
+            build_image,
+            build_path,
+            run,
+            compose,
+            images,
+            install,
+        })
+    }
+
+    /// Parses internal map into strong Shell type.
+    pub fn as_shell(
+        &self,
+    ) -> Result<crate::config::options::TypedProvisionerConfig, crate::error::MigratoryError> {
+        let inline = self.config.get("inline").cloned();
+        let path = self.config.get("path").cloned();
+        let args = self.config.get("args").cloned();
+        let upload_path = self.config.get("upload_path").cloned();
+        let powershell = self
+            .config
+            .get("powershell")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let powershell_args = self.config.get("powershell_args").cloned();
+        let sensitive = self
+            .config
+            .get("sensitive")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let privileged = self
+            .config
+            .get("privileged")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let reboot = self
+            .config
+            .get("reboot")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let env = self.config.get("env").cloned();
+        Ok(crate::config::options::TypedProvisionerConfig::Shell {
+            inline,
+            path,
+            args,
+            upload_path,
+            powershell,
+            powershell_args,
+            sensitive,
+            privileged,
+            reboot,
+            env,
+        })
+    }
 }
 
 /// Network configuration.
@@ -1413,7 +1560,6 @@ pub fn sort_machines_by_dependencies(
 /// # Errors
 ///
 /// Returns a `MigratoryError` if a non-ignored trigger fails.
-#[coverage(off)]
 fn execute_triggers_with_guest(
     stage: &str,
     action_name: &str,
@@ -1533,7 +1679,6 @@ pub fn execute_triggers(
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
     use super::*;
     use crate::communicator::Communicator;

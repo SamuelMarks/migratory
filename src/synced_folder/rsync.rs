@@ -161,7 +161,6 @@ impl RsyncSyncedFolder {
 
     /// Executes the mount command on the host.
     #[cfg(not(test))]
-    #[coverage(off)]
     fn execute_mount_command(&self, options: &SyncedFolderOptions) -> Result<(), MigratoryError> {
         let cmd_str = Self::build_rsync_command(options);
 
@@ -180,7 +179,6 @@ impl RsyncSyncedFolder {
 
     /// Executes the mount command on the host (test mock).
     #[cfg(test)]
-    #[coverage(off)]
     fn execute_mount_command(&self, _options: &SyncedFolderOptions) -> Result<(), MigratoryError> {
         Ok(())
     }
@@ -188,6 +186,13 @@ impl RsyncSyncedFolder {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::cell::Cell;
     use std::path::Path;
@@ -211,21 +216,17 @@ mod tests {
             if count == 1 && self.fail_second_execute {
                 return Err(MigratoryError::Generic("chown error".to_string()));
             }
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -389,7 +390,7 @@ mod tests {
         let dir = tempdir().expect("operation should succeed");
         let folder = RsyncSyncedFolder;
         let opts = SyncedFolderOptions {
-            guest_path: "".to_string(),
+            guest_path: String::new(),
             host_path: dir.path().to_string_lossy().to_string(),
             ..Default::default()
         };

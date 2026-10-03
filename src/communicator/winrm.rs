@@ -56,7 +56,15 @@ impl WinrmCommunicator {
         )
     }
 
-    #[coverage(off)]
+    /// Executes the `map_text_err` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The `e` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `MigratoryError`.
     fn map_text_err(e: reqwest::Error) -> MigratoryError {
         MigratoryError::Generic(e.to_string())
     }
@@ -478,7 +486,6 @@ impl WinrmCommunicator {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on transport error, non-zero exit status, or signal interruption.
-    #[coverage(off)]
     pub fn execute_interactive_stream<R: Read, W: Write>(
         &self,
         command: Option<&str>,
@@ -572,7 +579,6 @@ impl WinrmCommunicator {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on communication or execution failure.
-    #[coverage(off)]
     pub fn execute_elevated_interactive(&self) -> Result<(), MigratoryError> {
         #[cfg(test)]
         {
@@ -619,7 +625,6 @@ pub fn extract_tag(xml: &str, tag: &str) -> Option<String> {
 }
 
 /// Static regex for parsing stdout/stderr streams from WinRM WS-Man shell responses.
-#[coverage(off)]
 fn stream_regex() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         if let Ok(r) = regex::Regex::new(
@@ -795,7 +800,6 @@ impl Communicator for WinrmCommunicator {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on communication or execution failure.
-    #[coverage(off)]
     fn execute_interactive(&self) -> Result<(), MigratoryError> {
         #[cfg(test)]
         {
@@ -843,8 +847,14 @@ impl Communicator for WinrmCommunicator {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::prelude::*;
 
@@ -1058,6 +1068,13 @@ mod tests {
 
 #[cfg(test)]
 mod extra_winrm_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::Method::POST;
     use httpmock::MockServer;

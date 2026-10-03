@@ -5,9 +5,17 @@
 
 use crate::error::MigratoryError;
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[coverage(off)]
+/// Executes the `create_default_client` function.
+///
+/// # Arguments
+///
+/// * None
+///
+/// # Returns
+///
+/// Returns `Client`.
 fn create_default_client() -> Client {
     Client::builder().build().unwrap_or_else(|_| Client::new())
 }
@@ -16,8 +24,11 @@ fn create_default_client() -> Client {
 ///
 /// This struct holds the underlying HTTP client and the base URL for the API.
 pub struct CloudClient {
+    /// Represents the `client` field.
     client: Client,
+    /// Represents the `base_url` field.
     base_url: String,
+    /// Represents the `token` field.
     token: Option<String>,
 }
 
@@ -142,14 +153,19 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/authenticate", base);
 
-        let mut token_obj = serde_json::Map::new();
-        let desc = description.unwrap_or("Migratory login");
-        token_obj.insert(
-            "description".to_string(),
-            serde_json::Value::String(desc.to_string()),
-        );
+        #[derive(Serialize)]
+        struct TokenRequest<'a> {
+            description: &'a str,
+        }
+        #[derive(Serialize)]
+        struct AuthRequest<'a> {
+            token: TokenRequest<'a>,
+        }
 
-        let payload = serde_json::json!({ "token": token_obj });
+        let desc = description.unwrap_or("Migratory login");
+        let payload = AuthRequest {
+            token: TokenRequest { description: desc },
+        };
 
         #[derive(Deserialize)]
         struct AuthResponse {
@@ -262,25 +278,27 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes", base);
 
-        let mut body = serde_json::Map::new();
-        body.insert(
-            "name".to_string(),
-            serde_json::Value::String(name.to_string()),
-        );
-        if let Some(desc) = description {
-            body.insert(
-                "description".to_string(),
-                serde_json::Value::String(desc.to_string()),
-            );
+        #[derive(Serialize)]
+        struct BoxCreate<'a> {
+            name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            description: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            short_description: Option<&'a str>,
         }
-        if let Some(s_desc) = short_description {
-            body.insert(
-                "short_description".to_string(),
-                serde_json::Value::String(s_desc.to_string()),
-            );
+        #[derive(Serialize)]
+        struct CreateBoxRequest<'a> {
+            #[serde(rename = "box")]
+            box_field: BoxCreate<'a>,
         }
 
-        let payload = serde_json::json!({ "box": body });
+        let payload = CreateBoxRequest {
+            box_field: BoxCreate {
+                name,
+                description,
+                short_description,
+            },
+        };
 
         println!("URL: {}", url);
         let resp = self
@@ -326,21 +344,26 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}", base, name);
 
-        let mut body = serde_json::Map::new();
-        if let Some(desc) = description {
-            body.insert(
-                "description".to_string(),
-                serde_json::Value::String(desc.to_string()),
-            );
+        #[derive(Serialize)]
+        struct BoxUpdate<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            description: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            short_description: Option<&'a str>,
         }
-        if let Some(s_desc) = short_description {
-            body.insert(
-                "short_description".to_string(),
-                serde_json::Value::String(s_desc.to_string()),
-            );
+        #[derive(Serialize)]
+        struct UpdateBoxRequest<'a> {
+            #[serde(rename = "box")]
+            box_field: BoxUpdate<'a>,
         }
 
-        let payload = serde_json::json!({ "box": body });
+        let payload = UpdateBoxRequest {
+            box_field: BoxUpdate {
+                description,
+                short_description,
+            },
+        };
+
         let resp = self
             .client
             .put(&url)
@@ -367,19 +390,23 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions", base, box_name);
 
-        let mut body = serde_json::Map::new();
-        body.insert(
-            "version".to_string(),
-            serde_json::Value::String(version.to_string()),
-        );
-        if let Some(desc) = description {
-            body.insert(
-                "description".to_string(),
-                serde_json::Value::String(desc.to_string()),
-            );
+        #[derive(Serialize)]
+        struct VersionCreate<'a> {
+            version: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            description: Option<&'a str>,
+        }
+        #[derive(Serialize)]
+        struct CreateVersionRequest<'a> {
+            version: VersionCreate<'a>,
         }
 
-        let payload = serde_json::json!({ "version": body });
+        let payload = CreateVersionRequest {
+            version: VersionCreate {
+                version,
+                description,
+            },
+        };
 
         println!("URL: {}", url);
         let resp = self
@@ -445,15 +472,19 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}", base, box_name, version);
 
-        let mut body = serde_json::Map::new();
-        if let Some(desc) = description {
-            body.insert(
-                "description".to_string(),
-                serde_json::Value::String(desc.to_string()),
-            );
+        #[derive(Serialize)]
+        struct VersionUpdate<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            description: Option<&'a str>,
+        }
+        #[derive(Serialize)]
+        struct UpdateVersionRequest<'a> {
+            version: VersionUpdate<'a>,
         }
 
-        let payload = serde_json::json!({ "version": body });
+        let payload = UpdateVersionRequest {
+            version: VersionUpdate { description },
+        };
 
         let resp = self
             .client
@@ -498,25 +529,26 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}/providers", base, box_name, version);
 
-        let mut provider_obj = serde_json::Map::new();
-        provider_obj.insert(
-            "name".to_string(),
-            serde_json::Value::String(provider.to_string()),
-        );
-        if let Some(arch) = architecture {
-            provider_obj.insert(
-                "architecture".to_string(),
-                serde_json::Value::String(arch.to_string()),
-            );
+        #[derive(Serialize)]
+        struct ProviderCreate<'a> {
+            name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            architecture: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            default_architecture: Option<bool>,
         }
-        if let Some(def_arch) = default_architecture {
-            provider_obj.insert(
-                "default_architecture".to_string(),
-                serde_json::Value::Bool(def_arch),
-            );
+        #[derive(Serialize)]
+        struct CreateProviderRequest<'a> {
+            provider: ProviderCreate<'a>,
         }
 
-        let payload = serde_json::json!({ "provider": provider_obj });
+        let payload = CreateProviderRequest {
+            provider: ProviderCreate {
+                name: provider,
+                architecture,
+                default_architecture,
+            },
+        };
 
         println!("URL: {}", url);
         let resp = self
@@ -549,21 +581,24 @@ impl CloudClient {
             base, box_name, version, provider
         );
 
-        let mut body = serde_json::Map::new();
-        if let Some(cs) = checksum {
-            body.insert(
-                "checksum".to_string(),
-                serde_json::Value::String(cs.to_string()),
-            );
+        #[derive(Serialize)]
+        struct ProviderUpdate<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            checksum: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            checksum_type: Option<&'a str>,
         }
-        if let Some(cst) = checksum_type {
-            body.insert(
-                "checksum_type".to_string(),
-                serde_json::Value::String(cst.to_string()),
-            );
+        #[derive(Serialize)]
+        struct UpdateProviderRequest<'a> {
+            provider: ProviderUpdate<'a>,
         }
 
-        let payload = serde_json::json!({ "provider": body });
+        let payload = UpdateProviderRequest {
+            provider: ProviderUpdate {
+                checksum,
+                checksum_type,
+            },
+        };
 
         let resp = self
             .client
@@ -727,6 +762,13 @@ impl CloudClient {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::prelude::*;
 
@@ -1450,7 +1492,7 @@ mod tests {
             when.method(GET)
                 .path("/api/v1/search")
                 .query_param("q", "bad");
-            then.status(200).body(r#"invalid json"#);
+            then.status(200).body("invalid json");
         });
 
         let client =
@@ -1465,7 +1507,6 @@ mod tests {
         assert!(client.search_boxes("bad").is_err());
     }
 
-    #[coverage(off)]
     fn restore_env(token: Option<String>, home: Option<String>) {
         unsafe {
             if let Some(t) = token {
@@ -1530,7 +1571,7 @@ mod tests {
     #[test]
     fn test_empty_token_branches() {
         let mut client = CloudClient::new().expect("operation should succeed");
-        client.token = Some("".to_string());
+        client.token = Some(String::new());
 
         assert!(client.whoami().is_err());
         assert!(client.delete_token().is_ok());

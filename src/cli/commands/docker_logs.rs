@@ -9,7 +9,15 @@ use crate::ui::Ui;
 use std::path::Path;
 use std::process::Command;
 
-#[coverage(off)]
+/// Executes the `map_docker_error` function.
+///
+/// # Arguments
+///
+/// * `e` - The `e` argument.
+///
+/// # Returns
+///
+/// Returns `MigratoryError`.
 fn map_docker_error(e: std::io::Error) -> MigratoryError {
     MigratoryError::Generic(e.to_string())
 }
@@ -28,14 +36,12 @@ fn map_docker_error(e: std::io::Error) -> MigratoryError {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found, if the container ID is missing, or if execution fails.
-#[coverage(off)]
 pub fn execute(cwd: &Path, args: &DockerLogsArgs) -> Result<(), MigratoryError> {
     let path = cwd.join("Vagrantfile");
     if !path.exists() {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
     }
 
-    #[coverage(off)]
     fn get_ui() -> Box<dyn crate::ui::Ui + Send + Sync> {
         if std::env::args().any(|arg| arg == "--machine-readable") {
             Box::new(crate::ui::MachineReadableUi)
@@ -93,7 +99,21 @@ pub fn execute(cwd: &Path, args: &DockerLogsArgs) -> Result<(), MigratoryError> 
     Ok(())
 }
 
-#[coverage(off)]
+/// Executes the `run_docker_logs` function.
+///
+/// # Arguments
+///
+/// * `cmd_args` - The `cmd_args` argument.
+/// * `ui` - The `ui` argument.
+/// * `machine_name` - The `machine_name` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn run_docker_logs(
     cmd_args: &[&str],
     ui: &crate::ui::ConcurrentUi,
@@ -122,8 +142,14 @@ fn run_docker_logs(
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

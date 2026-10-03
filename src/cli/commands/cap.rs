@@ -23,7 +23,6 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns a `MigratoryError` if writing to the output stream fails, or if the capability is unsupported.
-#[coverage(off)]
 pub fn execute(args: &CapArgs, mut writer: impl Write) -> Result<(), MigratoryError> {
     execute_inner(args, &mut writer)
 }
@@ -39,7 +38,6 @@ pub fn execute(args: &CapArgs, mut writer: impl Write) -> Result<(), MigratoryEr
 /// # Errors
 ///
 /// Returns a `MigratoryError` if capability execution or output writing fails.
-#[coverage(off)]
 fn run_host_cap(
     host: &dyn crate::host::Host,
     cap_name: &str,
@@ -201,7 +199,6 @@ pub fn dispatch_guest_cap(
 /// # Errors
 ///
 /// Returns a `MigratoryError` if writing fails or capability is unsupported.
-#[coverage(off)]
 fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), MigratoryError> {
     let (machine_name, cap_name) = match (&args.name, &args.capability) {
         (Some(n), Some(c)) => (Some(n.clone()), c.clone()),
@@ -353,8 +350,14 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -374,7 +377,6 @@ mod tests {
     }
 
     impl Communicator for TestComm {
-        #[coverage(off)]
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             if self.fail {
                 return Err(MigratoryError::Generic("comm failure".to_string()));
@@ -382,21 +384,17 @@ mod tests {
             if command.contains("which rsync") {
                 return Ok("/usr/bin/rsync".to_string());
             }
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local: &Path, _remote: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote: &str, _local: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: std::time::Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -453,7 +451,6 @@ mod tests {
 
     struct FailGuest;
     impl crate::guest::Guest for FailGuest {
-        #[coverage(off)]
         fn detect(&self, _comm: &dyn Communicator) -> Result<bool, MigratoryError> {
             Ok(false)
         }

@@ -127,7 +127,6 @@ impl Provider for HypervProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
     fn setup_synced_folders(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let _id = self.require_id()?;
 
@@ -290,7 +289,6 @@ impl Provider for HypervProvider {
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_powershell(&format!(
@@ -300,7 +298,6 @@ impl Provider for HypervProvider {
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_powershell(&format!(
@@ -310,7 +307,6 @@ impl Provider for HypervProvider {
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
         let id = self.require_id()?;
         let out = execute_powershell(&format!(
@@ -325,7 +321,6 @@ impl Provider for HypervProvider {
             .collect())
     }
 
-    #[coverage(off)]
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_powershell(&format!(
@@ -348,7 +343,6 @@ impl Provider for HypervProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if PowerShell export fails or machine ID is missing.
-    #[coverage(off)]
     fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         if cfg!(test) {
@@ -495,11 +489,24 @@ impl HypervProvider {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the command execution fails or returns a non-zero exit status.
-#[coverage(off)]
 pub fn execute_powershell(cmdlet: &str) -> Result<String, MigratoryError> {
     execute_powershell_inner("powershell", cmdlet)
 }
 
+/// Executes the `execute_powershell_inner` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `cmdlet` - The `cmdlet` argument.
+///
+/// # Returns
+///
+/// Returns `Result<String, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_powershell_inner(cmd: &str, cmdlet: &str) -> Result<String, MigratoryError> {
     let output = Command::new(cmd)
         .args(["-NoProfile", "-NonInteractive", "-Command", cmdlet])
@@ -521,6 +528,13 @@ fn execute_powershell_inner(cmd: &str, cmdlet: &str) -> Result<String, Migratory
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]
@@ -536,9 +550,9 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mock_script = r#"#!/bin/sh
+            let mock_script = "#!/bin/sh
             exit 0
-            "#;
+            ";
             std::fs::write(&bin, mock_script).expect("operation should succeed");
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
                 .expect("operation should succeed");

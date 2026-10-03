@@ -196,6 +196,16 @@ pub fn interpolate_string(input: &str, vars: &HashMap<String, String>) -> String
     result
 }
 
+/// Executes the `evaluate_interpolation_expr` function.
+///
+/// # Arguments
+///
+/// * `expr` - The `expr` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `String`.
 fn evaluate_interpolation_expr(expr: &str, vars: &HashMap<String, String>) -> String {
     if let Some(val) = vars.get(expr) {
         return val.clone();
@@ -251,6 +261,15 @@ fn evaluate_interpolation_expr(expr: &str, vars: &HashMap<String, String>) -> St
     expr.to_string()
 }
 
+/// Executes the `execute_subshell_command` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+///
+/// # Returns
+///
+/// Returns `String`.
 fn execute_subshell_command(cmd: &str) -> String {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
@@ -267,6 +286,17 @@ fn execute_subshell_command(cmd: &str) -> String {
     String::new()
 }
 
+/// Executes the `extract_between` function.
+///
+/// # Arguments
+///
+/// * `s` - The `s` argument.
+/// * `open` - The `open` argument.
+/// * `close` - The `close` argument.
+///
+/// # Returns
+///
+/// Returns `Option<&str>`.
 fn extract_between(s: &str, open: char, close: char) -> Option<&str> {
     let start = s.find(open)?;
     let end = s[start + 1..].find(close)?;
@@ -664,6 +694,18 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
     Ok(env)
 }
 
+/// Executes the `apply_directive` function.
+///
+/// # Arguments
+///
+/// * `clean` - The `clean` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+/// * `is_v1` - The `is_v1` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn apply_directive(
     clean: &str,
     machine: &mut MachineConfig,
@@ -733,6 +775,17 @@ fn apply_directive(
     }
 }
 
+/// Executes the `parse_network_directive` function.
+///
+/// # Arguments
+///
+/// * `after_net` - The `after_net` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_network_directive(
     after_net: &str,
     machine: &mut MachineConfig,
@@ -790,6 +843,17 @@ fn parse_network_directive(
     }
 }
 
+/// Executes the `parse_v1_forward_port` function.
+///
+/// # Arguments
+///
+/// * `clean` - The `clean` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_v1_forward_port(clean: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     let after = clean.split("forward_port").nth(1).unwrap_or("").trim();
     let parts: Vec<&str> = after.split(',').map(|s| s.trim()).collect();
@@ -815,6 +879,17 @@ fn parse_v1_forward_port(clean: &str, machine: &mut MachineConfig, vars: &HashMa
     }
 }
 
+/// Executes the `parse_synced_folder_directive` function.
+///
+/// # Arguments
+///
+/// * `after_sync` - The `after_sync` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_synced_folder_directive(
     after_sync: &str,
     machine: &mut MachineConfig,
@@ -842,6 +917,17 @@ fn parse_synced_folder_directive(
     });
 }
 
+/// Executes the `parse_v1_share_folder` function.
+///
+/// # Arguments
+///
+/// * `clean` - The `clean` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_v1_share_folder(clean: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     let after = clean.split("share_folder").nth(1).unwrap_or("").trim();
     let parts: Vec<&str> = after.split(',').map(|s| s.trim()).collect();
@@ -861,6 +947,17 @@ fn parse_v1_share_folder(clean: &str, machine: &mut MachineConfig, vars: &HashMa
     }
 }
 
+/// Executes the `parse_disk_directive` function.
+///
+/// # Arguments
+///
+/// * `after_disk` - The `after_disk` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_disk_directive(
     after_disk: &str,
     machine: &mut MachineConfig,
@@ -882,6 +979,17 @@ fn parse_disk_directive(
     });
 }
 
+/// Executes the `parse_provision_directive` function.
+///
+/// # Arguments
+///
+/// * `after_prov` - The `after_prov` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_provision_directive(
     after_prov: &str,
     machine: &mut MachineConfig,
@@ -902,6 +1010,17 @@ fn parse_provision_directive(
     });
 }
 
+/// Executes the `parse_ssh_directive` function.
+///
+/// # Arguments
+///
+/// * `after` - The `after` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_ssh_directive(after: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     if let Some((key, val_part)) = after.split_once('=') {
         let val = extract_string_value(val_part, vars);
@@ -929,6 +1048,17 @@ fn parse_ssh_directive(after: &str, machine: &mut MachineConfig, vars: &HashMap<
     }
 }
 
+/// Executes the `parse_winrm_directive` function.
+///
+/// # Arguments
+///
+/// * `after` - The `after` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_winrm_directive(after: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     if let Some((key, val_part)) = after.split_once('=') {
         let val = extract_string_value(val_part, vars);
@@ -951,6 +1081,17 @@ fn parse_winrm_directive(after: &str, machine: &mut MachineConfig, vars: &HashMa
     }
 }
 
+/// Executes the `parse_vagrant_directive` function.
+///
+/// # Arguments
+///
+/// * `after` - The `after` argument.
+/// * `machine` - The `machine` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn parse_vagrant_directive(
     after: &str,
     machine: &mut MachineConfig,
@@ -992,6 +1133,16 @@ pub(crate) fn expand_loops_and_conditionals(
     evaluate_conditionals(&loop_expanded, vars)
 }
 
+/// Executes the `expand_loops` function.
+///
+/// # Arguments
+///
+/// * `content` - The `content` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `String`.
 fn expand_loops(content: &str, vars: &mut HashMap<String, String>) -> String {
     let mut output_lines = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -1062,6 +1213,16 @@ fn expand_loops(content: &str, vars: &mut HashMap<String, String>) -> String {
     output_lines.join("\n")
 }
 
+/// Executes the `evaluate_conditionals` function.
+///
+/// # Arguments
+///
+/// * `content` - The `content` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `String`.
 fn evaluate_conditionals(content: &str, vars: &mut HashMap<String, String>) -> String {
     let mut output_lines = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -1143,6 +1304,16 @@ fn evaluate_conditionals(content: &str, vars: &mut HashMap<String, String>) -> S
     output_lines.join("\n")
 }
 
+/// Executes the `parse_range` function.
+///
+/// # Arguments
+///
+/// * `range_str` - The `range_str` argument.
+/// * `vars` - The `vars` argument.
+///
+/// # Returns
+///
+/// Returns `(i64, i64)`.
 fn parse_range(range_str: &str, vars: &HashMap<String, String>) -> (i64, i64) {
     if let Some(dots) = range_str.find("..") {
         let left = range_str[..dots].trim();
@@ -1167,8 +1338,14 @@ fn parse_range(range_str: &str, vars: &HashMap<String, String>) -> (i64, i64) {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]
@@ -1209,7 +1386,7 @@ mod tests {
     fn test_evaluate_condition() {
         let mut vars = HashMap::new();
         vars.insert("CI".to_string(), "true".to_string());
-        vars.insert("EMPTY".to_string(), "".to_string());
+        vars.insert("EMPTY".to_string(), String::new());
         vars.insert("ZERO".to_string(), "0".to_string());
         vars.insert("FALSE_STR".to_string(), "false".to_string());
         vars.insert("FOO".to_string(), "bar".to_string());
@@ -1705,7 +1882,7 @@ end
     fn test_evaluate_condition_exhaustive() {
         let mut vars = HashMap::new();
         vars.insert("MY_VAR".to_string(), "val1".to_string());
-        vars.insert("EMPTY_VAR".to_string(), "".to_string());
+        vars.insert("EMPTY_VAR".to_string(), String::new());
         vars.insert("ZERO_VAR".to_string(), "0".to_string());
         vars.insert("FALSE_VAR".to_string(), "false".to_string());
 
@@ -1973,8 +2150,8 @@ end
         assert_eq!(l1, r#" "it's working""#);
 
         // Escaped single quote: prev_char != '\\' is false
-        let l2 = strip_line_comment(r#" 'escaped \' quote' # comment "#);
-        assert_eq!(l2, r#" 'escaped \' quote'"#);
+        let l2 = strip_line_comment(r" 'escaped \' quote' # comment ");
+        assert_eq!(l2, r" 'escaped \' quote'");
 
         // Double quote inside single quotes: !in_single is false
         let l3 = strip_line_comment(r#" 'said "hello"' # comment "#);

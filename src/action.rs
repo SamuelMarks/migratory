@@ -57,6 +57,7 @@ pub trait Action: Send + Sync {
 /// Builds and configures an action middleware pipeline matching Vagrant's `Action::Builder`.
 #[derive(Default)]
 pub struct ActionBuilder {
+    /// Represents the `actions` field.
     actions: Vec<Box<dyn Action>>,
 }
 
@@ -185,9 +186,13 @@ impl ActionBuilder {
 /// External plugins and extensions can register hooks into an action stack.
 #[derive(Default)]
 pub struct ActionHook {
+    /// Represents the `before_hooks` field.
     before_hooks: Vec<(String, Box<dyn Action>)>,
+    /// Represents the `after_hooks` field.
     after_hooks: Vec<(String, Box<dyn Action>)>,
+    /// Represents the `prepend_hooks` field.
     prepend_hooks: Vec<Box<dyn Action>>,
+    /// Represents the `append_hooks` field.
     append_hooks: Vec<Box<dyn Action>>,
 }
 
@@ -237,6 +242,7 @@ impl ActionHook {
 /// The Warden manages a chain of Actions and executes them.
 #[derive(Default)]
 pub struct Warden {
+    /// Represents the `actions` field.
     actions: Vec<Box<dyn Action>>,
 }
 
@@ -652,6 +658,13 @@ pub static NFS_EXPORTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     struct MockAction {
@@ -1321,7 +1334,7 @@ mod tests {
             machine_name: "web".to_string(),
             provider_name: "invalid_prov".to_string(),
             expected_states: vec!["running".to_string()],
-            cwd: cwd.clone(),
+            cwd: cwd,
         };
         assert!(check_state_invalid_prov.call(&mut env).is_err());
 

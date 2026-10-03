@@ -12,7 +12,6 @@ use std::time::Duration;
 ///
 /// Returns `Some(version_string)` if the latest version was retrieved successfully,
 /// or `None` if the request failed, timed out, or returned invalid JSON.
-#[coverage(off)]
 fn fetch_latest_version() -> Option<String> {
     let url = std::env::var("MIGRATORY_CHECKPOINT_URL")
         .unwrap_or_else(|_| "https://checkpoint-api.hashicorp.com/v1/check/vagrant".to_string());
@@ -102,6 +101,13 @@ pub fn execute() -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::prelude::*;
 

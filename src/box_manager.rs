@@ -193,6 +193,15 @@ impl BoxManager {
     }
 }
 
+/// Executes the `to_hex` function.
+///
+/// # Arguments
+///
+/// * `bytes` - The `bytes` argument.
+///
+/// # Returns
+///
+/// Returns `String`.
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -512,6 +521,19 @@ impl BoxManager {
         Ok(())
     }
 
+    /// Executes the `check_outdated` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The `name` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<Option<crate::cloud::BoxMetadata>, MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn check_outdated(
         &self,
         name: &str,
@@ -717,8 +739,14 @@ pub fn unpack_box(box_path: &Path, dest_dir: &Path) -> Result<(), MigratoryError
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -1218,8 +1246,14 @@ mod tests {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod additional_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::ui::ConsoleUi;
     use std::fs::File;
@@ -1333,8 +1367,14 @@ mod additional_tests {
     }
 }
 #[cfg(test)]
-#[coverage(off)]
 mod extra_coverage_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::MockServer;
     use std::fs::File;

@@ -36,7 +36,6 @@ pub fn is_ignored_path(p: &Path) -> bool {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found.
-#[coverage(off)]
 pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
     let path = cwd.join("Vagrantfile");
     if !path.exists() {
@@ -198,8 +197,14 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

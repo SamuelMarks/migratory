@@ -72,7 +72,6 @@ pub fn get_rdp_address(machine: &crate::config::MachineConfig) -> (String, u16) 
 /// # Returns
 ///
 /// Returns a `Command` configured to launch the appropriate RDP viewer.
-#[coverage(off)]
 fn launch_rdp(rdp_path: &Path, host: &str, port: u16) {
     #[cfg(test)]
     {
@@ -88,7 +87,6 @@ fn launch_rdp(rdp_path: &Path, host: &str, port: u16) {
 }
 
 /// Builds the RDP command based on OS.
-#[coverage(off)]
 pub fn build_rdp_command(rdp_path: &Path, host: &str, port: u16) -> Command {
     if cfg!(target_os = "windows") {
         let mut cmd = Command::new("mstsc.exe");
@@ -212,6 +210,13 @@ pub fn execute(cwd: &Path, args: &RdpArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::config::{MachineConfig, NetworkConfig};
     use tempfile::tempdir;

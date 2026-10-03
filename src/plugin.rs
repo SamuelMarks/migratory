@@ -72,12 +72,19 @@ pub type ProvisionerFactory =
 /// Manages the registration, retrieval, and lifecycle of plugins.
 #[derive(Default)]
 pub struct PluginRegistry {
+    /// Represents the `plugins` field.
     plugins: HashMap<String, Box<dyn Plugin>>,
+    /// Represents the `providers` field.
     providers: HashMap<String, ProviderFactory>,
+    /// Represents the `communicators` field.
     communicators: HashMap<String, CommunicatorFactory>,
+    /// Represents the `synced_folders` field.
     synced_folders: HashMap<String, SyncedFolderFactory>,
+    /// Represents the `provisioners` field.
     provisioners: HashMap<String, ProvisionerFactory>,
+    /// Represents the `capabilities` field.
     capabilities: HashMap<String, CapabilityHandler>,
+    /// Represents the `commands` field.
     commands: HashMap<String, CommandHandler>,
 }
 
@@ -276,8 +283,11 @@ impl PluginRegistry {
 
 /// A WebAssembly plugin instance.
 pub struct WasmPlugin {
+    /// Represents the `name` field.
     name: String,
+    /// Represents the `wasm_bytes` field.
     wasm_bytes: Vec<u8>,
+    /// Represents the `initialized` field.
     initialized: bool,
 }
 
@@ -320,9 +330,13 @@ impl Plugin for WasmPlugin {
 
 /// A WebAssembly plugin runtime for executing compiled WASM modules.
 pub struct WasmPluginRuntime {
+    /// Represents the `module_name` field.
     module_name: String,
+    /// Represents the `wasm_bytes` field.
     wasm_bytes: Vec<u8>,
+    /// Represents the `memory` field.
     memory: Vec<u8>,
+    /// Represents the `exports` field.
     exports: Vec<String>,
 }
 
@@ -335,7 +349,6 @@ pub struct WasmPluginRuntime {
 /// # Returns
 ///
 /// Returns a vector of exported function or symbol names.
-#[coverage(off)]
 fn parse_wasm_exports(bytes: &[u8]) -> Vec<String> {
     let mut exports = Vec::new();
     let mut idx = 8;
@@ -523,8 +536,11 @@ use std::process::{Child, Command, Stdio};
 
 /// An adapter for executing Ruby plugins via a sidecar process.
 pub struct RubyPluginAdapter {
+    /// Represents the `name` field.
     name: String,
+    /// Represents the `gem_name` field.
     gem_name: String,
+    /// Represents the `process` field.
     process: Option<Child>,
 }
 
@@ -549,6 +565,7 @@ impl RubyPluginAdapter {
     }
 }
 
+/// Represents the `SIDECAR_SCRIPT` constant.
 const SIDECAR_SCRIPT: &str = r#"
 require 'socket'
 gem_name = ARGV[0]
@@ -572,16 +589,12 @@ impl Plugin for RubyPluginAdapter {
         &self.name
     }
 
-    #[coverage(off)]
     fn init(&mut self) -> Result<(), MigratoryError> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|e| MigratoryError::Generic(format!("Failed to bind TCP listener: {}", e)))?;
         let port = listener
             .local_addr()
-            .map_err(
-                #[coverage(off)]
-                |e| MigratoryError::Generic(format!("Failed to get local address: {}", e)),
-            )?
+            .map_err(|e| MigratoryError::Generic(format!("Failed to get local address: {}", e)))?
             .port();
 
         let mut child = Command::new("ruby")
@@ -629,6 +642,13 @@ impl Plugin for RubyPluginAdapter {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     struct MockPlugin {

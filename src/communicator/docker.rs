@@ -63,7 +63,19 @@ impl DockerCommunicator {
         self.run_docker_real(args)
     }
 
-    #[coverage(off)]
+    /// Executes the `run_docker_real` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The `args` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<String, MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn run_docker_real(&self, args: &[&str]) -> Result<String, MigratoryError> {
         let output = Command::new(&self.docker_bin)
             .args(args)
@@ -81,7 +93,19 @@ impl DockerCommunicator {
         }
     }
 
-    #[coverage(off)]
+    /// Executes the `execute_interactive_real` function.
+    ///
+    /// # Arguments
+    ///
+    /// * None
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<(), MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn execute_interactive_real(&self) -> Result<(), MigratoryError> {
         let mut cmd = Command::new(&self.docker_bin);
         cmd.args(["exec", "-i", "-t", &self.container_id, "/bin/sh"]);
@@ -221,6 +245,13 @@ impl Communicator for DockerCommunicator {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::sync::Mutex;
 

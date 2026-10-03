@@ -29,7 +29,6 @@ impl Host for LinuxHost {
     /// # Returns
     ///
     /// Returns `true` if `std::env::consts::OS` is `"linux"`.
-    #[coverage(off)]
     fn is_match(&self) -> bool {
         if let Ok(mock) = std::env::var("MOCK_OS") {
             return mock == "linux";
@@ -45,7 +44,6 @@ impl Host for LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if manipulating `/etc/exports` fails (currently a no-op).
-    #[coverage(off)]
     fn configure_nfs(
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
@@ -95,7 +93,6 @@ impl Host for LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the configuration fails (currently a no-op).
-    #[coverage(off)]
     fn configure_smb(
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
@@ -134,7 +131,6 @@ impl Host for LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the check cannot be completed (currently a mocked `Ok(true)`).
-    #[coverage(off)]
     fn check_admin(&self) -> Result<bool, MigratoryError> {
         #[cfg(not(test))]
         {
@@ -149,7 +145,6 @@ impl Host for LinuxHost {
         Ok(true)
     }
 
-    #[coverage(off)]
     fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
         // Find local ip using `ip route get`
         let cmd = "ip route get 1 | awk '{print $7}' | tr -d '
@@ -179,7 +174,19 @@ impl Host for LinuxHost {
 }
 
 #[cfg(not(test))]
-#[coverage(off)]
+/// Executes the `list_linux_bridge_interfaces` function.
+///
+/// # Arguments
+///
+/// * None
+///
+/// # Returns
+///
+/// Returns `Result<Vec<String>, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn list_linux_bridge_interfaces() -> Result<Vec<String>, MigratoryError> {
     let mut list = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
@@ -204,7 +211,6 @@ fn list_linux_bridge_interfaces() -> Result<Vec<String>, MigratoryError> {
 
 impl LinuxHost {
     /// Checks if the user is in the libvirt group for socket access.
-    #[coverage(off)]
     pub fn check_libvirt_group(&self) -> Result<bool, MigratoryError> {
         #[cfg(not(test))]
         {
@@ -340,11 +346,16 @@ impl LinuxHost {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
-    #[coverage(off)]
     fn restore_mock_os(orig: Option<String>) {
         unsafe {
             if let Some(val) = orig {

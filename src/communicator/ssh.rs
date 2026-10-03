@@ -16,18 +16,43 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Documentation for this item.
 trait ResultExt<T> {
+    /// Executes the `wrap_err` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The `msg` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<T, MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn wrap_err(self, msg: &str) -> Result<T, MigratoryError>;
+    /// Executes the `wrap_generic` function.
+    ///
+    /// # Arguments
+    ///
+    /// * None
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<T, MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn wrap_generic(self) -> Result<T, MigratoryError>;
 }
 
 impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
-    #[coverage(off)]
     fn wrap_err(self, msg: &str) -> Result<T, MigratoryError> {
         self.map_err(|e| MigratoryError::Generic(format!("{}: {}", msg, e)))
     }
 
-    #[coverage(off)]
     fn wrap_generic(self) -> Result<T, MigratoryError> {
         self.map_err(|e| MigratoryError::Generic(e.to_string()))
     }
@@ -290,7 +315,6 @@ impl SshCommunicator {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on execution failure or non-zero exit code.
-    #[coverage(off)]
     pub fn execute_via_openssh(&self, command: &str) -> Result<String, MigratoryError> {
         let mut cmd = Command::new("ssh");
         self.add_common_options(&mut cmd);
@@ -430,7 +454,19 @@ impl SshCommunicator {
         Self::generate_keypair_real()
     }
 
-    #[coverage(off)]
+    /// Executes the `generate_keypair_real` function.
+    ///
+    /// # Arguments
+    ///
+    /// * None
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<(String, String), MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn generate_keypair_real() -> Result<(String, String), MigratoryError> {
         let temp_dir = tempfile::tempdir().map_err(|e| MigratoryError::Generic(e.to_string()))?;
         let key_path = temp_dir.path().join("id_ed25519");
@@ -785,7 +821,7 @@ impl Communicator for SshCommunicator {
 /// Mock SSH implementation for unit testing.
 #[cfg(test)]
 pub(crate) mod mock_ssh {
-    use std::io::{Error as IoError, ErrorKind, Read, Result as IoResult, Write};
+    use std::io::{Error as IoError, Read, Result as IoResult, Write};
     use std::net::TcpStream;
     use std::path::Path;
 
@@ -800,6 +836,7 @@ pub(crate) mod mock_ssh {
         pub static MOCK_STATE: std::cell::RefCell<MockState> = std::cell::RefCell::new(MockState::default());
     }
 
+    #[derive(Default)]
     pub struct MockState {
         pub fail_session_new: bool,
         pub fail_handshake: bool,
@@ -823,35 +860,6 @@ pub(crate) mod mock_ssh {
         pub exit_status: i32,
         pub output: Vec<u8>,
         pub stderr_output: Vec<u8>,
-    }
-
-    impl Default for MockState {
-        fn default() -> Self {
-            Self {
-                fail_session_new: false,
-                fail_handshake: false,
-                fail_auth: false,
-                fail_auth_completely: false,
-                fail_auth_silent: false,
-                fail_channel: false,
-                fail_pty: false,
-                fail_exec: false,
-                fail_exec_check: false,
-                fail_scp_send: false,
-                fail_scp_recv: false,
-                fail_io: false,
-                fail_stderr_io: false,
-                fail_wait_close: false,
-                fail_exit_status: false,
-                fail_file_send_eof: false,
-                fail_file_wait_eof: false,
-                fail_file_close: false,
-                fail_file_wait_close: false,
-                exit_status: 0,
-                output: Vec::new(),
-                stderr_output: Vec::new(),
-            }
-        }
     }
 
     pub struct Session {
@@ -972,7 +980,6 @@ pub(crate) mod mock_ssh {
     }
 
     impl Channel {
-        #[coverage(off)]
         pub fn exec(&mut self, command: &str) -> Result<(), Error> {
             let (fail_exec, fail_exec_check) = MOCK_STATE.with(|s| {
                 let b = s.borrow();
@@ -1054,7 +1061,7 @@ pub(crate) mod mock_ssh {
     impl Read for ChannelStderr {
         fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
             if self.fail_io {
-                return Err(IoError::new(ErrorKind::Other, "mock io error"));
+                return Err(IoError::other("mock io error"));
             }
             let len = std::cmp::min(buf.len(), self.output.len());
             buf[..len].copy_from_slice(&self.output[..len]);
@@ -1066,7 +1073,7 @@ pub(crate) mod mock_ssh {
     impl Read for Channel {
         fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
             if self.fail_io {
-                return Err(IoError::new(ErrorKind::Other, "mock io error"));
+                return Err(IoError::other("mock io error"));
             }
             let len = std::cmp::min(buf.len(), self.output.len());
             buf[..len].copy_from_slice(&self.output[..len]);
@@ -1113,7 +1120,7 @@ pub(crate) mod mock_ssh {
     impl Write for File {
         fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
             if self.fail_io {
-                return Err(IoError::new(ErrorKind::Other, "mock io error"));
+                return Err(IoError::other("mock io error"));
             }
             Ok(buf.len())
         }
@@ -1125,7 +1132,7 @@ pub(crate) mod mock_ssh {
     impl Read for File {
         fn read(&mut self, _buf: &mut [u8]) -> IoResult<usize> {
             if self.fail_io {
-                return Err(IoError::new(ErrorKind::Other, "mock io error"));
+                return Err(IoError::other("mock io error"));
             }
             Ok(0)
         }
@@ -1139,6 +1146,13 @@ pub(crate) mod mock_ssh {
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use self::mock_ssh::{MOCK_STATE, MockState};
     use super::*;
 
@@ -1987,7 +2001,6 @@ mod tests {
         assert!(comm.execute_pty("uptime").is_err());
     }
 
-    #[coverage(off)]
     fn noop_streaming_cb(_: &str) {}
 
     #[test]

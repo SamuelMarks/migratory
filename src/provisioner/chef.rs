@@ -9,13 +9,21 @@ use std::io::Write;
 
 /// Chef provisioner.
 pub struct ChefProvisioner {
+    /// Represents the `mode` field.
     mode: Option<String>,
+    /// Represents the `run_list` field.
     run_list: Option<String>,
+    /// Represents the `install` field.
     install: bool,
+    /// Represents the `json` field.
     json: String,
+    /// Represents the `cookbooks_path` field.
     cookbooks_path: Option<String>,
+    /// Represents the `roles_path` field.
     roles_path: Option<String>,
+    /// Represents the `data_bags_path` field.
     data_bags_path: Option<String>,
+    /// Represents the `environments_path` field.
     environments_path: Option<String>,
 }
 
@@ -53,7 +61,6 @@ impl Default for ChefProvisioner {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if local file creation or remote upload fails.
-#[coverage(off)]
 fn write_and_upload_temp(
     comm: &dyn Communicator,
     file_name: &str,
@@ -205,6 +212,13 @@ impl Provisioner for ChefProvisioner {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::path::Path;
@@ -213,23 +227,18 @@ mod tests {
     struct MockComm;
 
     impl Communicator for MockComm {
-        #[coverage(off)]
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -243,7 +252,6 @@ mod tests {
     }
 
     impl Communicator for FailingComm {
-        #[coverage(off)]
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             if self.fail_execute {
                 return Err(MigratoryError::Generic("execute failed".to_string()));
@@ -253,9 +261,8 @@ mod tests {
                     return Err(MigratoryError::Generic("execute failed".to_string()));
                 }
             }
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, remote_path: &str) -> Result<(), MigratoryError> {
             if self.fail_upload {
                 return Err(MigratoryError::Generic("upload failed".to_string()));
@@ -267,15 +274,12 @@ mod tests {
             }
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }

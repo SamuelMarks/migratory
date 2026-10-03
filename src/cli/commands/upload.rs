@@ -20,7 +20,6 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns a `MigratoryError` if reading the input file, creating the output file, or compressing fails.
-#[coverage(off)]
 fn compress_file(source: &Path) -> Result<(tempfile::TempDir, std::path::PathBuf), MigratoryError> {
     let temp_dir = tempfile::tempdir().map_err(MigratoryError::Io)?;
     let file_name = source
@@ -53,7 +52,6 @@ fn compress_file(source: &Path) -> Result<(tempfile::TempDir, std::path::PathBuf
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found, arguments are missing, the source file is missing,
 /// the machine is not running, or file upload fails.
-#[coverage(off)]
 pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
     let path = cwd.join("Vagrantfile");
     if !path.exists() {
@@ -143,7 +141,6 @@ pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
 }
 
 /// Helper function to perform communicator upload, excluded from coverage in unit tests.
-#[coverage(off)]
 fn do_upload(
     communicator: &crate::communicator::ssh::SshCommunicator,
     file_to_upload: &Path,
@@ -162,8 +159,14 @@ fn do_upload(
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

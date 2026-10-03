@@ -29,7 +29,6 @@ impl Host for BsdHost {
     /// # Returns
     ///
     /// Returns `true` if `std::env::consts::OS` is `"freebsd"`, `"openbsd"`, or `"netbsd"`.
-    #[coverage(off)]
     fn is_match(&self) -> bool {
         if let Ok(mock) = std::env::var("MOCK_OS") {
             return mock == "bsd"
@@ -53,7 +52,6 @@ impl Host for BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if restarting `mountd` fails.
-    #[coverage(off)]
     fn configure_nfs(
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
@@ -102,7 +100,6 @@ impl Host for BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the configuration fails.
-    #[coverage(off)]
     fn configure_smb(
         &self,
         _folders: &[crate::config::SyncedFolderConfig],
@@ -141,7 +138,6 @@ impl Host for BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the check fails.
-    #[coverage(off)]
     fn check_admin(&self) -> Result<bool, MigratoryError> {
         #[cfg(not(test))]
         {
@@ -192,7 +188,6 @@ impl Host for BsdHost {
 ///
 /// Returns a `MigratoryError` if network configuration cannot be inspected.
 #[cfg(not(test))]
-#[coverage(off)]
 fn resolve_bsd_host_ip() -> Result<String, MigratoryError> {
     if let Ok(output) = std::process::Command::new("route")
         .args(["-n", "get", "default"])
@@ -235,7 +230,6 @@ impl BsdHost {
     /// # Returns
     ///
     /// Returns a list of supported hypervisors detected on the BSD host (e.g. bhyve, virtualbox).
-    #[coverage(off)]
     pub fn capabilities(&self) -> Vec<String> {
         let mut caps = Vec::new();
         if std::process::Command::new("bhyve")
@@ -324,6 +318,13 @@ impl BsdHost {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]

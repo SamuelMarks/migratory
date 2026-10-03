@@ -8,6 +8,7 @@ use crate::provider::virtualbox::execute_vboxmanage;
 
 /// VirtualBox Shared Folder.
 pub struct VboxSyncedFolder {
+    /// Represents the `machine_id` field.
     machine_id: Option<String>,
 }
 
@@ -42,7 +43,6 @@ impl VboxSyncedFolder {
 
     /// Executes the prepare command on the host.
     #[cfg(not(test))]
-    #[coverage(off)]
     fn execute_prepare_command(
         &self,
         id: &str,
@@ -78,7 +78,6 @@ impl VboxSyncedFolder {
 
     /// Executes the prepare command on the host (test mock).
     #[cfg(test)]
-    #[coverage(off)]
     fn execute_prepare_command(
         &self,
         _id: &str,
@@ -177,8 +176,14 @@ impl SyncedFolder for VboxSyncedFolder {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::path::Path;
     use std::time::Duration;
@@ -190,21 +195,17 @@ mod tests {
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -214,19 +215,15 @@ mod tests {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Err(MigratoryError::Generic("comm error".to_string()))
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -255,19 +252,15 @@ mod tests {
                 Ok("ok".to_string())
             }
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -412,7 +405,7 @@ mod tests {
         let dir = tempdir()?;
         let folder = VboxSyncedFolder::new(Some("test-id".to_string()));
         let opts = SyncedFolderOptions {
-            guest_path: "".to_string(),
+            guest_path: String::new(),
             host_path: dir.path().to_string_lossy().to_string(),
             ..Default::default()
         };

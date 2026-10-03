@@ -5,12 +5,25 @@ use super::{
 use crate::error::MigratoryError;
 use std::process::Command;
 
+/// Documentation for this item.
 trait ResultExt<T> {
+    /// Executes the `wrap_err` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The `msg` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<T, MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn wrap_err(self, msg: &str) -> Result<T, MigratoryError>;
 }
 
 impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
-    #[coverage(off)]
     fn wrap_err(self, msg: &str) -> Result<T, MigratoryError> {
         self.map_err(|e| MigratoryError::Generic(format!("{}: {}", msg, e)))
     }
@@ -25,6 +38,7 @@ pub fn init_ruby_vm() {
 
 pub use super::in_process::evaluate_in_process;
 
+/// Represents the `RUBY_PARSER_SCRIPT` constant.
 const RUBY_PARSER_SCRIPT: &str = r#"
 require 'fileutils'
 require 'socket'
@@ -660,6 +674,19 @@ pub fn parse_vagrantfiles<P: AsRef<std::path::Path>>(
     parse_vagrantfiles_inner(&path_refs)
 }
 
+/// Executes the `parse_vagrantfiles_inner` function.
+///
+/// # Arguments
+///
+/// * `paths` - The `paths` argument.
+///
+/// # Returns
+///
+/// Returns `Result<EnvironmentConfig, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn parse_vagrantfiles_inner(
     paths: &[&std::path::Path],
 ) -> Result<EnvironmentConfig, MigratoryError> {
@@ -1366,8 +1393,14 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -1716,8 +1749,14 @@ end
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod parse_json_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]

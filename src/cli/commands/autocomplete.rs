@@ -30,6 +30,16 @@ pub fn execute(cmd: &AutocompleteCommands, mut writer: impl Write) -> Result<(),
     }
 }
 
+/// Executes the `get_shell_paths` function.
+///
+/// # Arguments
+///
+/// * `shell` - The `shell` argument.
+/// * `home_dir` - The `home_dir` argument.
+///
+/// # Returns
+///
+/// Returns `(&'static str, PathBuf)`.
 fn get_shell_paths(shell: Shell, home_dir: &std::path::Path) -> (&'static str, PathBuf) {
     match shell {
         Shell::Zsh => ("migratory-autocomplete.zsh", home_dir.join(".zshrc")),
@@ -38,6 +48,19 @@ fn get_shell_paths(shell: Shell, home_dir: &std::path::Path) -> (&'static str, P
     }
 }
 
+/// Executes the `ensure_parent_dir` function.
+///
+/// # Arguments
+///
+/// * `path` - The `path` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn ensure_parent_dir(path: &std::path::Path) -> Result<(), MigratoryError> {
     if let Some(parent) = path.parent() {
         if parent.as_os_str().is_empty() {
@@ -60,16 +83,27 @@ struct FailingWriter;
 #[cfg(test)]
 impl Write for FailingWriter {
     fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "write failed",
-        ))
+        Err(std::io::Error::other("write failed"))
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
 
+/// Executes the `append_to_profile_impl` function.
+///
+/// # Arguments
+///
+/// * `file` - The `file` argument.
+/// * `append_content` - The `append_content` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn append_to_profile_impl(
     file: &mut dyn Write,
     append_content: &str,
@@ -88,6 +122,20 @@ fn append_to_profile_impl(
     Ok(())
 }
 
+/// Executes the `install_autocomplete` function.
+///
+/// # Arguments
+///
+/// * `args` - The `args` argument.
+/// * `writer` - The `writer` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn install_autocomplete(
     args: &AutocompleteInstallArgs,
     writer: &mut dyn Write,
@@ -176,6 +224,13 @@ fn install_autocomplete(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use tempfile::tempdir;
 
@@ -352,7 +407,7 @@ mod tests {
             zsh: false,
             fish: false,
         };
-        let cmd = AutocompleteCommands::Install(args.clone());
+        let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
         assert!(execute(&cmd, &mut out).is_ok());
 
@@ -515,6 +570,13 @@ mod tests {
 
 #[cfg(test)]
 mod extra_autocomplete_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::commands::box_cmd::tests::ENV_LOCK;
     use tempfile::tempdir;

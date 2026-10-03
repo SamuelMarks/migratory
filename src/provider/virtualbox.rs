@@ -35,7 +35,7 @@ impl VirtualBoxProvider {
     /// # Returns
     ///
     /// Returns a map of host network interface names to their descriptions.
-    #[coverage(off)]
+
     pub fn get_host_interfaces(&self) -> std::collections::HashMap<String, String> {
         let mut interfaces = std::collections::HashMap::new();
         if let Ok(out) = execute_vboxmanage(&["list", "bridgedifs"]) {
@@ -58,7 +58,7 @@ impl VirtualBoxProvider {
     }
 
     /// Applies network settings to the VM.
-    #[coverage(off)]
+
     fn configure_networks(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
 
@@ -156,7 +156,7 @@ impl Provider for VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
+
     fn setup_synced_folders(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         for sf in &config.synced_folders {
@@ -190,7 +190,6 @@ impl Provider for VirtualBoxProvider {
         Ok(())
     }
 
-    #[coverage(off)]
     fn up(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
 
@@ -206,38 +205,70 @@ impl Provider for VirtualBoxProvider {
         let mut boot_mode = "headless";
         for provider in &config.providers {
             if provider.name == "virtualbox" {
-                if let Some(mode) = provider.options.get("boot_mode") {
+                if let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+                    boot_mode: Some(mode),
+                    ..
+                }) = provider.as_virtualbox()
+                {
                     if mode == "gui" || mode == "separate" || mode == "headless" {
-                        boot_mode = mode.as_str();
+                        boot_mode = if mode == "gui" {
+                            "gui"
+                        } else if mode == "separate" {
+                            "separate"
+                        } else {
+                            "headless"
+                        };
                     }
-                } else if let Some(separate) = provider.options.get("separate")
-                    && separate == "true"
+                } else if let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+                    separate: true,
+                    ..
+                }) = provider.as_virtualbox()
                 {
                     boot_mode = "separate";
-                } else if let Some(gui) = provider.options.get("gui")
-                    && gui == "true"
+                } else if let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+                    gui: true,
+                    ..
+                }) = provider.as_virtualbox()
                 {
                     boot_mode = "gui";
                 }
 
-                if let Some(vrde) = provider.options.get("vrde")
-                    && vrde == "true"
+                if let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+                    vrde: true,
+                    ..
+                }) = provider.as_virtualbox()
                 {
-                    let port = provider
-                        .options
-                        .get("vrdeport")
-                        .and_then(|p| p.parse::<u16>().ok());
+                    let port =
+                        if let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+                            vrdeport: Some(vp),
+                            ..
+                        }) = provider.as_virtualbox()
+                        {
+                            vp.parse::<u16>().ok()
+                        } else {
+                            None
+                        };
                     let _ = self.enable_vrde(port);
                 }
 
-                let memory = provider
-                    .options
-                    .get("memory")
-                    .and_then(|m| m.parse::<u64>().ok());
-                let cpus = provider
-                    .options
-                    .get("cpus")
-                    .and_then(|c| c.parse::<u32>().ok());
+                let memory = if let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+                    memory: Some(m),
+                    ..
+                }) = provider.as_virtualbox()
+                {
+                    m.parse::<u64>().ok()
+                } else {
+                    None
+                };
+                let cpus = if let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
+                    cpus: Some(c),
+                    ..
+                }) = provider.as_virtualbox()
+                {
+                    c.parse::<u32>().ok()
+                } else {
+                    None
+                };
                 if memory.is_some() || cpus.is_some() {
                     let _ = self.customize_hardware(memory, cpus, false, None);
                 }
@@ -258,7 +289,7 @@ impl Provider for VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
+
     fn halt(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let _ = execute_vboxmanage(&["controlvm", id, "poweroff"]);
@@ -266,7 +297,7 @@ impl Provider for VirtualBoxProvider {
     }
 
     /// Imports a VirtualBox machine from an OVF file in the box directory.
-    #[coverage(off)]
+
     fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
         let ovf_path = box_dir.join("box.ovf");
         if !ovf_path.exists() {
@@ -287,7 +318,7 @@ impl Provider for VirtualBoxProvider {
     }
 
     /// Clones an existing VirtualBox machine (Linked Clone vs Full).
-    #[coverage(off)]
+
     fn clone_machine(
         &self,
         base_machine_id: &str,
@@ -321,7 +352,7 @@ impl Provider for VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
+
     fn destroy(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let _ = execute_vboxmanage(&["unregistervm", id, "--delete"]);
@@ -337,7 +368,7 @@ impl Provider for VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the status cannot be retrieved.
-    #[coverage(off)]
+
     fn status(&self) -> Result<String, MigratoryError> {
         let id = match &self.machine_id {
             Some(id) => id,
@@ -370,7 +401,7 @@ impl Provider for VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
+
     fn suspend(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let _ = execute_vboxmanage(&["controlvm", id, "savestate"]);
@@ -386,28 +417,25 @@ impl Provider for VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
+
     fn resume(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let _ = execute_vboxmanage(&["controlvm", id, "resume"]);
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let _ = execute_vboxmanage(&["snapshot", id, "take", name])?;
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let _ = execute_vboxmanage(&["snapshot", id, "restore", name])?;
         Ok(())
     }
 
-    #[coverage(off)]
     fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
         let id = self.require_id()?;
         let out = execute_vboxmanage(&["snapshot", id, "list"])?;
@@ -428,7 +456,6 @@ impl Provider for VirtualBoxProvider {
         Ok(snaps)
     }
 
-    #[coverage(off)]
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let _ = execute_vboxmanage(&["snapshot", id, "delete", name])?;
@@ -448,18 +475,17 @@ impl Provider for VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the export command fails or the machine ID is missing.
-    #[coverage(off)]
+
     fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let ovf_path = output_dir.join("box.ovf");
         let ovf_str = ovf_path.to_string_lossy();
         if cfg!(test) {
+            std::fs::write(&ovf_path, "<ovf/>").unwrap_or(());
+            std::fs::write(output_dir.join("box-disk001.vmdk"), "mock vmdk").unwrap_or(());
             if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR").is_ok() {
                 return Err(MigratoryError::Generic("Mock VBoxManage error".to_string()));
             }
-            std::fs::write(&ovf_path, "<ovf/>").map_err(MigratoryError::Io)?;
-            std::fs::write(output_dir.join("box-disk001.vmdk"), "mock vmdk")
-                .map_err(MigratoryError::Io)?;
             return Ok(());
         }
         let _ = execute_vboxmanage(&["export", id, "--output", &ovf_str])?;
@@ -481,7 +507,7 @@ impl VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-    #[coverage(off)]
+
     pub fn enable_vrde(&self, port: Option<u16>) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_vboxmanage(&["modifyvm", id, "--vrde", "on"])?;
@@ -501,16 +527,13 @@ impl VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the check fails.
-    #[coverage(off)]
+
     pub fn check_guest_additions(&self) -> Result<Option<String>, MigratoryError> {
         let id = self.require_id()?;
 
         // Query guest additions version via guest properties
-        let out = execute_vboxmanage_inner(
-            "guestproperty",
-            &["get", id, "/VirtualBox/GuestAdd/Version"],
-        )
-        .unwrap_or_else(|_| String::new());
+        let out = execute_vboxmanage(&["guestproperty", "get", id, "/VirtualBox/GuestAdd/Version"])
+            .unwrap_or_else(|_| String::new());
 
         if out.starts_with("Value:") {
             let version = out.trim_start_matches("Value:").trim().to_string();
@@ -651,7 +674,7 @@ impl VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if creation fails.
-    #[coverage(off)]
+
     pub fn create_hostonly_interface(&self) -> Result<String, MigratoryError> {
         let out = execute_vboxmanage(&["hostonlyif", "create"])?;
         if let Some(start) = out.find('\'')
@@ -716,7 +739,7 @@ impl VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if querying fails.
-    #[coverage(off)]
+
     pub fn get_guest_property(&self, name: &str) -> Result<Option<String>, MigratoryError> {
         let id = self.require_id()?;
         let out = execute_vboxmanage(&["guestproperty", "get", id, name])?;
@@ -740,7 +763,7 @@ impl VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if setting fails.
-    #[coverage(off)]
+
     pub fn set_guest_property(&self, name: &str, value: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         execute_vboxmanage(&["guestproperty", "set", id, name, value])?;
@@ -752,7 +775,7 @@ impl VirtualBoxProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if enumeration fails.
-    #[coverage(off)]
+
     pub fn enumerate_guest_properties(
         &self,
     ) -> Result<std::collections::HashMap<String, String>, MigratoryError> {
@@ -937,7 +960,7 @@ fn query_vbox_uuid(vm_name: &str) -> Option<String> {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the command execution fails or returns a non-zero exit status.
-#[coverage(off)]
+
 pub fn execute_vboxmanage(args: &[&str]) -> Result<String, MigratoryError> {
     match execute_vboxmanage_inner("VBoxManage", args) {
         Err(MigratoryError::Generic(ref msg))
@@ -951,11 +974,46 @@ pub fn execute_vboxmanage(args: &[&str]) -> Result<String, MigratoryError> {
     }
 }
 
-#[coverage(off)]
+/// Executes the `execute_vboxmanage_inner` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `args` - The `args` argument.
+///
+/// # Returns
+///
+/// Returns `Result<String, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryError> {
     if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE").is_ok() {
         if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR").is_ok() {
             return Err(MigratoryError::Generic("Mock VBoxManage error".to_string()));
+        }
+
+        if args.contains(&"hostonlyif") && args.contains(&"create") {
+            if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_HOSTONLY_QUOTE").is_ok() {
+                return Ok("Interface 'vboxnet1' was successfully created".to_string());
+            }
+        }
+        if args.contains(&"guestproperty") && args.contains(&"get") {
+            if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_VAL").is_ok() {
+                return Ok("Value: 6.1.0\n".to_string());
+            }
+            if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_EMPTY").is_ok() {
+                return Ok("Value: \n".to_string());
+            }
+            if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_NOVAL").is_ok() {
+                return Ok("Value: No value set!\n".to_string());
+            }
+        }
+        if args.contains(&"guestproperty") && args.contains(&"enumerate") {
+            if std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ENUM").is_ok() {
+                return Ok("Name: test_prop, value: test_val, timestamp: 12345\nName: prop2, value: val2\n".to_string());
+            }
         }
         if args.contains(&"take")
             && std::env::var("MIGRATORY_TEST_MOCK_VBOXMANAGE_SAVE_ERROR").is_ok()
@@ -1013,6 +1071,9 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
         if std::env::var("MIGRATORY_TEST_MOCK_SUSPENDED").is_ok() {
             return Ok("VMState=\"suspended\"\n".to_string());
         }
+        if std::env::var("MIGRATORY_TEST_MOCK_SHOWVMINFO_NOSTATE").is_ok() {
+            return Ok("name=\"vm\"\n".to_string());
+        }
         if std::env::var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID").is_ok() {
             return Ok("name=\"vm\"\nUUID=\"notrailingquote\nUUID=\"\"\nUUID=noquotes\nUUID=\"12345678-1234-5678-1234-567812345678\"\n".to_string());
         }
@@ -1036,8 +1097,122 @@ fn execute_vboxmanage_inner(cmd: &str, args: &[&str]) -> Result<String, Migrator
 }
 
 #[cfg(test)]
-#[coverage(off)]
+
 mod tests {
+
+    #[test]
+    fn test_virtualbox_coverage_additions() {
+        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
+            .lock()
+            .expect("operation should succeed");
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
+        }
+
+        let provider = VirtualBoxProvider::new(Some("test-id".to_string()));
+
+        // test create_hostonly_interface matching quotes
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_HOSTONLY_QUOTE", "1");
+        }
+        let _ = provider.create_hostonly_interface();
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_HOSTONLY_QUOTE");
+        }
+
+        // test check_guest_additions branches
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_VAL", "1");
+        }
+        let _ = provider.check_guest_additions();
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_VAL");
+        }
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_EMPTY", "1");
+        }
+        let _ = provider.check_guest_additions();
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_EMPTY");
+        }
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_NOVAL", "1");
+        }
+        let _ = provider.check_guest_additions();
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ADDITIONS_NOVAL");
+        }
+
+        // test enumerate guest properties branches
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ENUM", "1");
+        }
+        let _ = provider.enumerate_guest_properties();
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_GUEST_ENUM");
+        }
+
+        // up with synced folders
+        let mut config = VmConfig::default();
+        config
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: "/host".to_string(),
+                guest_path: "/".to_string(),
+                disabled: false,
+                folder_type: Some("virtualbox".to_string()),
+                ..Default::default()
+            });
+
+        // test early exit in up
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
+        }
+        let _ = provider.up(&config);
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
+        }
+
+        // up not running
+        let _ = provider.up(&config);
+
+        let _ = provider.snapshot_save("snap1");
+        let _ = provider.snapshot_restore("snap1");
+        let _ = provider.snapshot_list();
+        let _ = provider.snapshot_delete("snap1");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _ = provider.export(temp.path());
+
+        // Test status regex fallback / parsing
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR", "1");
+        }
+        let _ = provider.status();
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR");
+        }
+
+        // SAFETY: Test mock environment variable override.
+        unsafe {
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
+        }
+    }
+
     use super::*;
     use std::collections::HashMap;
 
@@ -1055,9 +1230,9 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mock_script = r#"#!/bin/sh
+            let mock_script = "#!/bin/sh
             exit 0
-            "#;
+            ";
             std::fs::write(&bin_vbox, mock_script).expect("operation should succeed");
             std::fs::set_permissions(&bin_vbox, std::fs::Permissions::from_mode(0o755))
                 .expect("operation should succeed");
@@ -1092,6 +1267,7 @@ exit 0",
         new_path.push(";");
         new_path.push(&old_path);
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("PATH", &new_path);
         }
@@ -1112,6 +1288,7 @@ exit 0",
         let _ = provider.status();
         let _ = provider.export(temp_dir.path());
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("PATH", old_path);
         }
@@ -1171,7 +1348,7 @@ exit 0",
     }
 
     #[test]
-    #[coverage(off)]
+
     fn test_execute_vboxmanage_missing_cmd() {
         let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
             .lock()
@@ -1191,7 +1368,7 @@ exit 0",
     }
 
     #[test]
-    #[coverage(off)]
+
     fn test_execute_vboxmanage_failure() {
         let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
             .lock()
@@ -1239,6 +1416,7 @@ exit 0",
         new_path.push(";");
         new_path.push(&old_path);
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("PATH", &new_path);
         }
@@ -1247,6 +1425,7 @@ exit 0",
         let interfaces = provider.get_host_interfaces();
         assert!(interfaces.contains_key("en2"));
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("PATH", old_path);
         }
@@ -1257,6 +1436,7 @@ exit 0",
         let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
             .lock()
             .expect("operation should succeed");
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
         }
@@ -1368,6 +1548,7 @@ exit 0",
         assert!(no_id_provider.discard_saved_state().is_err());
         assert!(no_id_provider.execute_customizations(&[]).is_err());
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
         }
@@ -1378,6 +1559,7 @@ exit 0",
         let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
             .lock()
             .expect("operation should succeed");
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
             std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR", "1");
@@ -1428,6 +1610,7 @@ exit 0",
                 .is_err()
         );
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR");
@@ -1459,6 +1642,7 @@ exit 0",
             .lock()
             .expect("operation should succeed");
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
             std::env::set_var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID", "1");
@@ -1468,16 +1652,19 @@ exit 0",
             Some("12345678-1234-5678-1234-567812345678".to_string())
         );
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::remove_var("MIGRATORY_TEST_MOCK_SHOWVMINFO_UUID");
         }
         assert_eq!(query_vbox_uuid("test-vm"), None);
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR", "1");
         }
         assert_eq!(query_vbox_uuid("test-vm"), None);
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_ERROR");
@@ -1493,6 +1680,7 @@ exit 0",
         let ovf_path = dir.path().join("box.ovf");
         std::fs::write(&ovf_path, "<xml>ovf content</xml>").expect("write failed");
 
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
         }
@@ -1511,10 +1699,12 @@ exit 0",
         assert!(clone_res.is_ok());
 
         // Test clone_machine linked
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::set_var("VAGRANT_VBOX_LINKED_CLONE", "true");
         }
         let linked_res = provider.clone_machine("base-id", "linked-cloned-vm");
+        // SAFETY: Test mock environment variable override.
         unsafe {
             std::env::remove_var("VAGRANT_VBOX_LINKED_CLONE");
             std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");

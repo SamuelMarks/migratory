@@ -7,14 +7,23 @@ use std::collections::HashMap;
 
 /// Salt provisioner.
 pub struct SaltProvisioner {
+    /// Represents the `run_highstate` field.
     run_highstate: bool,
+    /// Represents the `install_master` field.
     install_master: bool,
+    /// Represents the `no_minion` field.
     no_minion: bool,
+    /// Represents the `masterless` field.
     masterless: bool,
+    /// Represents the `install_type` field.
     install_type: Option<String>,
+    /// Represents the `minion_config` field.
     minion_config: Option<String>,
+    /// Represents the `formula_path` field.
     formula_path: Option<String>,
+    /// Represents the `state_files_path` field.
     state_files_path: Option<String>,
+    /// Represents the `pillar_path` field.
     pillar_path: Option<String>,
 }
 
@@ -146,6 +155,13 @@ impl Provisioner for SaltProvisioner {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::io::Write;
@@ -156,23 +172,18 @@ mod tests {
     struct MockComm;
 
     impl Communicator for MockComm {
-        #[coverage(off)]
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -185,7 +196,6 @@ mod tests {
     }
 
     impl Communicator for FailingComm {
-        #[coverage(off)]
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             if self.fail_execute {
                 return Err(MigratoryError::Generic("execute failed".to_string()));
@@ -195,9 +205,8 @@ mod tests {
                     return Err(MigratoryError::Generic("execute failed".to_string()));
                 }
             }
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             if self.fail_upload {
                 Err(MigratoryError::Generic("upload failed".to_string()))
@@ -205,15 +214,12 @@ mod tests {
                 Ok(())
             }
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }

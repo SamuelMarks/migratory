@@ -25,7 +25,6 @@ use std::process::Command;
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or packaging fails.
-#[coverage(off)]
 pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
@@ -40,7 +39,6 @@ pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
     }
 
-    #[coverage(off)]
     fn get_ui() -> Box<dyn crate::ui::Ui + Send + Sync> {
         if std::env::args().any(|arg| arg == "--machine-readable") {
             Box::new(crate::ui::MachineReadableUi)
@@ -183,7 +181,20 @@ pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-#[coverage(off)]
+/// Executes the `compress_package` function.
+///
+/// # Arguments
+///
+/// * `src_dir` - The `src_dir` argument.
+/// * `out_file` - The `out_file` argument.
+///
+/// # Returns
+///
+/// Returns `Result<(), MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn compress_package(src_dir: &Path, out_file: &Path) -> Result<(), MigratoryError> {
     if cfg!(test) && std::env::var("MIGRATORY_TEST_MOCK_PACKAGE_TAR").is_ok() {
         let enc = flate2::write::GzEncoder::new(
@@ -221,8 +232,14 @@ fn compress_package(src_dir: &Path, out_file: &Path) -> Result<(), MigratoryErro
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

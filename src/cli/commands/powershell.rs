@@ -143,7 +143,6 @@ impl PowerShellSession {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on I/O failure.
-    #[coverage(off)]
     pub fn pipe_streams<R: Read, W: Write>(
         &self,
         reader: &mut R,
@@ -180,7 +179,6 @@ impl PowerShellSession {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if communication fails or the remote session exits abnormally.
-    #[coverage(off)]
     pub fn start(&self, cwd: &Path) -> Result<(), MigratoryError> {
         let is_winrm = self.machine_config.vm.communicator.as_deref() == Some("winrm");
 
@@ -224,15 +222,15 @@ impl PowerShellSession {
                     "PowerShell session interrupted by signal 2".to_string(),
                 ));
             }
-            if let Some(cmd) = &self.command {
-                if cmd.contains("FAIL_POWERSHELL") {
-                    return Err(MigratoryError::Generic(
-                        "PowerShell execution failed".to_string(),
-                    ));
-                }
+            if let Some(cmd) = &self.command
+                && cmd.contains("FAIL_POWERSHELL")
+            {
+                return Err(MigratoryError::Generic(
+                    "PowerShell execution failed".to_string(),
+                ));
             }
             let _ = (cwd, is_winrm);
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(test))]
@@ -317,7 +315,6 @@ impl PowerShellSession {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or the specified machine does not exist.
-#[coverage(off)]
 pub fn execute(cwd: &Path, args: &PowershellArgs) -> Result<(), MigratoryError> {
     let path = crate::config::get_vagrantfile_path(cwd);
     if !path.exists() {
@@ -387,8 +384,14 @@ pub fn execute(cwd: &Path, args: &PowershellArgs) -> Result<(), MigratoryError> 
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

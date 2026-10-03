@@ -15,7 +15,6 @@ use std::path::Path;
 ///
 /// * `machines` - Machine configuration map.
 /// * `name` - Machine name.
-#[coverage(off)]
 fn get_machine<'a>(
     machines: &'a std::collections::HashMap<String, crate::config::MachineConfig>,
     name: &str,
@@ -163,6 +162,20 @@ pub fn execute(cwd: &Path, args: &ProvisionArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
+/// Executes the `try_provision` function.
+///
+/// # Arguments
+///
+/// * `prov` - The `prov` argument.
+/// * `config` - The `config` argument.
+/// * `communicator` - The `communicator` argument.
+/// * `name` - The `name` argument.
+/// * `ui` - The `ui` argument.
+/// * `provisioner_name` - The `provisioner_name` argument.
+///
+/// # Returns
+///
+/// Returns `bool`.
 fn try_provision(
     prov: &mut dyn crate::provisioner::Provisioner,
     config: &std::collections::HashMap<String, String>,
@@ -195,6 +208,13 @@ fn try_provision(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
 
     #[test]
     #[cfg(unix)]

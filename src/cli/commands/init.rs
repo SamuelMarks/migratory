@@ -69,8 +69,14 @@ pub fn execute(cwd: &Path, args: &InitArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use tempfile::tempdir;
 

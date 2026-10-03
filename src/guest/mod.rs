@@ -487,6 +487,13 @@ pub fn resolve_guest(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::time::Duration;
@@ -516,19 +523,15 @@ mod tests {
                 Err(MigratoryError::Generic("Command failed".to_string()))
             }
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -537,7 +540,7 @@ mod tests {
     #[test]
     fn test_mock_comm_coverage() {
         let comm = MockComm {
-            os: "".to_string(),
+            os: String::new(),
             error_on_detect: false,
         };
         let _ = comm.upload(std::path::Path::new(""), "");
@@ -646,7 +649,6 @@ mod tests {
     }
 
     struct DummyGuest;
-    #[coverage(off)]
     impl Guest for DummyGuest {
         fn detect(&self, _comm: &dyn Communicator) -> Result<bool, MigratoryError> {
             Ok(true)
@@ -693,19 +695,15 @@ mod tests {
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 Ok("ok\n".to_string())
             }
-            #[coverage(off)]
             fn upload(&self, _l: &Path, _r: &str) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn download(&self, _r: &str, _l: &Path) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn execute_interactive(&self) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn wait_for_ready(&self, _t: Duration) -> Result<(), MigratoryError> {
                 Ok(())
             }
@@ -716,19 +714,15 @@ mod tests {
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 Err(MigratoryError::Generic("err".to_string()))
             }
-            #[coverage(off)]
             fn upload(&self, _l: &Path, _r: &str) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn download(&self, _r: &str, _l: &Path) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn execute_interactive(&self) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn wait_for_ready(&self, _t: Duration) -> Result<(), MigratoryError> {
                 Ok(())
             }

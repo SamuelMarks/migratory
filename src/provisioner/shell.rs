@@ -8,15 +8,25 @@ use std::path::Path;
 
 /// Shell script provisioner.
 pub struct ShellProvisioner {
+    /// Represents the `inline` field.
     inline: Option<String>,
+    /// Represents the `path` field.
     path: Option<String>,
+    /// Represents the `args` field.
     args: Option<String>,
+    /// Represents the `upload_path` field.
     upload_path: Option<String>,
+    /// Represents the `powershell` field.
     powershell: bool,
+    /// Represents the `powershell_args` field.
     powershell_args: Option<String>,
+    /// Represents the `sensitive` field.
     sensitive: bool,
+    /// Represents the `env` field.
     env: HashMap<String, String>,
+    /// Represents the `privileged` field.
     privileged: bool,
+    /// Represents the `reboot` field.
     reboot: bool,
 }
 
@@ -51,7 +61,6 @@ impl ShellProvisioner {
 /// # Errors
 ///
 /// Returns a `MigratoryError` if downloading, reading, or writing fails.
-#[coverage(off)]
 fn download_remote_script(url: &str) -> Result<tempfile::NamedTempFile, MigratoryError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -73,7 +82,6 @@ fn download_remote_script(url: &str) -> Result<tempfile::NamedTempFile, Migrator
 }
 
 /// Sleeps briefly to allow the connection to drop during reboot.
-#[coverage(off)]
 fn sleep_for_reboot() {
     #[cfg(not(test))]
     std::thread::sleep(std::time::Duration::from_secs(5));
@@ -87,10 +95,30 @@ impl Provisioner for ShellProvisioner {
     }
 
     fn prepare(&mut self, config: &HashMap<String, String>) -> Result<(), MigratoryError> {
-        self.inline = config.get("inline").cloned();
-        self.path = config.get("path").cloned();
-        self.args = config.get("args").cloned();
-        self.upload_path = config.get("upload_path").cloned();
+        let p_cfg = crate::config::ProvisionerConfig {
+            config: config.clone(),
+            ..Default::default()
+        };
+        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { inline, .. }) =
+            p_cfg.as_shell()
+        {
+            self.inline = inline;
+        }
+        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { path, .. }) =
+            p_cfg.as_shell()
+        {
+            self.path = path;
+        }
+        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { args, .. }) =
+            p_cfg.as_shell()
+        {
+            self.args = args;
+        }
+        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { upload_path, .. }) =
+            p_cfg.as_shell()
+        {
+            self.upload_path = upload_path;
+        }
         if let Some(ps) = config.get("powershell") {
             self.powershell = ps.to_lowercase() == "true" || ps == "1";
         }
@@ -224,21 +252,17 @@ mod tests {
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-            Ok("".to_string())
+            Ok(String::new())
         }
-        #[coverage(off)]
         fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -502,15 +526,13 @@ mod tests {
             fail_wait: bool,
         }
         impl Communicator for FailingComm {
-            #[coverage(off)]
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 if self.fail_execute {
                     Err(MigratoryError::Generic("execute failed".to_string()))
                 } else {
-                    Ok("".to_string())
+                    Ok(String::new())
                 }
             }
-            #[coverage(off)]
             fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
                 if self.fail_upload {
                     Err(MigratoryError::Generic("upload failed".to_string()))
@@ -518,7 +540,6 @@ mod tests {
                     Ok(())
                 }
             }
-            #[coverage(off)]
             fn download(
                 &self,
                 _remote_path: &str,
@@ -526,11 +547,9 @@ mod tests {
             ) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn execute_interactive(&self) -> Result<(), MigratoryError> {
                 Ok(())
             }
-            #[coverage(off)]
             fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
                 if self.fail_wait {
                     Err(MigratoryError::Generic("wait failed".to_string()))

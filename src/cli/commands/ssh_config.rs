@@ -140,14 +140,28 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-#[coverage(off)]
+/// Executes the `get_env_config` function.
+///
+/// # Arguments
+///
+/// * `path_str` - The `path_str` argument.
+///
+/// # Returns
+///
+/// Returns `crate::config::EnvironmentConfig`.
 fn get_env_config(path_str: &str) -> crate::config::EnvironmentConfig {
     crate::config::evaluate_vagrantfile(path_str).unwrap_or_default()
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
 
     #[test]
     fn test_execute_ssh_config_read_id_error() {

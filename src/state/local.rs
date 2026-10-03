@@ -11,6 +11,7 @@ use std::path::PathBuf;
 ///
 /// Manages state for a specific machine and provider.
 pub struct LocalMachineState {
+    /// Represents the `dir` field.
     dir: PathBuf,
 }
 
@@ -182,6 +183,7 @@ impl LocalMachineState {
 
 /// Manages the `.vagrant` local state tracking and locking.
 pub struct LocalStateManager {
+    /// Represents the `dir` field.
     dir: PathBuf,
 }
 
@@ -196,7 +198,6 @@ impl LocalStateManager {
     }
 
     /// Acquires an exclusive lock on the environment for the lifetime of the process.
-    #[coverage(off)]
     pub fn lock_process_environment(&self) -> Result<(), MigratoryError> {
         let lock_file = self.create_lock_file()?;
         let static_lock_file = Box::leak(Box::new(lock_file));
@@ -211,7 +212,6 @@ impl LocalStateManager {
     ///
     /// This prevents multiple concurrent processes from mutating the same
     /// environment state.
-    #[coverage(off)]
     pub fn lock(&self, lock: &mut RwLock<File>) -> Result<(), MigratoryError> {
         let _guard = lock
             .write()
@@ -238,7 +238,6 @@ impl LocalStateManager {
     }
 
     /// Creates or opens an exclusive environment dotlock file (`.vagrant/lock.dotlock`).
-    #[coverage(off)]
     pub fn create_dotlock(&self) -> Result<RwLock<File>, MigratoryError> {
         if !self.dir.exists() {
             fs::create_dir_all(&self.dir).map_err(|e| MigratoryError::Generic(e.to_string()))?;
@@ -257,6 +256,13 @@ impl LocalStateManager {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use tempfile::tempdir;
 

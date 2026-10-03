@@ -115,6 +115,13 @@ Cmnd_Alias VAGRANT_NFS_COMMANDS = /sbin/nfsd, /usr/sbin/exportfs, /etc/rc.d/moun
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]
@@ -160,33 +167,27 @@ mod tests {
 
     struct MinimalHost;
     impl Host for MinimalHost {
-        #[coverage(off)]
         fn name(&self) -> &str {
             "minimal"
         }
-        #[coverage(off)]
         fn is_match(&self) -> bool {
             true
         }
-        #[coverage(off)]
         fn configure_nfs(
             &self,
             _folders: &[crate::config::SyncedFolderConfig],
         ) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn configure_smb(
             &self,
             _folders: &[crate::config::SyncedFolderConfig],
         ) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn check_admin(&self) -> Result<bool, MigratoryError> {
             Ok(false)
         }
-        #[coverage(off)]
         fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
             Ok("127.0.0.1".to_string())
         }

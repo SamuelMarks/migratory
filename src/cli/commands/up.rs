@@ -11,8 +11,11 @@ use crate::ui::{ConsoleUi, Ui};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Represents the `ReadConfigAction` struct.
 struct ReadConfigAction {
+    /// Represents the `cwd` field.
     cwd: std::path::PathBuf,
+    /// Represents the `target_name` field.
     target_name: Option<String>,
 }
 
@@ -59,9 +62,13 @@ impl Action for ReadConfigAction {
     }
 }
 
+/// Represents the `BootMachinesAction` struct.
 struct BootMachinesAction {
+    /// Represents the `cwd` field.
     cwd: std::path::PathBuf,
+    /// Represents the `provider_name` field.
     provider_name: String,
+    /// Represents the `parallel` field.
     parallel: bool,
 }
 
@@ -191,13 +198,13 @@ impl Action for BootMachinesAction {
                                 .unwrap_or_else(|_| std::path::PathBuf::from(".vagrant.d"))
                         });
                     let global_mgr = crate::state::GlobalStateManager::new(vagrant_d);
-                    let mut index = global_mgr.read_index().unwrap_or_else(
-                        #[coverage(off)]
-                        |_| crate::state::GlobalIndex {
-                            version: 1,
-                            machines: std::collections::HashMap::new(),
-                        },
-                    );
+                    let mut index =
+                        global_mgr
+                            .read_index()
+                            .unwrap_or_else(|_| crate::state::GlobalIndex {
+                                version: 1,
+                                machines: std::collections::HashMap::new(),
+                            });
 
                     let new_id = state_mgr
                         .read_id(name, &self.provider_name)
@@ -263,7 +270,9 @@ impl Action for BootMachinesAction {
     }
 }
 
+/// Represents the `MountSyncedFoldersAction` struct.
 struct MountSyncedFoldersAction {
+    /// Represents the `cwd` field.
     cwd: std::path::PathBuf,
 }
 
@@ -369,9 +378,13 @@ impl Action for MountSyncedFoldersAction {
     }
 }
 
+/// Represents the `ProvisionMachinesAction` struct.
 struct ProvisionMachinesAction {
+    /// Represents the `provision` field.
     provision: Option<bool>,
+    /// Represents the `provision_with` field.
     provision_with: Option<Vec<String>>,
+    /// Represents the `cwd` field.
     cwd: std::path::PathBuf,
 }
 
@@ -568,6 +581,13 @@ pub fn execute(cwd: &Path, args: &UpArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -961,7 +981,7 @@ end
         assert_eq!(
             BootMachinesAction {
                 cwd: cwd.clone(),
-                provider_name: "".to_string(),
+                provider_name: String::new(),
                 parallel: false
             }
             .name(),
@@ -977,7 +997,7 @@ end
             "ProvisionMachinesAction"
         );
         assert_eq!(
-            MountSyncedFoldersAction { cwd: cwd.clone() }.name(),
+            MountSyncedFoldersAction { cwd: cwd }.name(),
             "MountSyncedFoldersAction"
         );
     }
@@ -1745,7 +1765,7 @@ end
             .vm
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: valid_path.clone(),
+                host_path: valid_path,
                 guest_path: "/tmp/guest".to_string(),
                 folder_type: Some("vbox".to_string()),
                 disabled: false,
@@ -2082,9 +2102,55 @@ end
 
         assert!(action_vmware.call(&mut env_vmware).is_ok());
 
+        // 5. Test invalid global index JSON
+        let vagrant_d = tempdir().expect("operation should succeed");
+        std::fs::create_dir_all(vagrant_d.path().join("data").join("machine-index"))
+            .expect("operation should succeed");
+        std::fs::write(
+            vagrant_d
+                .path()
+                .join("data")
+                .join("machine-index")
+                .join("index"),
+            "invalid json",
+        )
+        .expect("operation should succeed");
         unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VMWARE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VMWARE_STATUS_ERROR");
+            std::env::set_var("VAGRANT_HOME", vagrant_d.path());
+            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
+            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
+        }
+
+        let invalid_machine_dir = cwd
+            .join(".vagrant")
+            .join("machines")
+            .join("invalid_index")
+            .join("virtualbox");
+        std::fs::create_dir_all(&invalid_machine_dir).expect("operation should succeed");
+        std::fs::write(invalid_machine_dir.join("id"), "invalid_id")
+            .expect("operation should succeed");
+
+        let invalid_index_mach = crate::config::MachineConfig::default();
+        let mut machines_invalid_index = std::collections::HashMap::new();
+        machines_invalid_index.insert("invalid_index".to_string(), invalid_index_mach);
+
+        let mut env_invalid_index = Environment::new();
+        env_invalid_index.typed_data.insert(
+            "machines".to_string(),
+            Arc::new(machines_invalid_index) as Arc<dyn std::any::Any + Send + Sync>,
+        );
+
+        let action_invalid_index = BootMachinesAction {
+            cwd: cwd.to_path_buf(),
+            provider_name: "virtualbox".to_string(),
+            parallel: false,
+        };
+        assert!(action_invalid_index.call(&mut env_invalid_index).is_ok());
+
+        unsafe {
+            std::env::remove_var("VAGRANT_HOME");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
+            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
         }
     }
 

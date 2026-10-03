@@ -11,22 +11,39 @@ use std::sync::Mutex;
 
 /// Ansible provisioner.
 pub struct AnsibleProvisioner {
+    /// Represents the `playbook` field.
     playbook: Option<String>,
+    /// Represents the `inventory_path` field.
     inventory_path: Option<String>,
+    /// Represents the `extra_vars` field.
     extra_vars: Option<String>,
+    /// Represents the `limit` field.
     limit: Option<String>,
+    /// Represents the `tags` field.
     tags: Option<String>,
+    /// Represents the `skip_tags` field.
     skip_tags: Option<String>,
+    /// Represents the `vault_password_file` field.
     vault_password_file: Option<String>,
+    /// Represents the `galaxy_role_file` field.
     galaxy_role_file: Option<String>,
+    /// Represents the `galaxy_command` field.
     galaxy_command: Option<String>,
+    /// Represents the `roles_path` field.
     roles_path: Option<String>,
+    /// Represents the `install` field.
     install: bool,
+    /// Represents the `mode` field.
     mode: String,
+    /// Represents the `ssh_host` field.
     ssh_host: Option<String>,
+    /// Represents the `ssh_port` field.
     ssh_port: Option<String>,
+    /// Represents the `ssh_user` field.
     ssh_user: Option<String>,
+    /// Represents the `ssh_key` field.
     ssh_key: Option<String>,
+    /// Represents the `generated_inventory` field.
     generated_inventory: Mutex<Option<String>>,
 }
 
@@ -283,7 +300,19 @@ impl Provisioner for AnsibleProvisioner {
 
 impl AnsibleProvisioner {
     #[cfg(not(test))]
-    #[coverage(off)]
+    /// Executes the `execute_cmd` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `mut cmd` - The `mut cmd` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<(), MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn execute_cmd(&self, mut cmd: Command) -> Result<(), MigratoryError> {
         let status = cmd.status().map_err(MigratoryError::Io)?;
         if !status.success() {
@@ -306,6 +335,13 @@ impl AnsibleProvisioner {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::fs::File;
@@ -329,7 +365,7 @@ mod tests {
                     ));
                 }
             }
-            Ok("".to_string())
+            Ok(String::new())
         }
 
         fn upload(&self, local_path: &Path, remote_path: &str) -> Result<(), MigratoryError> {
@@ -341,15 +377,12 @@ mod tests {
             Ok(())
         }
 
-        #[coverage(off)]
         fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn execute_interactive(&self) -> Result<(), MigratoryError> {
             Ok(())
         }
-        #[coverage(off)]
         fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
@@ -677,7 +710,6 @@ mod tests {
         assert!(prov.provision(&comm_pb_fail).is_err());
     }
 
-    #[coverage(off)]
     fn poison_mutex(mutex: &Mutex<Option<String>>) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = mutex.lock();

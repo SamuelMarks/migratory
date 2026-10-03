@@ -93,6 +93,20 @@ pub(crate) fn execute_utmctl(args: &[&str]) -> Result<String, MigratoryError> {
     execute_utmctl_inner("utmctl", args)
 }
 
+/// Executes the `execute_utmctl_inner` function.
+///
+/// # Arguments
+///
+/// * `cmd` - The `cmd` argument.
+/// * `args` - The `args` argument.
+///
+/// # Returns
+///
+/// Returns `Result<String, MigratoryError>`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 fn execute_utmctl_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryError> {
     if std::env::var("MIGRATORY_TEST_MOCK_UTMCTL").is_ok() {
         if std::env::var("MIGRATORY_TEST_MOCK_UTMCTL_ERROR").is_ok() {
@@ -270,6 +284,13 @@ impl Provider for UtmProvider {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::path::Path;
 

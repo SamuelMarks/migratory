@@ -1829,7 +1829,6 @@ pub enum PluginCommands {
 /// # Returns
 ///
 /// Returns the parsed `Cli` arguments.
-#[coverage(off)]
 pub fn parse() -> Cli {
     Cli::parse()
 }
@@ -1856,8 +1855,14 @@ where
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use clap::CommandFactory;
 

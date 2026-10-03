@@ -14,7 +14,7 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 clap = { version = "4.6", default-features = false, features = ["derive", "help", "std", "usage"] }
 clap_complete = "4.6"
 colored = "3.1"
-derive_more = { version = "2.1", default-features = false, features = ["display"] }
+derive_more = { version = "2.1", default-features = false, features = ["display", "error", "from"] }
 fd-lock = "4.0"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 indicatif = { version = "0.18", default-features = false }

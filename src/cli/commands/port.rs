@@ -63,21 +63,20 @@ pub fn parse_vboxmanage_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 /// # Returns
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `VBoxManage`.
-#[coverage(off)]
 pub fn query_virtualbox_ports(machine_id: &str) -> Option<Vec<ForwardedPortEntry>> {
     #[cfg(test)]
     if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_LIVE_PORTS") {
         let mut entries = Vec::new();
         for item in mock.split(';') {
             let parts: Vec<&str> = item.split(',').collect();
-            if parts.len() == 3 {
-                if let (Ok(g), Ok(h)) = (parts[0].parse(), parts[1].parse()) {
-                    entries.push(ForwardedPortEntry {
-                        guest: g,
-                        host: h,
-                        protocol: parts[2].to_string(),
-                    });
-                }
+            if parts.len() == 3
+                && let (Ok(g), Ok(h)) = (parts[0].parse(), parts[1].parse())
+            {
+                entries.push(ForwardedPortEntry {
+                    guest: g,
+                    host: h,
+                    protocol: parts[2].to_string(),
+                });
             }
         }
         return Some(entries);
@@ -112,7 +111,6 @@ pub fn query_virtualbox_ports(machine_id: &str) -> Option<Vec<ForwardedPortEntry
 /// # Returns
 ///
 /// Returns `Some(Vec<ForwardedPortEntry>)` if valid entries are found, or `None`.
-#[coverage(off)]
 pub fn parse_docker_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
     let mut entries = Vec::new();
     for line in text.lines() {
@@ -154,7 +152,6 @@ pub fn parse_docker_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 /// # Returns
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `docker port`.
-#[coverage(off)]
 pub fn query_docker_ports(container_id: &str) -> Option<Vec<ForwardedPortEntry>> {
     #[cfg(test)]
     if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_DOCKER_PORTS") {
@@ -187,7 +184,6 @@ pub fn query_docker_ports(container_id: &str) -> Option<Vec<ForwardedPortEntry>>
 /// # Returns
 ///
 /// Returns `Some(Vec<ForwardedPortEntry>)` if valid entries are found, or `None`.
-#[coverage(off)]
 pub fn parse_qemu_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
     let mut entries = Vec::new();
     for line in text.lines() {
@@ -252,7 +248,6 @@ pub fn parse_qemu_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 /// # Returns
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `virsh`.
-#[coverage(off)]
 pub fn query_qemu_ports(domain_id: &str) -> Option<Vec<ForwardedPortEntry>> {
     #[cfg(test)]
     if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_QEMU_PORTS") {
@@ -283,7 +278,6 @@ pub fn query_qemu_ports(domain_id: &str) -> Option<Vec<ForwardedPortEntry>> {
 /// # Returns
 ///
 /// Returns `Some(Vec<ForwardedPortEntry>)` if valid entries are found, or `None`.
-#[coverage(off)]
 pub fn parse_hyperv_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
     let mut entries = Vec::new();
 
@@ -390,7 +384,6 @@ pub fn parse_hyperv_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 /// # Returns
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from PowerShell.
-#[coverage(off)]
 pub fn query_hyperv_ports(_vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
     #[cfg(test)]
     if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_HYPERV_PORTS") {
@@ -432,7 +425,6 @@ pub fn query_hyperv_ports(_vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
 /// # Returns
 ///
 /// Returns `Some(Vec<ForwardedPortEntry>)` if valid entries are found, or `None`.
-#[coverage(off)]
 pub fn parse_vmware_nat_conf(text: &str) -> Option<Vec<ForwardedPortEntry>> {
     let mut entries = Vec::new();
     let mut current_section = String::new();
@@ -489,7 +481,6 @@ pub fn parse_vmware_nat_conf(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 /// # Returns
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `nat.conf`.
-#[coverage(off)]
 pub fn query_vmware_ports(_vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
     #[cfg(test)]
     if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_VMWARE_PORTS") {
@@ -624,8 +615,14 @@ pub fn execute(cwd: &Path, args: &PortArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

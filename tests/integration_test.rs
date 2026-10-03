@@ -69,10 +69,8 @@ fn test_evaluate_bento_templates() -> Result<(), migratory::error::MigratoryErro
         return Ok(());
     }
 
-    for entry in
-        std::fs::read_dir(bento_dir).map_err(|e| migratory::error::MigratoryError::Io(e))?
-    {
-        let entry = entry.map_err(|e| migratory::error::MigratoryError::Io(e))?;
+    for entry in std::fs::read_dir(bento_dir).map_err(migratory::error::MigratoryError::Io)? {
+        let entry = entry.map_err(migratory::error::MigratoryError::Io)?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("template") {
             let path_str = path.to_str().unwrap_or_default();
@@ -128,13 +126,12 @@ end
 
     assert_eq!(machine.vm.box_name.as_deref(), Some("bento/ubuntu-22.04"));
     assert_eq!(machine.vm.hostname.as_deref(), Some("bento-test"));
-    assert_eq!(
+    assert!(
         machine
             .vm
             .synced_folders
             .iter()
-            .any(|s| s.disabled && s.guest_path == "/vagrant"),
-        true
+            .any(|s| s.disabled && s.guest_path == "/vagrant")
     );
     assert_eq!(machine.vm.provisioners.len(), 2);
     assert_eq!(machine.vm.provisioners[1].run.as_deref(), Some("once"));

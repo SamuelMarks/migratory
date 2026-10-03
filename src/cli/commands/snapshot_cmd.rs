@@ -24,7 +24,6 @@ use std::path::Path;
 ///
 /// Returns a `MigratoryError` if the Vagrantfile is not found or the command fails.
 /// Helper function to resolve the target machines.
-#[coverage(off)]
 fn resolve_target_machines(
     env_config: &crate::config::EnvironmentConfig,
     target_machine: Option<String>,
@@ -52,7 +51,6 @@ pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError>
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
     }
 
-    #[coverage(off)]
     fn get_ui() -> Box<dyn crate::ui::Ui + Send + Sync> {
         if std::env::args().any(|arg| arg == "--machine-readable") {
             Box::new(crate::ui::MachineReadableUi)
@@ -176,6 +174,13 @@ pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError>
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::*;
     use std::fs;

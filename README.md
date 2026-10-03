@@ -3,7 +3,7 @@ Migratory (Vagrant reimplementation; open-source)
 
 [![License](https://img.shields.io/badge/license-CC0%20OR%20Apache--2.0%20OR%20MIT-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Doc Coverage](https://img.shields.io/badge/Doc_Coverage-100.0%25-brightgreen.svg)]()
-[![Test Coverage](https://img.shields.io/badge/Test_Coverage-100.00%25-brightgreen.svg)]()
+[![Test Coverage](https://img.shields.io/badge/Test_Coverage-96.05%25-brightgreen.svg)]()
 [![CI](https://github.com/SamuelMarks/migratory/actions/workflows/ci.yml/badge.svg)](https://github.com/SamuelMarks/migratory/actions)
 
 **Migratory** is an uncompromising, 100% drop-in compatible, open-source replica of [HashiCorp Vagrant](https://github.com/hashicorp/vagrant) (pre-BSL), written from the ground up in modern, memory-safe Rust. It provides the exact same developer workflow, CLI commands, machine-readable output, and `Vagrantfile` configuration syntax as [HashiCorp Vagrant](https://github.com/hashicorp/vagrant), but with instant cold starts, zero runtime dependencies, and a bulletproof execution model.

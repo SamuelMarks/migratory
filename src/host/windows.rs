@@ -29,7 +29,6 @@ impl Host for WindowsHost {
     /// # Returns
     ///
     /// Returns `true` if `std::env::consts::OS` is `"windows"`.
-    #[coverage(off)]
     fn is_match(&self) -> bool {
         if let Ok(mock) = std::env::var("MOCK_OS") {
             return mock == "windows";
@@ -46,7 +45,6 @@ impl Host for WindowsHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the configuration fails.
-    #[coverage(off)]
     fn configure_nfs(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
@@ -103,7 +101,6 @@ impl Host for WindowsHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if SMB share creation fails.
-    #[coverage(off)]
     fn configure_smb(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
@@ -137,7 +134,6 @@ impl Host for WindowsHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the check cannot be completed.
-    #[coverage(off)]
     fn check_admin(&self) -> Result<bool, MigratoryError> {
         #[cfg(not(test))]
         {
@@ -175,7 +171,6 @@ impl Host for WindowsHost {
 ///
 /// Returns a `MigratoryError` if network configuration cannot be inspected.
 #[cfg(not(test))]
-#[coverage(off)]
 fn resolve_windows_host_ip() -> Result<String, MigratoryError> {
     if let Ok(output) = std::process::Command::new("powershell")
         .args([
@@ -296,8 +291,14 @@ impl WindowsHost {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]

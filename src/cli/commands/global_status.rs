@@ -72,8 +72,14 @@ pub fn execute(args: &GlobalStatusArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
 
     #[test]
@@ -210,8 +216,14 @@ mod tests {
     }
 }
 #[cfg(test)]
-#[coverage(off)]
 mod extra_global_status_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::commands::box_cmd::tests::ENV_LOCK;
 

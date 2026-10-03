@@ -40,7 +40,6 @@ fn resolve_docker_image(env_config: &crate::config::EnvironmentConfig) -> String
 /// # Errors
 ///
 /// Returns a `MigratoryError` if spawning the process fails or the process exits with a non-zero code.
-#[coverage(off)]
 fn run_docker_command(args: &[String]) -> Result<(), MigratoryError> {
     if cfg!(test) {
         if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_RUN_ERROR").is_ok() {
@@ -131,8 +130,14 @@ pub fn execute(cwd: &Path, args: &DockerRunArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;

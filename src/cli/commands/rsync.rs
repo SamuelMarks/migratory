@@ -85,8 +85,14 @@ pub fn execute(cwd: &Path, args: &RsyncArgs) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -297,7 +303,15 @@ end
     }
 }
 
-#[coverage(off)]
+/// Executes the `is_mock_mount_success` function.
+///
+/// # Arguments
+///
+/// * None
+///
+/// # Returns
+///
+/// Returns `bool`.
 fn is_mock_mount_success() -> bool {
     #[cfg(test)]
     {

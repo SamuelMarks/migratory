@@ -299,6 +299,7 @@ pub fn get_provider(
 /// Responsible for maintaining state files such as the hypervisor-specific
 /// machine IDs used to identify the running instances.
 pub struct StateManager {
+    /// Represents the `dir` field.
     dir: PathBuf,
 }
 
@@ -316,7 +317,19 @@ impl StateManager {
         Self { dir }
     }
 
-    #[coverage(off)]
+    /// Executes the `create_parent_dir` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The `path` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<(), MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn create_parent_dir(path: &Path) -> Result<(), MigratoryError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| MigratoryError::Generic(e.to_string()))?;
@@ -489,6 +502,13 @@ impl StateManager {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use tempfile::tempdir;
 
@@ -694,7 +714,6 @@ mod tests {
     }
 
     struct DefaultProvider;
-    #[coverage(off)]
     impl Provider for DefaultProvider {
         fn name(&self) -> &str {
             "default"

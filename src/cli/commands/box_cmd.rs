@@ -420,8 +420,14 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
 
 /// Test helpers and synchronization locks for box commands.
 #[cfg(test)]
-#[coverage(off)]
 pub mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     /// Global lock used to serialize environment variable mutations during tests.
     pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -913,7 +919,7 @@ pub mod tests {
     #[test]
     fn test_execute_box_repackage_error() {
         let mut args = mock_repackage_args();
-        args.name = "".to_string(); // Will trigger error in repackage
+        args.name = String::new(); // Will trigger error in repackage
         let cmd = BoxCommands::Repackage(args);
         let mut out = Vec::new();
         let result = execute(&cmd, &mut out);
@@ -988,8 +994,14 @@ pub mod tests {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod extra_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::*;
     use httpmock::prelude::*;
@@ -1052,7 +1064,6 @@ mod extra_tests {
             fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
             }
-            #[coverage(off)]
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
@@ -1126,7 +1137,6 @@ mod extra_tests {
             fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
             }
-            #[coverage(off)]
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
@@ -1446,8 +1456,14 @@ mod extra_tests {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod extra_tests2 {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::*;
     use httpmock::prelude::*;
@@ -1537,7 +1553,6 @@ mod extra_tests2 {
             fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
             }
-            #[coverage(off)]
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
@@ -1632,7 +1647,6 @@ mod extra_tests2 {
             fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
             }
-            #[coverage(off)]
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
@@ -1785,8 +1799,14 @@ mod extra_tests2 {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod extra_tests3 {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::*;
     use httpmock::prelude::*;
@@ -1844,7 +1864,6 @@ mod extra_tests3 {
             fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
             }
-            #[coverage(off)]
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
@@ -1859,8 +1878,14 @@ mod extra_tests3 {
     }
 }
 #[cfg(test)]
-#[coverage(off)]
 mod extra_box_cmd_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::commands::box_cmd::tests::ENV_LOCK;
     use httpmock::MockServer;
@@ -1923,8 +1948,14 @@ mod extra_box_cmd_tests {
     }
 }
 #[cfg(test)]
-#[coverage(off)]
 mod extra_box_cmd_tests_2 {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::commands::box_cmd::tests::{ENV_LOCK, FailingWriter};
     use httpmock::MockServer;
@@ -1981,8 +2012,14 @@ mod extra_box_cmd_tests_2 {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod missing_coverage_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::tests::*;
     use super::*;
     use crate::cli::*;
@@ -2265,8 +2302,14 @@ mod missing_coverage_tests {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod final_box_coverage_tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::cli::commands::box_cmd::tests::{
         ENV_LOCK, mock_add_args, mock_outdated_args, mock_update_args,

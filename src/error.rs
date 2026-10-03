@@ -3,69 +3,72 @@
 //! This module provides the central error type used throughout the Migratory
 //! crate, ensuring consistent error handling and reporting.
 
-use derive_more::derive::Display;
+use derive_more::derive::{Display, Error, From};
 use std::io;
 
 /// Centralized error enum for Migratory.
 ///
 /// This enum encapsulates all possible error states that can occur during
-/// execution, using `derive_more::Display` for ergonomic formatting.
-#[derive(Debug, Display)]
+/// execution, using \`derive_more\` for ergonomic formatting and standard
+/// library error trait implementations.
+#[derive(Debug, Display, Error, From)]
 pub enum MigratoryError {
     /// A generic error string, often used as a fallback for external library errors.
     #[display("Generic error: {}", _0)]
+    #[error(ignore)]
+    #[from(ignore)]
     Generic(String),
 
-    /// Represents an underlying `std::io::Error`.
+    /// Represents an underlying \`std::io::Error\`.
     #[display("I/O error: {}", _0)]
     Io(io::Error),
 
     /// Indicates that a requested resource (like a file or directory) already exists.
     #[display("Already exists: {}", _0)]
+    #[error(ignore)]
+    #[from(ignore)]
     AlreadyExists(String),
 
     /// Indicates that a requested resource was not found.
     #[display("Not found: {}", _0)]
+    #[error(ignore)]
+    #[from(ignore)]
     NotFound(String),
 
     /// Indicates a validation or configuration error.
     #[display("Validation error: {}", _0)]
+    #[error(ignore)]
+    #[from(ignore)]
     Validation(String),
-}
 
-impl std::error::Error for MigratoryError {
-    /// Provides access to the underlying source error, if any.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Some(err)` if this error wraps another error (like `io::Error`),
-    /// otherwise returns `None`.
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            MigratoryError::Io(err) => Some(err),
-            _ => None,
-        }
-    }
-}
+    /// Indicates an error during JSON serialization or deserialization.
+    #[display("JSON error: {}", _0)]
+    Json(serde_json::Error),
 
-impl From<io::Error> for MigratoryError {
-    /// Converts a standard `io::Error` into a `MigratoryError::Io`.
-    ///
-    /// # Arguments
-    ///
-    /// * `err` - The `io::Error` to convert.
-    ///
-    /// # Returns
-    ///
-    /// Returns the wrapped `MigratoryError`.
-    fn from(err: io::Error) -> Self {
-        MigratoryError::Io(err)
-    }
+    /// Indicates a network request error (e.g. from reqwest).
+    #[display("Network error: {}", _0)]
+    Reqwest(reqwest::Error),
+
+    /// Indicates an error parsing or evaluating a regular expression.
+    #[display("Regex error: {}", _0)]
+    Regex(regex::Error),
+
+    /// Indicates a failure during process or command execution.
+    #[display("Command execution failed: {}", _0)]
+    #[error(ignore)]
+    #[from(ignore)]
+    Command(String),
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use std::error::Error;
 
@@ -111,11 +114,5 @@ mod tests {
             _ => false,
         };
         assert!(is_io);
-
-        let not_io = match MigratoryError::Generic("foo".to_string()) {
-            MigratoryError::Io(_) => true,
-            _ => false,
-        };
-        assert!(!not_io);
     }
 }

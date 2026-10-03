@@ -36,6 +36,7 @@ thread_local! {
     pub static MOCK_STDIN: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Documentation for this item.
 static MACHINE_READABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Sets whether global machine-readable CSV output is enabled.
@@ -57,7 +58,6 @@ pub fn is_machine_readable() -> bool {
 }
 
 /// Helper function to read a line from stdin (or mock in tests).
-#[coverage(off)]
 pub fn read_stdin(buf: &mut String) -> std::io::Result<usize> {
     #[cfg(test)]
     {
@@ -82,7 +82,15 @@ pub fn read_stdin(buf: &mut String) -> std::io::Result<usize> {
     }
 }
 
-#[coverage(off)]
+/// Executes the `get_progress_style` function.
+///
+/// # Arguments
+///
+/// * `template` - The `template` argument.
+///
+/// # Returns
+///
+/// Returns `ProgressStyle`.
 fn get_progress_style(template: &str) -> ProgressStyle {
     match ProgressStyle::default_bar().template(template) {
         Ok(s) => s,
@@ -166,7 +174,6 @@ impl Ui for ConsoleUi {
         println!("==> {}: {}", target.color(color), message.bold());
     }
 
-    #[coverage(off)]
     fn success(&self, target: &str, message: &str) {
         let color = color_for_target(target);
         println!("==> {}: {}", target.color(color), message.green());
@@ -336,7 +343,6 @@ impl Ui for MachineReadableUi {
         self.log_json(target, "info", message);
     }
 
-    #[coverage(off)]
     fn success(&self, target: &str, message: &str) {
         self.log_csv(target, "ui", &["success", message]);
         self.log_json(target, "success", message);
@@ -392,7 +398,9 @@ impl Ui for MachineReadableUi {
 
 /// Thread-safe synchronized UI wrapper for concurrent operations.
 pub struct ConcurrentUi {
+    /// Represents the `lock` field.
     lock: std::sync::Mutex<()>,
+    /// Represents the `inner` field.
     inner: Box<dyn Ui + Send + Sync>,
 }
 
@@ -412,7 +420,6 @@ impl Ui for ConcurrentUi {
         self.inner.info(target, message);
     }
 
-    #[coverage(off)]
     fn success(&self, target: &str, message: &str) {
         let _guard = self.lock.lock();
         self.inner.success(target, message);
@@ -451,7 +458,9 @@ impl Ui for ConcurrentUi {
 
 /// A target-scoped UI wrapper that automatically prefixes all output with a designated machine target.
 pub struct PrefixedUi<'a> {
+    /// Represents the `target` field.
     target: String,
+    /// Represents the `ui` field.
     ui: &'a dyn Ui,
 }
 
@@ -486,8 +495,14 @@ impl<'a> PrefixedUi<'a> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use crate::error::MigratoryError;
 

@@ -88,7 +88,17 @@ pub fn execute(cwd: &Path, args: &ResumeArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-#[coverage(off)]
+/// Executes the `try_resume` function.
+///
+/// # Arguments
+///
+/// * `p` - The `p` argument.
+/// * `name` - The `name` argument.
+/// * `ui` - The `ui` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn try_resume(p: &dyn crate::provider::Provider, name: &str, ui: &crate::ui::ConsoleUi) {
     if let Err(e) = p.resume() {
         ui.warn(
@@ -100,6 +110,13 @@ fn try_resume(p: &dyn crate::provider::Provider, name: &str, ui: &crate::ui::Con
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
 
     #[test]
     #[cfg(unix)]

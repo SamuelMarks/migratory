@@ -94,7 +94,18 @@ pub fn execute(cwd: &Path, args: &ReloadArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-#[coverage(off)]
+/// Executes the `try_halt_and_up` function.
+///
+/// # Arguments
+///
+/// * `p` - The `p` argument.
+/// * `vm` - The `vm` argument.
+/// * `name` - The `name` argument.
+/// * `ui` - The `ui` argument.
+///
+/// # Returns
+///
+/// Returns `()`.
 fn try_halt_and_up(
     p: &dyn crate::provider::Provider,
     vm: &crate::config::VmConfig,
@@ -118,6 +129,13 @@ fn try_halt_and_up(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
 
     #[test]
     #[cfg(unix)]

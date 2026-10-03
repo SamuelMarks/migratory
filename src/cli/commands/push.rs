@@ -51,7 +51,6 @@ impl IgnoreFilter {
     /// # Returns
     ///
     /// Returns the constructed filter.
-    #[coverage(off)]
     pub fn new(base_dir: &Path, include_vcs: bool) -> Self {
         let mut patterns = Vec::new();
         let ignore_file = base_dir.join(".vagrantignore");
@@ -183,11 +182,12 @@ impl PushStrategy for LocalExecPush {
 
 /// Minimal FTP client for uploading directories and files over standard FTP.
 pub struct FtpClient {
+    /// Represents the `reader` field.
     reader: BufReader<TcpStream>,
+    /// Represents the `writer` field.
     writer: TcpStream,
 }
 
-#[coverage(off)]
 impl FtpClient {
     /// Connects to a remote FTP server at `host:port`.
     ///
@@ -442,7 +442,6 @@ impl FtpClient {
     }
 }
 
-#[coverage(off)]
 /// Helper to recursively upload a local directory to an FTP server.
 fn upload_directory_ftp(
     client: &mut FtpClient,
@@ -514,7 +513,6 @@ pub struct FtpPush {
     pub secure: bool,
 }
 
-#[coverage(off)]
 impl PushStrategy for FtpPush {
     fn deploy(&self, _env: &crate::action::Environment) -> Result<(), MigratoryError> {
         if self.host.is_empty() {
@@ -669,10 +667,10 @@ pub trait SftpBackend {
 
 /// Real SFTP backend utilizing the `ssh2` crate.
 pub struct RealSftpBackend {
+    /// Represents the `sftp` field.
     sftp: ssh2::Sftp,
 }
 
-#[coverage(off)]
 impl RealSftpBackend {
     /// Establishes an SFTP session from host, port, credentials.
     ///
@@ -739,7 +737,6 @@ impl RealSftpBackend {
     }
 }
 
-#[coverage(off)]
 impl SftpBackend for RealSftpBackend {
     fn mkdir(&mut self, path: &str, mode: i32) -> Result<(), MigratoryError> {
         let p = Path::new(path);
@@ -786,7 +783,6 @@ impl SftpBackend for RealSftpBackend {
     }
 }
 
-#[coverage(off)]
 /// Helper to recursively upload a local directory to an SFTP backend.
 fn upload_directory_sftp<B: SftpBackend>(
     backend: &mut B,
@@ -880,7 +876,6 @@ impl SftpPush {
     }
 }
 
-#[coverage(off)]
 impl PushStrategy for SftpPush {
     fn deploy(&self, _env: &crate::action::Environment) -> Result<(), MigratoryError> {
         if self.host.is_empty() {
@@ -940,7 +935,6 @@ impl PushStrategy for SftpPush {
     }
 }
 
-#[coverage(off)]
 /// Helper to recursively archive a directory into a tar builder.
 fn archive_directory<W: Write>(
     builder: &mut tar::Builder<W>,
@@ -971,7 +965,6 @@ fn archive_directory<W: Write>(
     Ok(())
 }
 
-#[coverage(off)]
 /// Uploads an archive to a URL with retry logic.
 fn upload_archive_with_retry(
     url: &str,
@@ -1028,7 +1021,6 @@ pub struct AtlasPush {
     pub version: Option<String>,
 }
 
-#[coverage(off)]
 impl PushStrategy for AtlasPush {
     fn deploy(&self, _env: &crate::action::Environment) -> Result<(), MigratoryError> {
         if self.app.is_empty() {
@@ -1313,9 +1305,15 @@ pub fn execute(cwd: &Path) -> Result<(), MigratoryError> {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 /// Unit tests for push strategies and commands.
 pub mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use httpmock::prelude::*;
     use std::collections::HashMap;

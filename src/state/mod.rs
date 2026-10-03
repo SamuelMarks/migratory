@@ -42,6 +42,7 @@ pub struct GlobalIndex {
 
 /// Manages the global state files.
 pub struct GlobalStateManager {
+    /// Represents the `index_path` field.
     index_path: PathBuf,
 }
 
@@ -69,14 +70,23 @@ impl GlobalStateManager {
             .create(true)
             .truncate(false)
             .open(&lock_path)
-            .map_err(
-                #[coverage(off)]
-                |e| MigratoryError::Generic(e.to_string()),
-            )?;
+            .map_err(|e| MigratoryError::Generic(e.to_string()))?;
         Ok(fd_lock::RwLock::new(file))
     }
 
-    #[coverage(off)]
+    /// Executes the `read_locked_contents` function.
+    ///
+    /// # Arguments
+    ///
+    /// * None
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<String, MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn read_locked_contents(&self) -> Result<String, MigratoryError> {
         let lock_obj = self.create_index_lock()?;
         let _guard = lock_obj.read().map_err(|e| {
@@ -104,12 +114,33 @@ impl GlobalStateManager {
         Ok(index)
     }
 
-    #[coverage(off)]
+    /// Executes the `serialize_index` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The `index` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `String`.
     fn serialize_index(index: &GlobalIndex) -> String {
         serde_json::to_string_pretty(index).unwrap_or_default()
     }
 
-    #[coverage(off)]
+    /// Executes the `atomic_write_file` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The `path` argument.
+    /// * `contents` - The `contents` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<(), MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn atomic_write_file(path: &Path, contents: &str) -> Result<(), MigratoryError> {
         let temp_path = path.with_extension("tmp");
         let mut file = OpenOptions::new()
@@ -128,7 +159,19 @@ impl GlobalStateManager {
         Ok(())
     }
 
-    #[coverage(off)]
+    /// Executes the `write_locked_contents` function.
+    ///
+    /// # Arguments
+    ///
+    /// * `contents` - The `contents` argument.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Result<(), MigratoryError>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn write_locked_contents(&self, contents: &str) -> Result<(), MigratoryError> {
         let mut lock_obj = self.create_index_lock()?;
         let _guard = lock_obj.write().map_err(|e| {
@@ -223,7 +266,6 @@ impl GlobalStateManager {
 ///
 /// Returns `Ok(Some((resolved_dir, machine_name)))` if resolved via global index,
 /// or `Ok(None)` if no global match is found.
-#[coverage(off)]
 pub fn resolve_global_target(
     target: &str,
 ) -> Result<Option<(std::path::PathBuf, String)>, MigratoryError> {
@@ -251,6 +293,13 @@ pub fn resolve_global_target(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::all,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::undocumented_unsafe_blocks
+    )]
     use super::*;
     use tempfile::tempdir;
 
@@ -540,7 +589,7 @@ mod tests {
         index.machines.insert(
             "orphaned".to_string(),
             GlobalMachineEntry {
-                local_data_path: "".to_string(),
+                local_data_path: String::new(),
                 name: "test".to_string(),
                 provider: "virtualbox".to_string(),
                 state: "poweroff".to_string(),
@@ -566,11 +615,11 @@ mod tests {
         index.machines.insert(
             "12345678-abcd".to_string(),
             GlobalMachineEntry {
-                local_data_path: "".to_string(),
+                local_data_path: String::new(),
                 name: "test".to_string(),
                 provider: "virtualbox".to_string(),
                 state: "poweroff".to_string(),
-                vagrantfile_path: "".to_string(),
+                vagrantfile_path: String::new(),
                 vagrantfile_name: "Vagrantfile".to_string(),
                 updated_at: 0,
                 extra_data: HashMap::new(),
