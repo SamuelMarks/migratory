@@ -320,17 +320,12 @@ impl Guest for WindowsGuest {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::time::Duration;
 
+    /// Mock communicator returning a fixed result for `execute`.
     struct MockComm {
+        /// Canned output or error message.
         output: Result<String, String>,
     }
 
@@ -415,25 +410,17 @@ mod tests {
         assert!(guest.configure_networks(&comm, &nets).is_err());
     }
 
+    /// Closure-backed communicator router for Windows guest tests.
     struct CommandRouterComm<F: Fn(&str) -> Result<String, MigratoryError>> {
+        /// Handler closure invoked for each `execute` call.
         handler: F,
     }
 
-    impl<F: Fn(&str) -> Result<String, MigratoryError>> Communicator for CommandRouterComm<F> {
+    impl<F: Fn(&str) -> Result<String, MigratoryError> + Send + Sync> Communicator
+        for CommandRouterComm<F>
+    {
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             (self.handler)(command)
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -550,12 +537,12 @@ mod tests {
     }
 
     #[test]
-    fn test_windows_guest() {
+    fn test_windows_guest() -> Result<(), MigratoryError> {
         let comm = MockComm {
             output: Ok("Microsoft Windows [Version 10.0.19045.2965]\n".to_string()),
         };
         let guest = WindowsGuest;
-        assert!(guest.detect(&comm).expect("detect should succeed"));
+        assert!(guest.detect(&comm)?);
         assert!(guest.change_hostname(&comm, "test").is_ok());
 
         let networks = vec![NetworkConfig::PrivateNetwork {
@@ -571,6 +558,7 @@ mod tests {
                 .is_ok()
         );
         assert!(guest.halt(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -593,25 +581,23 @@ mod tests {
     }
 
     #[test]
-    fn test_windows_guest_not_windows() {
+    fn test_windows_guest_not_windows() -> Result<(), MigratoryError> {
         let comm = MockComm {
             output: Ok("Linux\n".to_string()),
         };
         let guest = WindowsGuest;
-        assert!(!guest.detect(&comm).expect("detect should succeed"));
+        assert!(!guest.detect(&comm)?);
+        Ok(())
     }
 
     #[test]
-    fn test_windows_guest_detect_error() {
+    fn test_windows_guest_detect_error() -> Result<(), MigratoryError> {
         let comm = MockComm {
             output: Err("timeout".to_string()),
         };
         let guest = WindowsGuest;
-        assert!(
-            !guest
-                .detect(&comm)
-                .expect("detect should resolve to false on error")
-        );
+        assert!(!guest.detect(&comm)?);
+        Ok(())
     }
 
     #[test]
@@ -654,7 +640,9 @@ mod tests {
 
     #[test]
     fn test_windows_detect_fallback_probes() {
+        /// Multi-stage fallback probe communicator for Windows detection tests.
         struct ProbeComm {
+            /// Probe stage index (`0` = `ver`, `1` = `$PSVersionTable`, `2` = `systeminfo`).
             stage: usize,
         }
         impl Communicator for ProbeComm {
@@ -671,27 +659,13 @@ mod tests {
                     } else {
                         Err(MigratoryError::Generic("fail".into()))
                     }
-                } else if command.contains("systeminfo") {
+                } else {
                     if self.stage == 2 {
                         Ok("OS Name: Microsoft Server".to_string())
                     } else {
                         Err(MigratoryError::Generic("fail".into()))
                     }
-                } else {
-                    Ok(String::new())
                 }
-            }
-            fn upload(&self, _: &Path, _: &str) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn download(&self, _: &str, _: &Path) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn wait_for_ready(&self, _: Duration) -> Result<(), MigratoryError> {
-                Ok(())
             }
         }
 
@@ -704,22 +678,11 @@ mod tests {
 
     #[test]
     fn test_windows_guest_command_failures() {
+        /// Communicator stub that always fails `execute`.
         struct FailingComm;
         impl Communicator for FailingComm {
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 Err(MigratoryError::Generic("command failed".to_string()))
-            }
-            fn upload(&self, _: &Path, _: &str) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn download(&self, _: &str, _: &Path) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn wait_for_ready(&self, _: Duration) -> Result<(), MigratoryError> {
-                Ok(())
             }
         }
 

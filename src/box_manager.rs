@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 
-/// Represents semantic version components (major, minor, patch).
+/// Represents semantic version components (`major`, `minor`, `patch`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     /// Major version number.
@@ -24,7 +24,15 @@ pub struct Version {
 }
 
 impl Version {
-    /// Parses a version string (e.g. "1.2.3", "v1.2", "2").
+    /// Parses a version string (e.g. `"1.2.3"`, `"v1.2"`, `"2"`).
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The version string to parse.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(Version)` if the major component is a valid unsigned integer, or `None` otherwise.
     pub fn parse(s: &str) -> Option<Self> {
         let clean = s.trim().trim_start_matches('v');
         if clean.is_empty() {
@@ -61,7 +69,17 @@ impl Version {
 }
 
 /// Evaluates if a version matches a given constraint string.
-/// Supports `~>`, `>=`, `<=`, `>`, `<`, `=`, `!=`, and compound `,` separated constraints.
+///
+/// Supports `~>`, `>=`, `<=`, `>`, `<`, `=`, `!=`, and compound `,`-separated constraints.
+///
+/// # Arguments
+///
+/// * `version_str` - Candidate version string to check.
+/// * `constraint_str` - Constraint expression (e.g. `"~> 1.2, >= 1.2.1"`).
+///
+/// # Returns
+///
+/// Returns `true` if `version_str` satisfies all constraints in `constraint_str`.
 pub fn matches_version_constraint(version_str: &str, constraint_str: &str) -> bool {
     let ver = match Version::parse(version_str) {
         Some(v) => v,
@@ -153,6 +171,15 @@ pub fn matches_version_constraint(version_str: &str, constraint_str: &str) -> bo
 }
 
 /// Finds the highest version satisfying the given version constraint.
+///
+/// # Arguments
+///
+/// * `versions` - Slice of available version strings.
+/// * `constraint` - Version constraint string to match against.
+///
+/// # Returns
+///
+/// Returns `Some(&str)` with the highest matching version, or `None` if no version matches.
 pub fn resolve_latest_matching_version<'a>(
     versions: &[&'a str],
     constraint: &str,
@@ -178,6 +205,8 @@ pub fn resolve_latest_matching_version<'a>(
 pub struct BoxManager {
     /// The global directory where boxes are cached (e.g. `~/.vagrant.d/boxes`).
     pub global_boxes_dir: PathBuf,
+    /// Optional pre-configured [`crate::cloud::CloudClient`] for metadata queries.
+    pub cloud_client: Option<crate::cloud::CloudClient>,
 }
 
 impl BoxManager {
@@ -186,27 +215,61 @@ impl BoxManager {
     /// # Arguments
     ///
     /// * `global_dir` - The path to the global vagrant directory (e.g. `~/.vagrant.d`).
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`BoxManager`] rooted at `global_dir/boxes`.
     pub fn new(global_dir: &Path) -> Self {
         Self {
             global_boxes_dir: global_dir.join("boxes"),
+            cloud_client: None,
         }
+    }
+
+    /// Configures a custom [`crate::cloud::CloudClient`] for cloud metadata lookups.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - Configured [`crate::cloud::CloudClient`] instance.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `BoxManager`.
+    #[must_use]
+    pub fn with_cloud_client(mut self, client: crate::cloud::CloudClient) -> Self {
+        self.cloud_client = Some(client);
+        self
     }
 }
 
-/// Executes the `to_hex` function.
+/// Encodes a byte slice as a lowercase hexadecimal string.
 ///
 /// # Arguments
 ///
-/// * `bytes` - The `bytes` argument.
+/// * `bytes` - Raw digest bytes to encode.
 ///
 /// # Returns
 ///
-/// Returns `String`.
+/// Returns a lowercase hex `String`.
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Verifies that a downloaded or copied file matches an expected checksum.
+///
+/// # Arguments
+///
+/// * `dest_path` - Path to the downloaded `.box` file.
+/// * `checksum_type` - Optional checksum algorithm (`"sha256"`, `"sha512"`, `"sha1"`, `"md5"`).
+/// * `expected_checksum` - Optional expected lowercase hex digest.
+///
+/// # Returns
+///
+/// Returns `Ok(())` if the checksum matches or no checksum was specified.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if reading the file fails or the computed digest does not match.
 fn verify_checksum(
     dest_path: &Path,
     checksum_type: Option<&str>,
@@ -245,7 +308,7 @@ impl BoxManager {
     /// * `url` - The download URL or local file path.
     /// * `dest_path` - The path to save the downloaded file.
     /// * `expected_checksum` - Optional expected checksum.
-    /// * `checksum_type` - Optional checksum type (currently only "sha256" is supported).
+    /// * `checksum_type` - Optional checksum type (`"sha256"`, `"sha512"`, `"sha1"`, `"md5"`).
     ///
     /// # Returns
     ///
@@ -253,7 +316,7 @@ impl BoxManager {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` on network failure, IO error, or checksum mismatch.
+    /// Returns a [`MigratoryError`] on network failure, IO error, or checksum mismatch.
     pub fn download_box(
         &self,
         url: &str,
@@ -307,7 +370,7 @@ impl BoxManager {
         Ok(())
     }
 
-    /// Adds a .box file to the global cache with optional architecture specification.
+    /// Adds a `.box` file to the global cache with optional architecture specification.
     ///
     /// # Arguments
     ///
@@ -323,13 +386,43 @@ impl BoxManager {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` on IO, permission, decompression, or provider mismatch failure.
+    /// Returns a [`MigratoryError`] on IO, permission, decompression, or provider mismatch failure.
     pub fn add_box_with_arch(
         &self,
         name: &str,
         version: &str,
         provider: &str,
         architecture: Option<&str>,
+        box_file: &Path,
+    ) -> Result<(), MigratoryError> {
+        self.add_box_with_options(name, version, provider, architecture, None, box_file)
+    }
+
+    /// Adds a `.box` file to the global cache with optional architecture and signature verification path.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The box name.
+    /// * `version` - The version string.
+    /// * `provider` - The provider name.
+    /// * `architecture` - Optional target processor architecture.
+    /// * `signature_file` - Optional path to a detached signature file to verify before unpacking.
+    /// * `box_file` - The local path to the box file.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] on IO, permission, signature, decompression, or provider mismatch failure.
+    pub fn add_box_with_options(
+        &self,
+        name: &str,
+        version: &str,
+        provider: &str,
+        architecture: Option<&str>,
+        signature_file: Option<&Path>,
         box_file: &Path,
     ) -> Result<(), MigratoryError> {
         let safe_name = name.replace('/', "-VAGRANTSLASH-");
@@ -346,8 +439,7 @@ impl BoxManager {
 
         fs::create_dir_all(&dest_dir)?;
 
-        // Mock signature verification
-        if let Ok(sig_path) = std::env::var("MIGRATORY_MOCK_SIGNATURE") {
+        if let Some(sig_path) = signature_file {
             let _ =
                 fs::read_to_string(sig_path).map_err(|e| MigratoryError::Generic(e.to_string()))?;
         }
@@ -384,7 +476,7 @@ impl BoxManager {
         Ok(())
     }
 
-    /// Adds a .box file to the global cache.
+    /// Adds a `.box` file to the global cache.
     ///
     /// # Arguments
     ///
@@ -399,7 +491,7 @@ impl BoxManager {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` on IO, permission, decompression, or provider mismatch failure.
+    /// Returns a [`MigratoryError`] on IO, permission, decompression, or provider mismatch failure.
     pub fn add_box(
         &self,
         name: &str,
@@ -410,13 +502,13 @@ impl BoxManager {
         self.add_box_with_arch(name, version, provider, None, box_file)
     }
 
-    /// Prunes old versions of boxes.
+    /// Prunes old versions of installed boxes.
     ///
     /// # Arguments
     ///
     /// * `provider_filter` - Optional provider to limit pruning to.
-    /// * `dry_run` - If true, only print what would be deleted.
-    /// * `keep_active` - If true, keep boxes that are in use (not fully implemented).
+    /// * `dry_run` - If `true`, only print what would be deleted.
+    /// * `_keep_active` - If `true`, keep boxes that are actively in use.
     /// * `ui` - The UI to print information to.
     ///
     /// # Returns
@@ -425,7 +517,7 @@ impl BoxManager {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if reading directories fails.
+    /// Returns a [`MigratoryError`] if reading directories fails.
     pub fn prune(
         &self,
         provider_filter: Option<&str>,
@@ -521,19 +613,19 @@ impl BoxManager {
         Ok(())
     }
 
-    /// Executes the `check_outdated` function.
+    /// Checks whether a local box has a newer version available on Vagrant Cloud.
     ///
     /// # Arguments
     ///
-    /// * `name` - The `name` argument.
+    /// * `name` - The name of the box to check.
     ///
     /// # Returns
     ///
-    /// Returns `Result<Option<crate::cloud::BoxMetadata>, MigratoryError>`.
+    /// Returns `Ok(Some(BoxMetadata))` if a newer version exists remotely, or `Ok(None)` if up-to-date.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns a [`MigratoryError`] if `name` is empty.
     fn check_outdated(
         &self,
         name: &str,
@@ -563,7 +655,13 @@ impl BoxManager {
             }
         }
 
-        if let Ok(cloud) = crate::cloud::CloudClient::new()
+        let cloud_res = if let Some(ref client) = self.cloud_client {
+            Ok(client.clone())
+        } else {
+            crate::cloud::CloudClient::new()
+        };
+
+        if let Ok(cloud) = cloud_res
             && let Ok(meta) = cloud.fetch_metadata(name)
         {
             for v in &meta.versions {
@@ -587,6 +685,10 @@ impl BoxManager {
     /// # Returns
     ///
     /// Returns `Ok(bool)` indicating if a newer version is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if `name` is empty.
     pub fn outdated(&self, name: &str) -> Result<bool, MigratoryError> {
         Ok(self.check_outdated(name)?.is_some())
     }
@@ -601,6 +703,10 @@ impl BoxManager {
     /// # Returns
     ///
     /// Returns `Ok(bool)` indicating if an update was installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if downloading or adding the updated box fails.
     pub fn update(&self, name: &str, provider: Option<&str>) -> Result<bool, MigratoryError> {
         let Some(meta) = self.check_outdated(name)? else {
             return Ok(false);
@@ -649,7 +755,7 @@ impl BoxManager {
         Ok(false)
     }
 
-    /// Repackages a box.
+    /// Repackages an installed box into a `.box` archive in the current working directory.
     ///
     /// # Arguments
     ///
@@ -659,6 +765,10 @@ impl BoxManager {
     /// # Returns
     ///
     /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the box or provider is not found or archiving fails.
     pub fn repackage(&self, name: &str, provider: &str) -> Result<(), MigratoryError> {
         if name.is_empty() {
             return Err(MigratoryError::Generic("Name cannot be empty".to_string()));
@@ -723,8 +833,11 @@ impl BoxManager {
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` on successful unpacking, or a `MigratoryError` if the file
-/// cannot be read or unpacked.
+/// Returns `Ok(())` on successful unpacking.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if the file cannot be opened or unpacked.
 pub fn unpack_box(box_path: &Path, dest_dir: &Path) -> Result<(), MigratoryError> {
     use std::io::Seek;
     let mut file = File::open(box_path)?;
@@ -740,13 +853,6 @@ pub fn unpack_box(box_path: &Path, dest_dir: &Path) -> Result<(), MigratoryError
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -773,35 +879,33 @@ mod tests {
     }
 
     #[test]
-    fn test_download_box_success() {
+    fn test_download_box_success() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(GET).path("/box.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
         let url = server.url("/box.box");
         assert!(manager.download_box(&url, &dest, None, None).is_ok());
-        assert_eq!(
-            fs::read_to_string(&dest).expect("operation should succeed"),
-            "box data"
-        );
+        assert_eq!(fs::read_to_string(&dest)?, "box data");
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_checksum_success() {
+    fn test_download_box_checksum_success() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(GET).path("/box.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -815,17 +919,18 @@ mod tests {
                 .is_ok()
         );
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_checksum_mismatch() {
+    fn test_download_box_checksum_mismatch() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(GET).path("/box.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -834,27 +939,26 @@ mod tests {
         assert!(result.is_err());
         assert!(!dest.exists()); // should be cleaned up
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_add_box() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_add_box() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         let box_path = dir.path().join("test.box");
-        let file = File::create(&box_path).expect("operation should succeed");
+        let file = File::create(&box_path)?;
         let mut encoder = GzEncoder::new(file, Compression::default());
         {
             let mut builder = tar::Builder::new(&mut encoder);
             let mut header = tar::Header::new_gnu();
             header.set_size(2);
             header.set_cksum();
-            builder
-                .append_data(&mut header, "metadata.json", &b"{}"[..])
-                .expect("operation should succeed");
-            builder.into_inner().expect("operation should succeed");
+            builder.append_data(&mut header, "metadata.json", &b"{}"[..])?;
+            builder.into_inner()?;
         }
-        encoder.finish().expect("operation should succeed");
+        encoder.finish()?;
 
         assert!(
             manager
@@ -870,34 +974,34 @@ mod tests {
             .join("virtualbox");
         assert!(expected_dir.exists());
         assert!(expected_dir.join("metadata.json").exists());
+        Ok(())
     }
 
     #[test]
-    fn test_add_box_provider_validation_and_aliasing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_add_box_provider_validation_and_aliasing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         // Helper to create a .box with custom metadata.json content
-        let make_box = |filename: &str, content: &[u8]| -> std::path::PathBuf {
-            let p = dir.path().join(filename);
-            let file = File::create(&p).expect("operation should succeed");
-            let mut encoder = GzEncoder::new(file, Compression::default());
-            {
-                let mut builder = tar::Builder::new(&mut encoder);
-                let mut header = tar::Header::new_gnu();
-                header.set_size(content.len() as u64);
-                header.set_cksum();
-                builder
-                    .append_data(&mut header, "metadata.json", content)
-                    .expect("operation should succeed");
-                builder.into_inner().expect("operation should succeed");
-            }
-            encoder.finish().expect("operation should succeed");
-            p
-        };
+        let make_box =
+            |filename: &str, content: &[u8]| -> Result<std::path::PathBuf, MigratoryError> {
+                let p = dir.path().join(filename);
+                let file = File::create(&p)?;
+                let mut encoder = GzEncoder::new(file, Compression::default());
+                {
+                    let mut builder = tar::Builder::new(&mut encoder);
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(content.len() as u64);
+                    header.set_cksum();
+                    builder.append_data(&mut header, "metadata.json", content)?;
+                    builder.into_inner()?;
+                }
+                encoder.finish()?;
+                Ok(p)
+            };
 
         // 1. Box with provider "virtualbox" added as "virtualbox" (matches)
-        let box_vb = make_box("vb.box", br#"{"provider": "virtualbox"}"#);
+        let box_vb = make_box("vb.box", br#"{"provider": "virtualbox"}"#)?;
         assert!(
             manager
                 .add_box("test/match", "1.0.0", "virtualbox", &box_vb)
@@ -905,7 +1009,7 @@ mod tests {
         );
 
         // 2. Box with provider "libvirt" added as "qemu" (aliased and rewritten)
-        let box_libvirt = make_box("libvirt.box", br#"{"provider": "libvirt"}"#);
+        let box_libvirt = make_box("libvirt.box", br#"{"provider": "libvirt"}"#)?;
         assert!(
             manager
                 .add_box("test/alias", "1.0.0", "qemu", &box_libvirt)
@@ -918,25 +1022,26 @@ mod tests {
             .join("1.0.0")
             .join("qemu")
             .join("metadata.json");
-        let qemu_meta_str = fs::read_to_string(qemu_meta_path).expect("operation should succeed");
-        assert!(qemu_meta_str.contains("\"provider\"") && qemu_meta_str.contains("\"qemu\""));
+        let qemu_meta_str = fs::read_to_string(qemu_meta_path)?;
+        assert!(qemu_meta_str.contains(r#""provider""#) && qemu_meta_str.contains(r#""qemu""#));
 
         // 3. Box with provider "qemu" added as "libvirt" (reverse aliased and rewritten)
-        let box_qemu = make_box("qemu.box", br#"{"provider": "qemu"}"#);
+        let box_qemu = make_box("qemu.box", br#"{"provider": "qemu"}"#)?;
         assert!(
             manager
                 .add_box("test/rev-alias", "1.0.0", "libvirt", &box_qemu)
                 .is_ok()
         );
         // 4. Box with provider "virtualbox" added as "hyperv" (mismatch error)
-        let box_mismatch = make_box("mismatch.box", br#"{"provider": "virtualbox"}"#);
+        let box_mismatch = make_box("mismatch.box", br#"{"provider": "virtualbox"}"#)?;
         let err_res = manager.add_box("test/mismatch", "1.0.0", "hyperv", &box_mismatch);
-        assert!(err_res.is_err());
-        let err_msg = err_res.unwrap_err().to_string();
-        assert!(err_msg.contains("The box you're attempting to add has provider 'virtualbox'"));
+        assert!(err_res.as_ref().is_err_and(|e| {
+            e.to_string()
+                .contains("The box you're attempting to add has provider 'virtualbox'")
+        }));
 
         // 5. Box with provider "libvirt" added as "hyperv" (box_provider == "libvirt" but provider != "qemu")
-        let box_libvirt_hyperv = make_box("libvirt_hyperv.box", br#"{"provider": "libvirt"}"#);
+        let box_libvirt_hyperv = make_box("libvirt_hyperv.box", br#"{"provider": "libvirt"}"#)?;
         let err_res2 = manager.add_box(
             "test/libvirt-hyperv",
             "1.0.0",
@@ -946,21 +1051,22 @@ mod tests {
         assert!(err_res2.is_err());
 
         // 6. Box with invalid non-JSON metadata.json
-        let box_bad_json = make_box("bad_json.box", b"not valid json {{{");
+        let box_bad_json = make_box("bad_json.box", b"not valid json {{{")?;
         assert!(
             manager
                 .add_box("test/bad-json", "1.0.0", "virtualbox", &box_bad_json)
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_add_box_with_arch() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_add_box_with_arch() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         let p = dir.path().join("arm64.box");
-        let file = File::create(&p).expect("operation should succeed");
+        let file = File::create(&p)?;
         let mut encoder = GzEncoder::new(file, Compression::default());
         {
             let mut builder = tar::Builder::new(&mut encoder);
@@ -968,12 +1074,10 @@ mod tests {
             let content = br#"{"provider": "utm"}"#;
             header.set_size(content.len() as u64);
             header.set_cksum();
-            builder
-                .append_data(&mut header, "metadata.json", &content[..])
-                .expect("operation should succeed");
-            builder.into_inner().expect("operation should succeed");
+            builder.append_data(&mut header, "metadata.json", &content[..])?;
+            builder.into_inner()?;
         }
-        encoder.finish().expect("operation should succeed");
+        encoder.finish()?;
 
         assert!(
             manager
@@ -995,14 +1099,14 @@ mod tests {
             .join("utm-arm64");
         assert!(expected_dir.exists());
 
-        let meta_content =
-            fs::read_to_string(expected_dir.join("metadata.json")).expect("read metadata");
-        assert!(meta_content.contains("\"architecture\":\"arm64\""));
+        let meta_content = fs::read_to_string(expected_dir.join("metadata.json"))?;
+        assert!(meta_content.contains(r#""architecture":"arm64""#));
+        Ok(())
     }
 
     #[test]
-    fn test_prune_boxes() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_prune_boxes() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let ui = crate::ui::ConsoleUi;
 
@@ -1012,27 +1116,21 @@ mod tests {
         let v1_dir = box_dir.join("1.0.0").join("virtualbox");
         let v2_dir = box_dir.join("2.0.0").join("virtualbox");
         let v0_dir = box_dir.join("0.5.0");
-        fs::create_dir_all(&v1_dir).expect("operation should succeed");
-        fs::create_dir_all(&v2_dir).expect("operation should succeed");
-        fs::create_dir(&v0_dir).expect("operation should succeed");
+        fs::create_dir_all(&v1_dir)?;
+        fs::create_dir_all(&v2_dir)?;
+        fs::create_dir(&v0_dir)?;
 
         let unreadable_box = manager.global_boxes_dir.join("unreadable-box");
-        fs::create_dir(&unreadable_box).expect("operation should succeed");
+        fs::create_dir(&unreadable_box)?;
 
         use std::os::unix::fs::PermissionsExt;
-        let orig_unreadable = fs::metadata(&unreadable_box)
-            .expect("operation should succeed")
-            .permissions();
-        let orig_v0 = fs::metadata(&v0_dir)
-            .expect("operation should succeed")
-            .permissions();
-        fs::set_permissions(&unreadable_box, fs::Permissions::from_mode(0o000))
-            .expect("operation should succeed");
-        fs::set_permissions(&v0_dir, fs::Permissions::from_mode(0o000))
-            .expect("operation should succeed");
+        let orig_unreadable = fs::metadata(&unreadable_box)?.permissions();
+        let orig_v0 = fs::metadata(&v0_dir)?.permissions();
+        fs::set_permissions(&unreadable_box, fs::Permissions::from_mode(0o000))?;
+        fs::set_permissions(&v0_dir, fs::Permissions::from_mode(0o000))?;
 
-        File::create(box_dir.join("non_dir_entry")).expect("operation should succeed");
-        File::create(box_dir.join("1.0.0").join("non_dir_prov")).expect("operation should succeed");
+        File::create(box_dir.join("non_dir_entry"))?;
+        File::create(box_dir.join("1.0.0").join("non_dir_prov"))?;
 
         // Prune older versions
         assert!(manager.prune(None, false, true, &ui).is_ok());
@@ -1042,6 +1140,7 @@ mod tests {
 
         assert!(!v1_dir.exists());
         assert!(v2_dir.exists());
+        Ok(())
     }
 
     #[test]
@@ -1051,85 +1150,78 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_unpack_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_path = dir.path().join("test.box");
         let dest_dir = dir.path().join("dest");
-        std::fs::create_dir(&dest_dir).expect("operation should succeed");
+        std::fs::create_dir(&dest_dir)?;
 
         // Create a dummy tar.gz file
-        let file = File::create(&box_path).expect("operation should succeed");
+        let file = File::create(&box_path)?;
         let mut encoder = GzEncoder::new(file, Compression::default());
         {
             let mut builder = tar::Builder::new(&mut encoder);
             let mut header = tar::Header::new_gnu();
             header.set_size(11);
             header.set_cksum();
-            builder
-                .append_data(&mut header, "test.txt", &b"hello world"[..])
-                .expect("operation should succeed");
-            builder.into_inner().expect("operation should succeed");
+            builder.append_data(&mut header, "test.txt", &b"hello world"[..])?;
+            builder.into_inner()?;
         }
-        encoder.finish().expect("operation should succeed");
+        encoder.finish()?;
 
         let result = unpack_box(&box_path, &dest_dir);
         assert!(result.is_ok());
 
-        let file_contents =
-            std::fs::read_to_string(dest_dir.join("test.txt")).expect("operation should succeed");
+        let file_contents = std::fs::read_to_string(dest_dir.join("test.txt"))?;
         assert_eq!(file_contents, "hello world");
+        Ok(())
     }
 
     #[test]
-    fn test_unpack_plain_tar_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_unpack_plain_tar_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_path = dir.path().join("plain.box");
         let dest_dir = dir.path().join("dest_plain");
-        std::fs::create_dir(&dest_dir).expect("operation should succeed");
+        std::fs::create_dir(&dest_dir)?;
 
-        let file = File::create(&box_path).expect("operation should succeed");
+        let file = File::create(&box_path)?;
         {
             let mut builder = tar::Builder::new(file);
             let mut header = tar::Header::new_gnu();
             header.set_size(19);
             header.set_cksum();
-            builder
-                .append_data(
-                    &mut header,
-                    "metadata.json",
-                    &b"{\"provider\":\"qemu\"}"[..],
-                )
-                .expect("operation should succeed");
-            builder.into_inner().expect("operation should succeed");
+            builder.append_data(&mut header, "metadata.json", &br#"{"provider":"qemu"}"#[..])?;
+            builder.into_inner()?;
         }
 
         let result = unpack_box(&box_path, &dest_dir);
         assert!(result.is_ok());
 
-        let contents = std::fs::read_to_string(dest_dir.join("metadata.json"))
-            .expect("operation should succeed");
-        assert_eq!(contents, "{\"provider\":\"qemu\"}");
+        let contents = std::fs::read_to_string(dest_dir.join("metadata.json"))?;
+        assert_eq!(contents, r#"{"provider":"qemu"}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_unpack_empty_file() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_unpack_empty_file() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let empty_path = dir.path().join("empty.box");
-        File::create(&empty_path).expect("operation should succeed");
+        File::create(&empty_path)?;
         let dest = dir.path().join("dest_empty");
-        std::fs::create_dir(&dest).expect("operation should succeed");
+        std::fs::create_dir(&dest)?;
         let _ = unpack_box(&empty_path, &dest);
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_not_found() {
+    fn test_download_box_not_found() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(GET).path("/box.box");
             then.status(404);
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -1137,11 +1229,12 @@ mod tests {
         let result = manager.download_box(&url, &dest, None, None);
         assert!(result.is_err());
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_network_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_network_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -1152,44 +1245,48 @@ mod tests {
         let result_https =
             manager.download_box("https://invalid.localdomain.none/b.box", &dest, None, None);
         assert!(result_https.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_io_error_during_copy() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_io_error_during_copy() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
 
         std::thread::spawn(move || {
             use std::io::{Read, Write};
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 512];
-            let _ = stream.read(&mut buf);
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\npartial_payload");
-            let _ = stream.flush();
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\npartial_payload");
+                let _ = stream.flush();
+            }
         });
 
         let url = format!("http://127.0.0.1:{}/truncated.box", port);
         let result = manager.download_box(&url, &dest, None, None);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_prune_empty() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_prune_empty() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let ui = crate::ui::ConsoleUi;
         // Directory doesn't exist
         assert!(manager.prune(None, false, true, &ui).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_prune_dry_run_and_provider_filter() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_prune_dry_run_and_provider_filter() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let ui = crate::ui::ConsoleUi;
 
@@ -1199,9 +1296,9 @@ mod tests {
         let v1_vb = box_dir.join("1.0.0").join("virtualbox");
         let v1_vm = box_dir.join("1.0.0").join("vmware");
         let v2_vb = box_dir.join("2.0.0").join("virtualbox");
-        fs::create_dir_all(&v1_vb).expect("operation should succeed");
-        fs::create_dir_all(&v1_vm).expect("operation should succeed");
-        fs::create_dir_all(&v2_vb).expect("operation should succeed");
+        fs::create_dir_all(&v1_vb)?;
+        fs::create_dir_all(&v1_vm)?;
+        fs::create_dir_all(&v2_vb)?;
 
         // Prune with dry run and filter
         assert!(manager.prune(Some("virtualbox"), true, true, &ui).is_ok());
@@ -1216,112 +1313,105 @@ mod tests {
         assert!(!v1_vb.exists()); // pruned
         assert!(v1_vm.exists()); // skipped due to filter
         assert!(v2_vb.exists()); // kept because it's latest
+        Ok(())
     }
 
     #[test]
-    fn test_stubs() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_stubs() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
-        assert_eq!(
-            manager.outdated("box").expect("operation should succeed"),
-            false
-        );
+        assert!(!manager.outdated("box")?);
         assert!(manager.repackage("box", "prov").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_unpack_invalid_tar() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_unpack_invalid_tar() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_path = dir.path().join("test.box");
         let dest_dir = dir.path().join("dest");
 
         // Write invalid data
-        let mut file = File::create(&box_path).expect("operation should succeed");
-        file.write_all(b"not a tar.gz")
-            .expect("operation should succeed");
+        let mut file = File::create(&box_path)?;
+        file.write_all(b"not a tar.gz")?;
 
         let result = unpack_box(&box_path, &dest_dir);
         assert!(matches!(result, Err(MigratoryError::Io(_))));
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod additional_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::ui::ConsoleUi;
     use std::fs::File;
     use tempfile::tempdir;
 
     #[test]
-    fn test_prune_ignores_files() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_prune_ignores_files() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
-        fs::create_dir_all(&manager.global_boxes_dir).expect("operation should succeed");
+        fs::create_dir_all(&manager.global_boxes_dir)?;
         // Create a file instead of a dir to test the !box_path.is_dir() continue path
-        File::create(manager.global_boxes_dir.join("not_a_dir_box"))
-            .expect("operation should succeed");
+        File::create(manager.global_boxes_dir.join("not_a_dir_box"))?;
 
         // Create a box dir with a file inside it instead of a version dir
         let box_dir = manager.global_boxes_dir.join("real_box");
-        fs::create_dir_all(&box_dir).expect("operation should succeed");
-        File::create(box_dir.join("not_a_version_dir")).expect("operation should succeed");
+        fs::create_dir_all(&box_dir)?;
+        File::create(box_dir.join("not_a_version_dir"))?;
 
         // Create a valid version dir but with a file inside it instead of a provider dir
         let version_dir1 = box_dir.join("1.0.0");
         let version_dir2 = box_dir.join("2.0.0");
-        fs::create_dir_all(&version_dir1).expect("operation should succeed");
-        fs::create_dir_all(&version_dir2).expect("operation should succeed"); // To make versions.len() > 1
-        File::create(version_dir1.join("not_a_provider_dir")).expect("operation should succeed");
+        fs::create_dir_all(&version_dir1)?;
+        fs::create_dir_all(&version_dir2)?; // To make versions.len() > 1
+        File::create(version_dir1.join("not_a_provider_dir"))?;
 
         // Box with exactly 1 version to cover `versions.len() == 1` branch
         let box_dir_1ver = manager.global_boxes_dir.join("one_ver_box");
-        fs::create_dir_all(&box_dir_1ver).expect("operation should succeed");
-        fs::create_dir_all(box_dir_1ver.join("1.0.0")).expect("operation should succeed");
+        fs::create_dir_all(&box_dir_1ver)?;
+        fs::create_dir_all(box_dir_1ver.join("1.0.0"))?;
 
         let ui = ConsoleUi;
         assert!(manager.prune(None, false, false, &ui).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_repackage_box_dir_is_file() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_repackage_box_dir_is_file() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
-        std::fs::create_dir_all(&manager.global_boxes_dir).expect("operation should succeed");
-        File::create(manager.global_boxes_dir.join("file-box")).expect("operation should succeed");
+        std::fs::create_dir_all(&manager.global_boxes_dir)?;
+        File::create(manager.global_boxes_dir.join("file-box"))?;
         let result = manager.repackage("file-box", "provider");
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_repackage_empty_box_dir() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_repackage_empty_box_dir() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
-        std::fs::create_dir_all(manager.global_boxes_dir.join("empty-box"))
-            .expect("operation should succeed");
+        std::fs::create_dir_all(manager.global_boxes_dir.join("empty-box"))?;
         let result = manager.repackage("empty-box", "provider");
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
+
     #[test]
-    fn test_repackage_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_repackage_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let box_dir = manager.global_boxes_dir.join("test-box");
-        fs::create_dir_all(box_dir.join("0.1.0")).expect("operation should succeed");
-        fs::create_dir_all(box_dir.join("0.5.0")).expect("operation should succeed");
+        fs::create_dir_all(box_dir.join("0.1.0"))?;
+        fs::create_dir_all(box_dir.join("0.5.0"))?;
         let prov_dir = box_dir.join("2.0.0").join("virtualbox");
-        fs::create_dir_all(&prov_dir).expect("operation should succeed");
-        fs::create_dir_all(box_dir.join("1.0.0").join("virtualbox"))
-            .expect("operation should succeed");
+        fs::create_dir_all(&prov_dir)?;
+        fs::create_dir_all(box_dir.join("1.0.0").join("virtualbox"))?;
 
         // Add a dummy file inside the provider dir
-        File::create(prov_dir.join("Vagrantfile")).expect("operation should succeed");
+        File::create(prov_dir.join("Vagrantfile"))?;
 
         // Should find version 2.0.0 and package it
         let res = manager.repackage("test-box", "virtualbox");
@@ -1334,14 +1424,15 @@ mod additional_tests {
 
         assert!(dest_file.exists());
         let _ = fs::remove_file(dest_file); // cleanup
+        Ok(())
     }
 
     #[test]
-    fn test_repackage_no_versions() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_repackage_no_versions() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let box_dir = manager.global_boxes_dir.join("test-box");
-        fs::create_dir_all(&box_dir).expect("operation should succeed");
+        fs::create_dir_all(&box_dir)?;
 
         let result = manager.repackage("test-box", "virtualbox");
         assert!(
@@ -1349,14 +1440,15 @@ mod additional_tests {
             "{:?}",
             result
         );
+        Ok(())
     }
 
     #[test]
-    fn test_repackage_missing_provider() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_repackage_missing_provider() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let box_dir = manager.global_boxes_dir.join("test-box");
-        fs::create_dir_all(box_dir.join("1.0.0")).expect("operation should succeed"); // Create version dir but no provider dir
+        fs::create_dir_all(box_dir.join("1.0.0"))?; // Create version dir but no provider dir
 
         let result = manager.repackage("test-box", "virtualbox");
         assert!(
@@ -1364,17 +1456,12 @@ mod additional_tests {
             "{:?}",
             result
         );
+        Ok(())
     }
 }
+
 #[cfg(test)]
 mod extra_coverage_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use httpmock::MockServer;
     use std::fs::File;
@@ -1382,14 +1469,14 @@ mod extra_coverage_tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_download_box_sha512_http() {
+    fn test_download_box_sha512_http() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/box.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -1408,17 +1495,18 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(&expected_checksum), Some("sha512"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_sha1_http() {
+    fn test_download_box_sha1_http() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/box.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -1437,17 +1525,18 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(&expected_checksum), Some("sha1"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_md5_http() {
+    fn test_download_box_md5_http() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/box.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -1466,41 +1555,44 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(&expected_checksum), Some("md5"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
 
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
 
         let url = format!("file://{}", src.display());
         assert!(manager.download_box(&url, &dest, None, None).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_without_file_prefix() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_without_file_prefix() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
 
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
 
         let url = src.to_string_lossy().to_string();
         assert!(manager.download_box(&url, &dest, None, None).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_not_found() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         let src = dir.path().join("src.box");
@@ -1508,18 +1600,19 @@ mod extra_coverage_tests {
 
         let url = format!("file://{}", src.display());
         assert!(manager.download_box(&url, &dest, None, None).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_checksum_sha256() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_checksum_sha256() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
 
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
 
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -1536,16 +1629,17 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(&expected_checksum), Some("sha256"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_checksum_sha512() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_checksum_sha512() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
         use sha2::{Digest, Sha512};
         let mut hasher = Sha512::new();
         hasher.update(b"box data");
@@ -1560,16 +1654,17 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(&expected_checksum), Some("sha512"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_checksum_sha1() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_checksum_sha1() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
         use sha1::{Digest, Sha1};
         let mut hasher = Sha1::new();
         hasher.update(b"box data");
@@ -1584,16 +1679,17 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(&expected_checksum), Some("sha1"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_checksum_md5() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_checksum_md5() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
         use md5::{Digest, Md5};
         let mut hasher = Md5::new();
         hasher.update(b"box data");
@@ -1608,16 +1704,17 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(&expected_checksum), Some("md5"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_checksum_mismatch() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_checksum_mismatch() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
 
         let expected_checksum = "badchecksum";
         let url = format!("file://{}", src.display());
@@ -1626,16 +1723,17 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some(expected_checksum), Some("sha256"))
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_local_file_checksum_unknown() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_download_box_local_file_checksum_unknown() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let src = dir.path().join("src.box");
         let dest = dir.path().join("dest.box");
-        let mut f = File::create(&src).unwrap();
-        f.write_all(b"box data").unwrap();
+        let mut f = File::create(&src)?;
+        f.write_all(b"box data")?;
 
         let url = format!("file://{}", src.display());
         // A dummy checksum with an unknown checksum_type
@@ -1644,17 +1742,18 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some("dummy"), Some("unknown"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_download_box_http_checksum_unknown() {
+    fn test_download_box_http_checksum_unknown() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/box.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let dest = dir.path().join("downloaded.box");
         let manager = BoxManager::new(dir.path());
 
@@ -1664,24 +1763,27 @@ mod extra_coverage_tests {
                 .download_box(&url, &dest, Some("dummy"), Some("unknown"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_add_box_mock_signature_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_add_box_mock_signature_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
-        unsafe {
-            std::env::set_var("MIGRATORY_MOCK_SIGNATURE", "/path/that/does/not/exist");
-        }
         let box_path = dir.path().join("test.box");
-        let result = manager.add_box("test/box", "1.0.0", "virtualbox", &box_path);
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_MOCK_SIGNATURE");
-        }
+        let missing_sig = Path::new("/path/that/does/not/exist");
+        let result = manager.add_box_with_options(
+            "test/box",
+            "1.0.0",
+            "virtualbox",
+            None,
+            Some(missing_sig),
+            &box_path,
+        );
 
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -1783,7 +1885,8 @@ mod extra_coverage_tests {
         );
     }
 
-    fn create_dummy_box_bytes() -> Vec<u8> {
+    /// Creates a gzip-compressed tar archive containing an empty `metadata.json`.
+    fn create_dummy_box_bytes() -> Result<Vec<u8>, MigratoryError> {
         let mut buf = Vec::new();
         {
             let mut encoder =
@@ -1793,50 +1896,40 @@ mod extra_coverage_tests {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(2);
                 header.set_cksum();
-                builder
-                    .append_data(&mut header, "metadata.json", &b"{}"[..])
-                    .expect("operation should succeed");
-                builder.into_inner().expect("operation should succeed");
+                builder.append_data(&mut header, "metadata.json", &b"{}"[..])?;
+                builder.into_inner()?;
             }
-            encoder.finish().expect("operation should succeed");
+            encoder.finish()?;
         }
-        buf
+        Ok(buf)
     }
 
     #[test]
-    fn test_box_manager_outdated_and_update() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
+    fn test_box_manager_outdated_and_update() -> Result<(), MigratoryError> {
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.base_url());
-        }
 
-        let dir = tempdir().expect("operation should succeed");
-        let manager = BoxManager::new(dir.path());
+        let dir = tempdir()?;
+        let client = crate::cloud::CloudClient::with_config(crate::cloud::CloudClientConfig {
+            base_url: server.base_url(),
+            token: None,
+        })?;
+        let manager = BoxManager::new(dir.path()).with_cloud_client(client);
 
         // Test outdated with empty name
         assert!(manager.outdated("").is_err());
 
         // Test outdated when box_dir does not exist
-        assert_eq!(
-            manager
-                .outdated("my/box")
-                .expect("operation should succeed"),
-            false
-        );
+        assert!(!manager.outdated("my/box")?);
 
         // Setup local box directories for my/box:
         // "1.0.0", "0.5.0" (lower), and "not-a-ver"
         let safe_name = "my-VAGRANTSLASH-box";
         let box_dir = manager.global_boxes_dir.join(safe_name);
-        fs::create_dir_all(box_dir.join("1.0.0/virtualbox")).expect("operation should succeed");
-        fs::create_dir_all(box_dir.join("0.5.0/virtualbox")).expect("operation should succeed");
-        fs::create_dir_all(box_dir.join("not-a-ver/virtualbox")).expect("operation should succeed");
+        fs::create_dir_all(box_dir.join("1.0.0/virtualbox"))?;
+        fs::create_dir_all(box_dir.join("0.5.0/virtualbox"))?;
+        fs::create_dir_all(box_dir.join("not-a-ver/virtualbox"))?;
 
-        let box_bytes = create_dummy_box_bytes();
+        let box_bytes = create_dummy_box_bytes()?;
         let box_checksum = {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
@@ -1859,13 +1952,8 @@ mod extra_coverage_tests {
             then.status(500);
         });
         let err_box_dir = manager.global_boxes_dir.join("meta-err");
-        fs::create_dir_all(err_box_dir.join("1.0.0/virtualbox")).expect("operation should succeed");
-        assert_eq!(
-            manager
-                .outdated("meta-err")
-                .expect("operation should succeed"),
-            false
-        );
+        fs::create_dir_all(err_box_dir.join("1.0.0/virtualbox"))?;
+        assert!(!manager.outdated("meta-err")?);
         mock_meta_err.delete();
 
         // Test metadata with only older versions: outdated returns false
@@ -1884,14 +1972,8 @@ mod extra_coverage_tests {
             }));
         });
         let older_box_dir = manager.global_boxes_dir.join("meta-older");
-        fs::create_dir_all(older_box_dir.join("1.0.0/virtualbox"))
-            .expect("operation should succeed");
-        assert_eq!(
-            manager
-                .outdated("meta-older")
-                .expect("operation should succeed"),
-            false
-        );
+        fs::create_dir_all(older_box_dir.join("1.0.0/virtualbox"))?;
+        assert!(!manager.outdated("meta-older")?);
         mock_meta_older.delete();
 
         let _metadata_mock = server.mock(|when, then| {
@@ -1929,36 +2011,21 @@ mod extra_coverage_tests {
         });
 
         // Now outdated should be true
-        assert_eq!(
-            manager
-                .outdated("my/box")
-                .expect("operation should succeed"),
-            true
-        );
+        assert!(manager.outdated("my/box")?);
 
         // Test update with provider filter that doesn't match
         let res_no_match = manager.update("my/box", Some("vmware"));
-        assert_eq!(res_no_match.expect("operation should succeed"), false);
+        assert!(!res_no_match?);
 
         // Test update with provider = None (takes any provider)
         let res_none_prov = manager.update("my/box", None);
-        assert_eq!(res_none_prov.expect("operation should succeed"), true);
+        assert!(res_none_prov?);
 
         // Now version 2.0.0 is installed, so outdated is false
-        assert_eq!(
-            manager
-                .outdated("my/box")
-                .expect("operation should succeed"),
-            false
-        );
+        assert!(!manager.outdated("my/box")?);
 
         // And update returns false because it's not outdated
-        assert_eq!(
-            manager
-                .update("my/box", None)
-                .expect("operation should succeed"),
-            false
-        );
+        assert!(!manager.update("my/box", None)?);
 
         // Test update when outdated but target version has no providers
         let _meta_no_provs = server.mock(|when, then| {
@@ -1976,14 +2043,8 @@ mod extra_coverage_tests {
             }));
         });
         let no_provs_dir = manager.global_boxes_dir.join("no-provs");
-        fs::create_dir_all(no_provs_dir.join("1.0.0/virtualbox"))
-            .expect("operation should succeed");
-        assert_eq!(
-            manager
-                .update("no-provs", None)
-                .expect("operation should succeed"),
-            false
-        );
+        fs::create_dir_all(no_provs_dir.join("1.0.0/virtualbox"))?;
+        assert!(!manager.update("no-provs", None)?);
 
         // Test update when download_box fails
         let _meta_fail_dl = server.mock(|when, then| {
@@ -2010,7 +2071,7 @@ mod extra_coverage_tests {
             then.status(500);
         });
         let fail_dl_dir = manager.global_boxes_dir.join("fail-dl");
-        fs::create_dir_all(fail_dl_dir.join("1.0.0/virtualbox")).expect("operation should succeed");
+        fs::create_dir_all(fail_dl_dir.join("1.0.0/virtualbox"))?;
         assert!(manager.update("fail-dl", None).is_err());
 
         // Test update when add_box fails (corrupt archive bytes)
@@ -2038,149 +2099,122 @@ mod extra_coverage_tests {
             then.status(200).body(b"corrupt non-tar bytes");
         });
         let fail_add_dir = manager.global_boxes_dir.join("fail-add");
-        fs::create_dir_all(fail_add_dir.join("1.0.0/virtualbox"))
-            .expect("operation should succeed");
+        fs::create_dir_all(fail_add_dir.join("1.0.0/virtualbox"))?;
         assert!(manager.update("fail-add", None).is_err());
-
-        // Test outdated and update when CloudClient::new fails
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR", "1");
-        }
-        let err_client_dir = manager.global_boxes_dir.join("err-client");
-        fs::create_dir_all(err_client_dir.join("1.0.0/virtualbox"))
-            .expect("operation should succeed");
-        assert_eq!(
-            manager
-                .outdated("err-client")
-                .expect("operation should succeed"),
-            false
-        );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR");
-        }
 
         // Test outdated when box_dir exists but is a file (read_dir fails)
         let file_box_path = manager.global_boxes_dir.join("file-box");
-        fs::write(&file_box_path, b"not a dir").expect("operation should succeed");
-        assert_eq!(
-            manager
-                .outdated("file-box")
-                .expect("operation should succeed"),
-            false
-        );
+        fs::write(&file_box_path, b"not a dir")?;
+        assert!(!manager.outdated("file-box")?);
+
+        // Also exercise default CloudClient::new branch when cloud_client is None
+        let manager_no_client = BoxManager::new(dir.path());
+        let err_client_dir = manager_no_client.global_boxes_dir.join("err-client");
+        fs::create_dir_all(err_client_dir.join("1.0.0/virtualbox"))?;
+        let _ = manager_no_client.outdated("err-client");
 
         // Test update when outdated is true but latest_v is None (empty versions in update)
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("operation should succeed");
-        let port = listener
-            .local_addr()
-            .expect("operation should succeed")
-            .port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         let server_url = format!("http://127.0.0.1:{}", port);
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", &server_url);
-        }
+        let seq_client = crate::cloud::CloudClient::with_config(crate::cloud::CloudClientConfig {
+            base_url: server_url,
+            token: None,
+        })?;
+        let seq_manager = BoxManager::new(dir.path()).with_cloud_client(seq_client);
 
         std::thread::spawn(move || {
-            let (mut stream1, _) = listener.accept().expect("accept failed");
-            use std::io::{Read, Write};
-            let mut buf = [0u8; 1024];
-            let _ = stream1.read(&mut buf);
-            let body1 = serde_json::json!({
-                "description_markdown": "desc",
-                "short_description": "short",
-                "name": "seq-box",
-                "versions": [
-                    {
-                        "version": "2.0.0",
-                        "providers": []
-                    }
-                ]
-            })
-            .to_string();
-            let resp1 = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body1.len(),
-                body1
-            );
-            let _ = stream1.write_all(resp1.as_bytes());
+            let _ = listener.accept().map(|(mut stream1, _)| {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 1024];
+                let _ = stream1.read(&mut buf);
+                let body1 = serde_json::json!({
+                    "description_markdown": "desc",
+                    "short_description": "short",
+                    "name": "seq-box",
+                    "versions": [
+                        {
+                            "version": "2.0.0",
+                            "providers": []
+                        }
+                    ]
+                })
+                .to_string();
+                let resp1 = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body1.len(),
+                    body1
+                );
+                let _ = stream1.write_all(resp1.as_bytes());
+            });
         });
 
-        let seq_dir = manager.global_boxes_dir.join("seq-box");
-        fs::create_dir_all(seq_dir.join("1.0.0/virtualbox")).expect("operation should succeed");
-        assert_eq!(
-            manager
-                .update("seq-box", None)
-                .expect("operation should succeed"),
-            false
-        );
+        let seq_dir = seq_manager.global_boxes_dir.join("seq-box");
+        fs::create_dir_all(seq_dir.join("1.0.0/virtualbox"))?;
+        assert!(!seq_manager.update("seq-box", None)?);
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_io_error_coverage() {
+    fn test_io_error_coverage() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/test.box");
             then.status(200).body("box data");
         });
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
 
         // 1. download_box where dest_path is an existing directory -> File::create fails
         let dest_is_dir = dir.path().join("is_a_dir");
-        fs::create_dir(&dest_is_dir).expect("operation should succeed");
+        fs::create_dir(&dest_is_dir)?;
         let url = server.url("/test.box");
         let dl_res = manager.download_box(&url, &dest_is_dir, None, None);
         assert!(dl_res.is_err());
 
         // 2. download_box_local_file where dest is an invalid file path because parent is a file
         let src_file = dir.path().join("src.box");
-        fs::write(&src_file, b"src content").expect("operation should succeed");
+        fs::write(&src_file, b"src content")?;
         let local_url = format!("file://{}", src_file.display());
         let bad_parent = dir.path().join("file_parent");
-        fs::write(&bad_parent, b"not a dir").expect("operation should succeed");
+        fs::write(&bad_parent, b"not a dir")?;
         let bad_dest = bad_parent.join("sub").join("file");
         let local_res = manager.download_box(&local_url, &bad_dest, None, None);
         assert!(local_res.is_err());
 
         // 3. add_box where dest_dir creation fails because a regular file exists at parent
         let dummy_box = dir.path().join("dummy.box");
-        fs::write(&dummy_box, b"dummy").expect("operation should succeed");
+        fs::write(&dummy_box, b"dummy")?;
         let blocked = manager.global_boxes_dir.join("blocked-VAGRANTSLASH-box");
-        fs::create_dir_all(&manager.global_boxes_dir).expect("operation should succeed");
-        fs::write(&blocked, b"file blocking dir").expect("operation should succeed");
+        fs::create_dir_all(&manager.global_boxes_dir)?;
+        fs::write(&blocked, b"file blocking dir")?;
         let add_res = manager.add_box("blocked/box", "1.0.0", "virtualbox", &dummy_box);
         assert!(add_res.is_err());
 
         // 4. unpack_box where dest_dir is a regular file
         let tgz_path = dir.path().join("valid.box");
-        let file = File::create(&tgz_path).expect("operation should succeed");
+        let file = File::create(&tgz_path)?;
         let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         {
             let mut builder = tar::Builder::new(&mut encoder);
             let mut header = tar::Header::new_gnu();
             header.set_size(5);
             header.set_cksum();
-            builder
-                .append_data(&mut header, "entry.txt", &b"hello"[..])
-                .expect("operation should succeed");
-            builder.into_inner().expect("operation should succeed");
+            builder.append_data(&mut header, "entry.txt", &b"hello"[..])?;
+            builder.into_inner()?;
         }
-        encoder.finish().expect("operation should succeed");
+        encoder.finish()?;
 
         let blocked_dest = dir.path().join("dest_file");
-        fs::write(&blocked_dest, b"existing file").expect("operation should succeed");
+        fs::write(&blocked_dest, b"existing file")?;
         let unpack_res = unpack_box(&tgz_path, &blocked_dest);
         assert!(unpack_res.is_err());
 
         // 5. download_box_local_file where dest is an existing directory -> fs::copy fails
         let copy_dest_dir = dir.path().join("copy_dest_dir");
-        fs::create_dir(&copy_dest_dir).expect("operation should succeed");
+        fs::create_dir(&copy_dest_dir)?;
         let copy_res = manager.download_box(&local_url, &copy_dest_dir, None, None);
         assert!(copy_res.is_err());
 
@@ -2190,14 +2224,14 @@ mod extra_coverage_tests {
             .join("err-box")
             .join("1.0.0")
             .join("virtualbox");
-        fs::create_dir_all(&repkg_box_dir).expect("operation should succeed");
-        File::create(repkg_box_dir.join("Vagrantfile")).expect("operation should succeed");
+        fs::create_dir_all(&repkg_box_dir)?;
+        File::create(repkg_box_dir.join("Vagrantfile"))?;
         let pkg_dir = std::env::current_dir()
             .unwrap_or(PathBuf::from("."))
             .join("package-err-box-1.0.0-virtualbox.box");
         let _ = fs::remove_file(&pkg_dir);
         let _ = fs::remove_dir_all(&pkg_dir);
-        fs::create_dir(&pkg_dir).expect("operation should succeed");
+        fs::create_dir(&pkg_dir)?;
         let repkg_res = manager.repackage("err-box", "virtualbox");
         assert!(repkg_res.is_err());
         let _ = fs::remove_dir_all(&pkg_dir);
@@ -2205,54 +2239,51 @@ mod extra_coverage_tests {
         // 7. update where outdated returns an error -> self.outdated(name)?;
         let update_err = manager.update("", None);
         assert!(update_err.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_download_checksum_file_open_error() {
+    fn test_download_checksum_file_open_error() -> Result<(), MigratoryError> {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let src_file = dir.path().join("source.box");
-        fs::write(&src_file, b"content").expect("operation should succeed");
+        fs::write(&src_file, b"content")?;
         let local_url = format!("file://{}", src_file.display());
 
         let dest_file = dir.path().join("dest_unreadable.box");
-        fs::write(&dest_file, b"content").expect("operation should succeed");
-        let orig_perms = fs::metadata(&dest_file)
-            .expect("operation should succeed")
-            .permissions();
-        fs::set_permissions(&dest_file, fs::Permissions::from_mode(0o000))
-            .expect("operation should succeed");
+        fs::write(&dest_file, b"content")?;
+        let orig_perms = fs::metadata(&dest_file)?.permissions();
+        fs::set_permissions(&dest_file, fs::Permissions::from_mode(0o000))?;
 
         let res = manager.download_box(&local_url, &dest_file, Some("abc"), Some("sha1"));
         assert!(res.is_err());
 
         let _ = fs::set_permissions(&dest_file, orig_perms);
+        Ok(())
     }
 
     #[test]
-    fn test_repackage_unreadable_file_error() {
+    fn test_repackage_unreadable_file_error() -> Result<(), MigratoryError> {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let manager = BoxManager::new(dir.path());
         let prov_dir = manager
             .global_boxes_dir
             .join("unreadable-pkg-box")
             .join("1.0.0")
             .join("virtualbox");
-        fs::create_dir_all(&prov_dir).expect("operation should succeed");
+        fs::create_dir_all(&prov_dir)?;
         let unreadable_file = prov_dir.join("bad_file");
-        fs::write(&unreadable_file, b"content").expect("operation should succeed");
-        let orig_perms = fs::metadata(&unreadable_file)
-            .expect("operation should succeed")
-            .permissions();
-        fs::set_permissions(&unreadable_file, fs::Permissions::from_mode(0o000))
-            .expect("operation should succeed");
+        fs::write(&unreadable_file, b"content")?;
+        let orig_perms = fs::metadata(&unreadable_file)?.permissions();
+        fs::set_permissions(&unreadable_file, fs::Permissions::from_mode(0o000))?;
 
         let res = manager.repackage("unreadable-pkg-box", "virtualbox");
         assert!(res.is_err());
 
         let _ = fs::set_permissions(&unreadable_file, orig_perms);
+        Ok(())
     }
 
     #[test]

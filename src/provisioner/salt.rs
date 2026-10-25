@@ -7,23 +7,23 @@ use std::collections::HashMap;
 
 /// Salt provisioner.
 pub struct SaltProvisioner {
-    /// Represents the `run_highstate` field.
+    /// Whether to run `salt-call state.highstate` after bootstrapping.
     run_highstate: bool,
-    /// Represents the `install_master` field.
+    /// Whether to install the `salt-master` daemon on the guest.
     install_master: bool,
-    /// Represents the `no_minion` field.
+    /// Whether to skip installing the `salt-minion` daemon.
     no_minion: bool,
-    /// Represents the `masterless` field.
+    /// Whether to run Salt in masterless (`--local`) mode.
     masterless: bool,
-    /// Represents the `install_type` field.
+    /// Salt bootstrap channel (`"stable"`, `"git"`, etc.).
     install_type: Option<String>,
-    /// Represents the `minion_config` field.
+    /// Local path to a custom Salt minion configuration file.
     minion_config: Option<String>,
-    /// Represents the `formula_path` field.
+    /// Local directory containing Salt formulas to sync to `/srv/formulas`.
     formula_path: Option<String>,
-    /// Represents the `state_files_path` field.
+    /// Local directory containing Salt state files to sync to `/srv/salt`.
     state_files_path: Option<String>,
-    /// Represents the `pillar_path` field.
+    /// Local directory containing Salt pillar data to sync to `/srv/pillar`.
     pillar_path: Option<String>,
 }
 
@@ -155,43 +155,29 @@ impl Provisioner for SaltProvisioner {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::io::Write;
     use std::path::Path;
-    use std::time::Duration;
+
     use tempfile::tempdir;
 
+    /// No-op mock communicator for Salt provisioner tests.
     struct MockComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
+    /// Configurable failing communicator for Salt provisioner error tests.
     struct FailingComm {
+        /// Fail `upload` calls.
         fail_upload: bool,
+        /// Fail all `execute` calls.
         fail_execute: bool,
+        /// Fail `execute` when `command` contains this substring.
         fail_cmd_substring: Option<&'static str>,
     }
 
@@ -200,10 +186,10 @@ mod tests {
             if self.fail_execute {
                 return Err(MigratoryError::Generic("execute failed".to_string()));
             }
-            if let Some(needle) = self.fail_cmd_substring {
-                if command.contains(needle) {
-                    return Err(MigratoryError::Generic("execute failed".to_string()));
-                }
+            if let Some(needle) = self.fail_cmd_substring
+                && command.contains(needle)
+            {
+                return Err(MigratoryError::Generic("execute failed".to_string()));
             }
             Ok(String::new())
         }
@@ -213,15 +199,6 @@ mod tests {
             } else {
                 Ok(())
             }
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -281,15 +258,15 @@ mod tests {
     }
 
     #[test]
-    fn test_salt_provisioner_masterless_and_sync() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_salt_provisioner_masterless_and_sync() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let formulas_dir = dir.path().join("formulas");
         let states_dir = dir.path().join("states");
         let pillar_dir = dir.path().join("pillar");
 
-        std::fs::create_dir(&formulas_dir).expect("create_dir failed");
-        std::fs::create_dir(&states_dir).expect("create_dir failed");
-        std::fs::create_dir(&pillar_dir).expect("create_dir failed");
+        std::fs::create_dir(&formulas_dir)?;
+        std::fs::create_dir(&states_dir)?;
+        std::fs::create_dir(&pillar_dir)?;
 
         let mut prov = SaltProvisioner::default();
         let mut config = HashMap::new();
@@ -312,17 +289,18 @@ mod tests {
 
         let comm = MockComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_salt_provisioner_minion_config() {
+    fn test_salt_provisioner_minion_config() -> Result<(), MigratoryError> {
         let mut prov = SaltProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("tempdir failed");
+        let dir = tempdir()?;
         let cfg_path = dir.path().join("minion");
-        let mut file = std::fs::File::create(&cfg_path).expect("create file failed");
-        writeln!(file, "master: localhost").expect("write failed");
+        let mut file = std::fs::File::create(&cfg_path)?;
+        writeln!(file, "master: localhost")?;
 
         config.insert(
             "minion_config".to_string(),
@@ -335,6 +313,7 @@ mod tests {
 
         let comm = MockComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -354,17 +333,17 @@ mod tests {
     }
 
     #[test]
-    fn test_salt_provisioner_failures() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_salt_provisioner_failures() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let formulas_dir = dir.path().join("formulas");
         let states_dir = dir.path().join("states");
         let pillar_dir = dir.path().join("pillar");
         let cfg_path = dir.path().join("minion");
 
-        std::fs::create_dir(&formulas_dir).expect("create_dir failed");
-        std::fs::create_dir(&states_dir).expect("create_dir failed");
-        std::fs::create_dir(&pillar_dir).expect("create_dir failed");
-        std::fs::write(&cfg_path, "master: local").expect("write failed");
+        std::fs::create_dir(&formulas_dir)?;
+        std::fs::create_dir(&states_dir)?;
+        std::fs::create_dir(&pillar_dir)?;
+        std::fs::write(&cfg_path, "master: local")?;
 
         let comm_exec_fail = FailingComm {
             fail_upload: false,
@@ -470,5 +449,6 @@ mod tests {
             fail_cmd_substring: Some("state.highstate"),
         };
         assert!(prov7.provision(&comm_highstate_fail).is_err());
+        Ok(())
     }
 }

@@ -4,6 +4,7 @@ This script parses coverage from cargo llvm-cov and updates the README.md
 badges for both documentation and test coverage in a cross-platform manner.
 """
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -99,11 +100,14 @@ def get_doc_coverage() -> str:
         str: The documentation coverage percentage, or 'Unknown' if unavailable.
     """
     try:
+        env = os.environ.copy()
+        env["RUSTC_BOOTSTRAP"] = "1"
         result = subprocess.run(
             ["cargo", "rustdoc", "--", "-Z", "unstable-options", "--show-coverage"],
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
         output = result.stdout or ""
         doc_path = Path("target/doc/migratory.txt")

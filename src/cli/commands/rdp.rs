@@ -68,36 +68,37 @@ pub fn get_rdp_address(machine: &crate::config::MachineConfig) -> (String, u16) 
 /// * `rdp_path` - The path to the generated `.rdp` file.
 /// * `host` - The host address.
 /// * `port` - The host port.
+fn launch_rdp(rdp_path: &Path, host: &str, port: u16) {
+    let _cmd = build_rdp_command(rdp_path, host, port);
+}
+
+/// Builds the RDP command based on the current OS.
+pub fn build_rdp_command(rdp_path: &Path, host: &str, port: u16) -> Command {
+    build_rdp_command_for_os(std::env::consts::OS, rdp_path, host, port)
+}
+
+/// Builds the RDP command for a specified operating system identifier.
+///
+/// # Arguments
+///
+/// * `os` - Target OS name (`"windows"`, `"macos"`, or other).
+/// * `rdp_path` - Path to the `.rdp` connection file.
+/// * `host` - Target host IP/address.
+/// * `port` - Target RDP port.
 ///
 /// # Returns
 ///
-/// Returns a `Command` configured to launch the appropriate RDP viewer.
-fn launch_rdp(rdp_path: &Path, host: &str, port: u16) {
-    #[cfg(test)]
-    {
-        let _ = build_rdp_command(rdp_path, host, port);
-    }
-    #[cfg(not(test))]
-    {
-        if std::env::var("MIGRATORY_TEST_MOCK").is_err() && std::env::var("CARGO").is_err() {
-            let mut cmd = build_rdp_command(rdp_path, host, port);
-            let _ = cmd.spawn();
-        }
-    }
-}
-
-/// Builds the RDP command based on OS.
-pub fn build_rdp_command(rdp_path: &Path, host: &str, port: u16) -> Command {
-    if cfg!(target_os = "windows") {
+/// Returns the constructed [`Command`].
+pub fn build_rdp_command_for_os(os: &str, rdp_path: &Path, host: &str, port: u16) -> Command {
+    if os == "windows" {
         let mut cmd = Command::new("mstsc.exe");
         cmd.arg(rdp_path);
         cmd
-    } else if cfg!(target_os = "macos") {
+    } else if os == "macos" {
         let mut cmd = Command::new("open");
         cmd.arg(rdp_path);
         cmd
     } else {
-        // Linux / Unix fallback
         let mut cmd = Command::new("xfreerdp");
         cmd.arg(format!("/v:{}:{}", host, port));
         cmd
@@ -157,13 +158,7 @@ pub fn save_rdp_file(
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or if machine is missing.
 pub fn execute(cwd: &Path, args: &RdpArgs) -> Result<(), MigratoryError> {
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
-
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
+    let env_config = crate::config::load_environment_config(cwd)?;
 
     let machine_name = if let Some(target) = &args.name {
         if !env_config.machines.contains_key(target) {
@@ -192,7 +187,22 @@ pub fn execute(cwd: &Path, args: &RdpArgs) -> Result<(), MigratoryError> {
 
     println!("==> {}: Generating RDP connection file...", machine_name);
 
-    let (host, port) = get_rdp_address(&machine_config);
+    let target_provider = if let Some(p) = machine_config.vm.providers.first() {
+        p.name.as_str()
+    } else {
+        "virtualbox"
+    };
+    let state_mgr =
+        crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
+    let machine_state = state_mgr.machine_state(&machine_name, target_provider);
+
+    let (mut host, mut port) = get_rdp_address(&machine_config);
+    if let Ok(Some(ip)) = machine_state.get_guest_ip() {
+        host = ip;
+    }
+    if let Ok(Some(persisted_port)) = machine_state.get_forwarded_host_port(3389) {
+        port = persisted_port;
+    }
     let rdp_content = generate_rdp_content(&host, port);
     let rdp_path = save_rdp_file(cwd, &machine_name, &rdp_content)?;
 
@@ -210,59 +220,57 @@ pub fn execute(cwd: &Path, args: &RdpArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::config::{MachineConfig, NetworkConfig};
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_rdp_missing() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = RdpArgs { name: None };
 
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_rdp_machine_not_found() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_machine_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = RdpArgs {
             name: Some("nonexistent".to_string()),
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests fallback when machines map is empty.
     #[test]
-    fn test_execute_rdp_empty_machines() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_empty_machines() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")
-            .expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")?;
 
         let args = RdpArgs { name: None };
+        assert!(execute(cwd, &args).is_err());
+
+        fs::write(cwd.join("Vagrantfile"), "# Empty Vagrantfile")?;
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     /// Tests rdp error when a before trigger fails.
     #[test]
-    fn test_execute_rdp_trigger_before_failure() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_trigger_before_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -271,19 +279,20 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = RdpArgs {
             name: Some("win".to_string()),
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests rdp error when an after trigger fails.
     #[test]
-    fn test_execute_rdp_trigger_after_failure() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_trigger_after_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -292,22 +301,23 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = RdpArgs {
             name: Some("win".to_string()),
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests rdp error when saving RDP connection file fails.
     #[test]
-    fn test_execute_rdp_save_file_error() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_save_file_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let dotfile = cwd.join(".vagrant");
-        fs::write(&dotfile, "not a directory").expect("write failed");
+        fs::write(&dotfile, "not a directory")?;
 
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -315,30 +325,32 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = RdpArgs {
             name: Some("nonexistent_parent_dir/testvm".to_string()),
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_rdp_default_success() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_default_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = RdpArgs { name: None };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_rdp_with_triggers() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_rdp_with_triggers() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -350,13 +362,14 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = RdpArgs {
             name: Some("win".to_string()),
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
@@ -408,10 +421,40 @@ end
     }
 
     #[test]
-    fn test_build_rdp_command() {
+    fn test_build_rdp_command() -> Result<(), MigratoryError> {
         let rdp_file = Path::new("/tmp/test.rdp");
         let cmd = build_rdp_command(rdp_file, "127.0.0.1", 3389);
         assert!(!format!("{:?}", cmd).is_empty());
+        assert_eq!(
+            build_rdp_command_for_os("windows", rdp_file, "127.0.0.1", 3389).get_program(),
+            "mstsc.exe"
+        );
+        assert_eq!(
+            build_rdp_command_for_os("macos", rdp_file, "127.0.0.1", 3389).get_program(),
+            "open"
+        );
+        assert_eq!(
+            build_rdp_command_for_os("linux", rdp_file, "127.0.0.1", 3389).get_program(),
+            "xfreerdp"
+        );
+
+        let dir = tempdir()?;
+        let cwd = dir.path();
+        fs::write(
+            cwd.join("Vagrantfile"),
+            "Vagrant.configure('2') do |c|\n  c.vm.provider 'virtualbox'\nend\n",
+        )?;
+        let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
+        let ms = state_mgr.machine_state("default", "virtualbox");
+        ms.set_guest_ip("10.0.0.88")?;
+        ms.set_forwarded_ports(&[crate::state::local::PersistedForwardedPort {
+            guest: 3389,
+            host: 13399,
+            protocol: "tcp".to_string(),
+            host_ip: None,
+        }])?;
+        assert!(execute(cwd, &RdpArgs { name: None }).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -422,23 +465,22 @@ end
     }
 
     #[test]
-    fn test_save_rdp_file_fallback() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_save_rdp_file_fallback() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let dotfile = cwd.join(".vagrant");
-        fs::write(&dotfile, "not a directory").expect("write failed");
+        fs::write(&dotfile, "not a directory")?;
 
-        let result = save_rdp_file(cwd, "testvm", "rdp_content");
-        assert!(result.is_ok());
-        let path = result.expect("must succeed");
+        let path = save_rdp_file(cwd, "testvm", "rdp_content")?;
         assert!(path.exists());
         let _ = fs::remove_file(path);
+        Ok(())
     }
 
     /// Tests save_rdp_file fallback when connection.rdp cannot be written inside existing rdp_dir.
     #[test]
-    fn test_save_rdp_file_write_dir_fallback() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_save_rdp_file_write_dir_fallback() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let dotfile = crate::config::get_dotfile_path(cwd);
         let rdp_dir = dotfile
@@ -446,24 +488,24 @@ end
             .join("testvm_write_dir")
             .join("virtualbox");
         let rdp_path = rdp_dir.join("connection.rdp");
-        fs::create_dir_all(&rdp_path).expect("operation should succeed");
+        fs::create_dir_all(&rdp_path)?;
 
-        let result = save_rdp_file(cwd, "testvm_write_dir", "rdp_content");
-        assert!(result.is_ok());
-        let path = result.expect("must succeed");
+        let path = save_rdp_file(cwd, "testvm_write_dir", "rdp_content")?;
         assert!(path.exists());
         let _ = fs::remove_file(path);
+        Ok(())
     }
 
     /// Tests save_rdp_file failure when temporary file destination cannot be written.
     #[test]
-    fn test_save_rdp_file_error() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_save_rdp_file_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let dotfile = cwd.join(".vagrant");
-        fs::write(&dotfile, "not a directory").expect("write failed");
+        fs::write(&dotfile, "not a directory")?;
 
         let res = save_rdp_file(cwd, "nonexistent_parent_dir/testvm", "rdp_content");
         assert!(res.is_err());
+        Ok(())
     }
 }

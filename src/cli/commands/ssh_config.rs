@@ -5,7 +5,7 @@
 
 use crate::cli::SshConfigArgs;
 use crate::error::MigratoryError;
-use crate::provider;
+use crate::state::local::LocalStateManager;
 use std::path::Path;
 
 /// Generates a new SSH key pair, assuming insertion into the guest.
@@ -46,25 +46,33 @@ fn ensure_keys(cwd: &Path, machine_name: &str) -> Result<String, MigratoryError>
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found.
 pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
-    let path = cwd.join("Vagrantfile");
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    execute_with_home(cwd, args, &crate::config::get_vagrant_home())
+}
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = get_env_config(path_str);
-    let state_mgr = provider::StateManager::new(cwd.join(".vagrant"));
+/// Executes the `ssh-config` command with an explicit Vagrant home directory.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `ssh-config` command.
+/// * `vagrant_home` - Path to the Vagrant home directory.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or key generation fails.
+pub fn execute_with_home(
+    cwd: &Path,
+    args: &SshConfigArgs,
+    vagrant_home: &Path,
+) -> Result<(), MigratoryError> {
+    let env_config = crate::config::load_environment_config(cwd)?;
+    let state_mgr = LocalStateManager::new(cwd.join(".vagrant"));
 
-    let machines = if env_config.machines.is_empty() {
-        let mut m = std::collections::HashMap::new();
-        m.insert(
-            "default".to_string(),
-            crate::config::MachineConfig::default(),
-        );
-        m
-    } else {
-        env_config.machines
-    };
+    let machines = env_config.machines;
 
     let target = args.name.as_deref().unwrap_or("default");
 
@@ -73,31 +81,40 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
             .vm
             .providers
             .first()
-            .map(|p| p.name.clone())
+            .map(|p| p.name.to_string())
             .unwrap_or_else(|| "virtualbox".to_string());
-        let _ = state_mgr.read_id(target, &target_provider)?;
+        let machine_state = state_mgr.machine_state(target, &target_provider);
+        let _ = machine_state.get_id()?;
 
-        let effective_port = if machine.ssh.host == "127.0.0.1" {
-            let target_guest_port = machine.ssh.guest_port.unwrap_or(22);
-            machine
-                .vm
-                .networks
-                .iter()
-                .find_map(|net| match net {
-                    crate::config::NetworkConfig::ForwardedPort { guest, host, .. }
-                        if *guest == target_guest_port =>
-                    {
-                        Some(*host)
-                    }
-                    _ => None,
-                })
-                .unwrap_or(machine.ssh.port)
-        } else {
-            machine.ssh.port
-        };
+        let target_guest_port = machine.ssh.guest_port.unwrap_or(22);
+        let effective_host = machine_state
+            .get_guest_ip()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| machine.ssh.host.clone());
+        let effective_port =
+            if let Ok(Some(persisted)) = machine_state.get_forwarded_host_port(target_guest_port) {
+                persisted
+            } else if effective_host == "127.0.0.1" {
+                machine
+                    .vm
+                    .networks
+                    .iter()
+                    .find_map(|net| match net {
+                        crate::config::NetworkConfig::ForwardedPort { guest, host, .. }
+                            if *guest == target_guest_port =>
+                        {
+                            Some(*host)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(machine.ssh.port)
+            } else {
+                machine.ssh.port
+            };
 
         let priv_key = if let Some(p) = &machine.ssh.private_key_path {
-            p.clone()
+            p.to_string_lossy().to_string()
         } else {
             let provider_key = cwd
                 .join(".vagrant")
@@ -108,9 +125,8 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
             if provider_key.exists() {
                 provider_key.to_string_lossy().to_string()
             } else if !machine.ssh.insert_key {
-                let insecure_key = crate::communicator::ssh::ensure_insecure_private_key(
-                    &crate::config::get_vagrant_home(),
-                )?;
+                let insecure_key =
+                    crate::communicator::ssh::ensure_insecure_private_key(vagrant_home)?;
                 insecure_key.to_string_lossy().to_string()
             } else {
                 ensure_keys(cwd, target)?
@@ -121,7 +137,7 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
 
         // Output an OpenSSH-compatible configuration.
         println!("Host {}", host_alias);
-        println!("  HostName {}", machine.ssh.host);
+        println!("  HostName {}", effective_host);
         println!("  User {}", machine.ssh.username);
         println!("  Port {}", effective_port);
         println!("  UserKnownHostsFile /dev/null");
@@ -140,44 +156,27 @@ pub fn execute(cwd: &Path, args: &SshConfigArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-/// Executes the `get_env_config` function.
-///
-/// # Arguments
-///
-/// * `path_str` - The `path_str` argument.
-///
-/// # Returns
-///
-/// Returns `crate::config::EnvironmentConfig`.
-fn get_env_config(path_str: &str) -> crate::config::EnvironmentConfig {
-    crate::config::evaluate_vagrantfile(path_str).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
-    fn test_execute_ssh_config_read_id_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_read_id_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&state_dir).expect("operation should succeed");
+        fs::create_dir_all(&state_dir)?;
 
         // create a directory instead of a file for `id` to cause io error when read_id attempts to read it
-        fs::create_dir_all(state_dir.join("id")).expect("operation should succeed");
+        fs::create_dir_all(state_dir.join("id"))?;
 
         let args = SshConfigArgs {
             name: None,
@@ -185,15 +184,12 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
     #[test]
-    fn test_execute_ssh_config_missing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = SshConfigArgs {
             name: None,
@@ -202,15 +198,15 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write a mock vagrantfile so it exists
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = SshConfigArgs {
             name: None,
@@ -219,7 +215,6 @@ mod tests {
         let result = execute(cwd, &args);
         assert!(result.is_ok());
 
-        // ensure_keys should have created the dummy key
         let key_path = cwd
             .join(".vagrant")
             .join("machines")
@@ -227,15 +222,15 @@ mod tests {
             .join("ssh")
             .join("private_key");
         assert!(key_path.exists());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_machine_not_found() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_machine_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write a mock vagrantfile so it exists
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = SshConfigArgs {
             name: Some("nonexistent_machine".to_string()),
@@ -245,40 +240,43 @@ mod tests {
         assert!(
             matches!(result, Err(MigratoryError::NotFound(msg)) if msg == "Machine 'nonexistent_machine' not found")
         );
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_empty_config() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_empty_config() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write an invalid ruby script to fail parsing and return default empty config
-        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")
-            .expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")?;
 
         let args = SshConfigArgs {
             name: None,
             host: None,
         };
+        assert!(execute(cwd, &args).is_err());
+
+        fs::write(cwd.join("Vagrantfile"), "# Empty Vagrantfile")?;
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_with_host() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_with_host() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let key_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("ssh");
-        std::fs::create_dir_all(&key_dir).expect("operation should succeed");
+        std::fs::create_dir_all(&key_dir)?;
         let priv_key_path = key_dir.join("private_key");
-        std::fs::write(&priv_key_path, "EXISTING KEY\n").expect("operation should succeed");
+        std::fs::write(&priv_key_path, "EXISTING KEY\n")?;
 
         let args = SshConfigArgs {
             name: None,
@@ -286,11 +284,12 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_ensure_keys_existing() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_ensure_keys_existing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let key_dir = cwd
@@ -302,7 +301,7 @@ mod tests {
         let priv_key_path = key_dir.join("private_key");
         std::fs::write(&priv_key_path, "EXISTING KEY\n")?;
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = SshConfigArgs {
             name: None,
@@ -316,16 +315,15 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_keys_create_dir_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_ensure_keys_create_dir_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let machines_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(machines_dir.join("virtualbox")).expect("operation should succeed");
-        fs::write(machines_dir.join("virtualbox").join("id"), "valid-id")
-            .expect("operation should succeed");
-        fs::write(machines_dir.join("ssh"), "not a dir").expect("operation should succeed");
+        fs::create_dir_all(machines_dir.join("virtualbox"))?;
+        fs::write(machines_dir.join("virtualbox").join("id"), "valid-id")?;
+        fs::write(machines_dir.join("ssh"), "not a dir")?;
 
         let args = SshConfigArgs {
             name: None,
@@ -333,46 +331,45 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::Io(_))));
+        Ok(())
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_ensure_keys_write_error() {
+    fn test_ensure_keys_write_error() -> Result<(), MigratoryError> {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let machines_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(machines_dir.join("virtualbox")).expect("operation should succeed");
-        fs::write(machines_dir.join("virtualbox").join("id"), "valid-id")
-            .expect("operation should succeed");
+        fs::create_dir_all(machines_dir.join("virtualbox"))?;
+        fs::write(machines_dir.join("virtualbox").join("id"), "valid-id")?;
 
         let key_dir = machines_dir.join("ssh");
-        fs::create_dir_all(&key_dir).expect("operation should succeed");
-        fs::set_permissions(&key_dir, fs::Permissions::from_mode(0o555))
-            .expect("operation should succeed");
+        fs::create_dir_all(&key_dir)?;
+        fs::set_permissions(&key_dir, fs::Permissions::from_mode(0o555))?;
 
         let args = SshConfigArgs {
             name: None,
             host: None,
         };
         let result = execute(cwd, &args);
-        fs::set_permissions(&key_dir, fs::Permissions::from_mode(0o755))
-            .expect("operation should succeed");
+        fs::set_permissions(&key_dir, fs::Permissions::from_mode(0o755))?;
         assert!(matches!(result, Err(MigratoryError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_custom_key_path() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_custom_key_path() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
   config.ssh.private_key_path = "/custom/path/key"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = SshConfigArgs {
             name: None,
@@ -380,28 +377,28 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_with_provider_key() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_with_provider_key() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
   config.vm.provider "qemu"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let prov_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("qemu");
-        fs::create_dir_all(&prov_dir).expect("operation should succeed");
-        fs::write(prov_dir.join("id"), "qemu-id-1234").expect("operation should succeed");
-        fs::write(prov_dir.join("private_key"), "QEMU PRIVATE KEY")
-            .expect("operation should succeed");
+        fs::create_dir_all(&prov_dir)?;
+        fs::write(prov_dir.join("id"), "qemu-id-1234")?;
+        fs::write(prov_dir.join("private_key"), "QEMU PRIVATE KEY")?;
 
         let args = SshConfigArgs {
             name: None,
@@ -409,14 +406,12 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_insert_key_false() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_insert_key_false() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -425,22 +420,20 @@ Vagrant.configure("2") do |config|
   config.vm.network "forwarded_port", guest: 22, host: 2222, id: "ssh"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = SshConfigArgs {
             name: None,
             host: None,
         };
-        let result = execute(cwd, &args);
+        let result = execute_with_home(cwd, &args, &dir.path().join("vagrant_home"));
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_remote_host() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_remote_host() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -448,7 +441,7 @@ Vagrant.configure("2") do |config|
   config.ssh.port = 22
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = SshConfigArgs {
             name: None,
@@ -456,36 +449,40 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_ssh_config_insecure_key_err() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_ssh_config_insecure_key_err() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
   config.ssh.insert_key = false
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let blocker = dir.path().join("blocker_file");
-        fs::write(&blocker, "blocking").expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", blocker.join("sub"));
-        }
+        fs::write(&blocker, "blocking")?;
 
         let args = SshConfigArgs {
             name: None,
             host: None,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        let result = execute_with_home(cwd, &args, &blocker.join("sub"));
         assert!(result.is_err());
+
+        // Also test when machine_state has a persisted forwarded port for ssh
+        let state_mgr = LocalStateManager::new(cwd.join(".vagrant"));
+        let ms = state_mgr.machine_state("default", "virtualbox");
+        ms.set_forwarded_ports(&[crate::state::local::PersistedForwardedPort {
+            guest: 22,
+            host: 2299,
+            protocol: "tcp".to_string(),
+            host_ip: None,
+        }])?;
+        assert!(execute(cwd, &args).is_ok());
+        Ok(())
     }
 }

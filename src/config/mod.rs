@@ -1,12 +1,13 @@
 //! Config module for parsing and evaluating Vagrantfiles.
 //!
 //! This module defines the data structures used to represent the state and
-//! configuration parsed from a `Vagrantfile`.
-//! It uses `magnus` to embed Ruby and evaluate the `Vagrantfile`.
+//! configuration parsed from a `Vagrantfile`, evaluated via the pure-Rust
+//! in-process parser (`in_process`) or a system Ruby subprocess (`parser`).
 
 use crate::error::MigratoryError;
 use std::collections::HashMap;
 
+/// Strongly-typed provider and provisioner option configurations.
 pub mod options;
 
 /// Pure-Rust in-process Vagrantfile parser and evaluator.
@@ -64,7 +65,7 @@ impl std::fmt::Display for Architecture {
 }
 
 /// Supported virtual machine guest operating system types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum GuestKind {
     /// Linux distributions (Ubuntu, Debian, RHEL, Fedora, etc.).
     Linux,
@@ -76,6 +77,8 @@ pub enum GuestKind {
     Windows,
     /// BSD systems (FreeBSD, OpenBSD, NetBSD).
     Bsd,
+    /// Custom or unrecognized guest OS identifier.
+    Custom(String),
 }
 
 impl GuestKind {
@@ -87,7 +90,7 @@ impl GuestKind {
     ///
     /// # Returns
     ///
-    /// Returns `Some(GuestKind)` if recognized, or `None`.
+    /// Returns `Some(GuestKind)` if recognized as a built-in guest, or `None`.
     pub fn from_str_lenient(s: &str) -> Option<Self> {
         let clean = s.trim_start_matches(':').to_ascii_lowercase();
         match clean.as_str() {
@@ -102,18 +105,33 @@ impl GuestKind {
         }
     }
 
+    /// Parses any guest identifier string into a [`GuestKind`], falling back to [`GuestKind::Custom`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Guest OS identifier string.
+    ///
+    /// # Returns
+    ///
+    /// Returns the parsed [`GuestKind`].
+    pub fn parse_raw(s: &str) -> Self {
+        let clean = s.trim_start_matches(':');
+        Self::from_str_lenient(clean).unwrap_or_else(|| Self::Custom(clean.to_string()))
+    }
+
     /// Returns canonical guest name slice.
     ///
     /// # Returns
     ///
     /// String slice representing the guest OS name.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Linux => "linux",
             Self::Darwin => "darwin",
             Self::Solaris => "solaris",
             Self::Windows => "windows",
             Self::Bsd => "bsd",
+            Self::Custom(s) => s.as_str(),
         }
     }
 }
@@ -124,8 +142,22 @@ impl std::fmt::Display for GuestKind {
     }
 }
 
+impl PartialEq<&str> for GuestKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl std::ops::Deref for GuestKind {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
 /// Supported communicator transport protocols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CommunicatorKind {
     /// SSH communicator.
     Ssh,
@@ -133,6 +165,8 @@ pub enum CommunicatorKind {
     Winrm,
     /// Docker exec communicator.
     Docker,
+    /// Custom or plugin-provided communicator.
+    Custom(String),
 }
 
 impl CommunicatorKind {
@@ -144,7 +178,7 @@ impl CommunicatorKind {
     ///
     /// # Returns
     ///
-    /// Returns `Some(CommunicatorKind)` if recognized, or `None`.
+    /// Returns `Some(CommunicatorKind)` if recognized as a built-in communicator, or `None`.
     pub fn from_str_lenient(s: &str) -> Option<Self> {
         let clean = s.trim_start_matches(':').to_ascii_lowercase();
         match clean.as_str() {
@@ -155,16 +189,31 @@ impl CommunicatorKind {
         }
     }
 
+    /// Parses any communicator identifier string into a [`CommunicatorKind`], falling back to [`CommunicatorKind::Custom`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Communicator identifier string.
+    ///
+    /// # Returns
+    ///
+    /// Returns the parsed [`CommunicatorKind`].
+    pub fn parse_raw(s: &str) -> Self {
+        let clean = s.trim_start_matches(':');
+        Self::from_str_lenient(clean).unwrap_or_else(|| Self::Custom(clean.to_string()))
+    }
+
     /// Returns canonical communicator name slice.
     ///
     /// # Returns
     ///
     /// String slice representing the communicator protocol.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Ssh => "ssh",
             Self::Winrm => "winrm",
             Self::Docker => "docker",
+            Self::Custom(s) => s.as_str(),
         }
     }
 }
@@ -175,14 +224,29 @@ impl std::fmt::Display for CommunicatorKind {
     }
 }
 
+impl PartialEq<&str> for CommunicatorKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl std::ops::Deref for CommunicatorKind {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
 /// Supported hypervisor and container virtualization providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ProviderKind {
     /// UTM provider (Apple Silicon / macOS).
     Utm,
     /// QEMU provider.
     Qemu,
     /// Oracle VirtualBox provider.
+    #[default]
     VirtualBox,
     /// VMware Desktop / Fusion / Workstation provider.
     Vmware,
@@ -194,6 +258,8 @@ pub enum ProviderKind {
     Hyperv,
     /// Docker container provider.
     Docker,
+    /// Custom or plugin-provided provider.
+    Custom(String),
 }
 
 impl ProviderKind {
@@ -205,7 +271,7 @@ impl ProviderKind {
     ///
     /// # Returns
     ///
-    /// Returns `Some(ProviderKind)` if recognized, or `None`.
+    /// Returns `Some(ProviderKind)` if recognized as a built-in provider, or `None`.
     pub fn from_str_lenient(s: &str) -> Option<Self> {
         let clean = s.trim_start_matches(':').to_ascii_lowercase();
         match clean.as_str() {
@@ -223,12 +289,26 @@ impl ProviderKind {
         }
     }
 
+    /// Parses any provider identifier string into a [`ProviderKind`], falling back to [`ProviderKind::Custom`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Provider identifier string.
+    ///
+    /// # Returns
+    ///
+    /// Returns the parsed [`ProviderKind`].
+    pub fn parse_raw(s: &str) -> Self {
+        let clean = s.trim_start_matches(':');
+        Self::from_str_lenient(clean).unwrap_or_else(|| Self::Custom(clean.to_string()))
+    }
+
     /// Returns canonical provider name slice.
     ///
     /// # Returns
     ///
     /// String slice representing the canonical provider name.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Utm => "utm",
             Self::Qemu => "qemu",
@@ -238,6 +318,7 @@ impl ProviderKind {
             Self::Libvirt => "libvirt",
             Self::Hyperv => "hyperv",
             Self::Docker => "docker",
+            Self::Custom(s) => s.as_str(),
         }
     }
 }
@@ -248,8 +329,52 @@ impl std::fmt::Display for ProviderKind {
     }
 }
 
+impl PartialEq<&str> for ProviderKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for ProviderKind {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl AsRef<str> for ProviderKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<std::path::Path> for ProviderKind {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(self.as_str())
+    }
+}
+
+impl From<&str> for ProviderKind {
+    fn from(s: &str) -> Self {
+        Self::parse_raw(s)
+    }
+}
+
+impl From<String> for ProviderKind {
+    fn from(s: String) -> Self {
+        Self::parse_raw(&s)
+    }
+}
+
+impl std::ops::Deref for ProviderKind {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
 /// Synced folder backend mechanism.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SyncedFolderType {
     /// Disabled synced folder.
     Disabled,
@@ -257,12 +382,16 @@ pub enum SyncedFolderType {
     Rsync,
     /// VirtioFS / VirtFS shared filesystem.
     Virtiofs,
+    /// 9P (Plan 9) VirtFS shared filesystem (`9p`).
+    Plan9,
     /// SMB / CIFS network share.
     Smb,
     /// VirtualBox Shared Folders (vboxsf).
     VirtualBox,
     /// Network File System (NFS).
     Nfs,
+    /// Custom or unrecognized synced folder type.
+    Custom(String),
 }
 
 impl SyncedFolderType {
@@ -274,13 +403,14 @@ impl SyncedFolderType {
     ///
     /// # Returns
     ///
-    /// Returns `Some(SyncedFolderType)` if recognized, or `None`.
+    /// Returns `Some(SyncedFolderType)` if recognized as a built-in type, or `None`.
     pub fn from_str_lenient(s: &str) -> Option<Self> {
         let clean = s.trim_start_matches(':').to_ascii_lowercase();
         match clean.as_str() {
             "disabled" => Some(Self::Disabled),
             "rsync" => Some(Self::Rsync),
             "virtiofs" | "virtfs" => Some(Self::Virtiofs),
+            "9p" | "plan9" => Some(Self::Plan9),
             "smb" => Some(Self::Smb),
             "virtualbox" | "vbox" | "vboxsf" => Some(Self::VirtualBox),
             "nfs" => Some(Self::Nfs),
@@ -288,19 +418,35 @@ impl SyncedFolderType {
         }
     }
 
+    /// Parses any synced folder type string into a [`SyncedFolderType`], falling back to [`SyncedFolderType::Custom`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Synced folder type identifier.
+    ///
+    /// # Returns
+    ///
+    /// Returns the parsed [`SyncedFolderType`].
+    pub fn parse_raw(s: &str) -> Self {
+        let clean = s.trim_start_matches(':');
+        Self::from_str_lenient(clean).unwrap_or_else(|| Self::Custom(clean.to_string()))
+    }
+
     /// Returns canonical synced folder type string slice.
     ///
     /// # Returns
     ///
     /// String slice representing the synced folder type.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Disabled => "disabled",
             Self::Rsync => "rsync",
             Self::Virtiofs => "virtiofs",
+            Self::Plan9 => "9p",
             Self::Smb => "smb",
             Self::VirtualBox => "virtualbox",
             Self::Nfs => "nfs",
+            Self::Custom(s) => s.as_str(),
         }
     }
 }
@@ -308,6 +454,20 @@ impl SyncedFolderType {
 impl std::fmt::Display for SyncedFolderType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl PartialEq<&str> for SyncedFolderType {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl std::ops::Deref for SyncedFolderType {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
     }
 }
 
@@ -341,7 +501,7 @@ pub struct SshConfig {
     /// Guest port forwarded for SSH (defaults to 22).
     pub guest_port: Option<u16>,
     /// Path to private key.
-    pub private_key_path: Option<String>,
+    pub private_key_path: Option<std::path::PathBuf>,
     /// Insert key on boot.
     pub insert_key: bool,
     /// Forward agent.
@@ -457,8 +617,8 @@ impl Default for WinrmConfig {
 /// Stores configuration overrides specific to a particular provider (e.g., virtualbox).
 #[derive(Debug, Clone, Default)]
 pub struct ProviderConfig {
-    /// Provider type (e.g. "virtualbox")
-    pub name: String,
+    /// Provider type (e.g. `ProviderKind::VirtualBox`)
+    pub name: ProviderKind,
     /// Provider specific options
     pub options: HashMap<String, String>,
 }
@@ -470,21 +630,9 @@ impl ProviderConfig {
     ) -> Result<crate::config::options::TypedProviderOptions, crate::error::MigratoryError> {
         let cmd = self.options.get("cmd").cloned();
         let build_dir = self.options.get("build_dir").cloned();
-        let init = self
-            .options
-            .get("init")
-            .map(|s| s == "true")
-            .unwrap_or(false);
-        let has_init = self
-            .options
-            .get("has_init")
-            .map(|s| s == "true")
-            .unwrap_or(false);
-        let privileged = self
-            .options
-            .get("privileged")
-            .map(|s| s == "true")
-            .unwrap_or(false);
+        let init = self.options.get("init").map(String::as_str) == Some("true");
+        let has_init = self.options.get("has_init").map(String::as_str) == Some("true");
+        let privileged = self.options.get("privileged").map(String::as_str) == Some("true");
 
         Ok(crate::config::options::TypedProviderOptions::Docker {
             cmd,
@@ -663,6 +811,41 @@ pub enum NetworkConfig {
     },
 }
 
+impl NetworkConfig {
+    /// Returns `(guest_port, host_port, protocol)` if this is a [`NetworkConfig::ForwardedPort`].
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some((guest, host, protocol))` or `None`.
+    pub fn as_forwarded_port(&self) -> Option<(u16, u16, &str)> {
+        match self {
+            Self::ForwardedPort {
+                guest,
+                host,
+                protocol,
+                ..
+            } => Some((*guest, *host, protocol.as_deref().unwrap_or("tcp"))),
+            _ => None,
+        }
+    }
+
+    /// Returns `(ip, netmask)` if this is a [`NetworkConfig::PrivateNetwork`] with an IP address.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some((ip, netmask))` or `None`.
+    pub fn as_private_network(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::PrivateNetwork {
+                ip: Some(ip),
+                netmask,
+                ..
+            } => Some((ip.as_str(), netmask.as_deref().unwrap_or("255.255.255.0"))),
+            _ => None,
+        }
+    }
+}
+
 /// Trigger configuration.
 ///
 /// Holds settings for lifecycle triggers attached to commands or actions.
@@ -704,11 +887,11 @@ pub struct TriggerConfig {
 #[derive(Debug, Clone, Default)]
 pub struct SyncedFolderConfig {
     /// Host path.
-    pub host_path: String,
+    pub host_path: std::path::PathBuf,
     /// Guest path.
-    pub guest_path: String,
-    /// Folder type (e.g. "virtualbox", "nfs", "rsync").
-    pub folder_type: Option<String>,
+    pub guest_path: std::path::PathBuf,
+    /// Folder type (e.g. `SyncedFolderType::VirtualBox`, `SyncedFolderType::Nfs`, `SyncedFolderType::Rsync`).
+    pub folder_type: Option<SyncedFolderType>,
     /// Disabled flag.
     pub disabled: bool,
     /// Owner of the synced folder.
@@ -730,6 +913,8 @@ pub struct DiskConfig {
     pub size: Option<String>,
     /// Name or identifier for the disk.
     pub name: Option<String>,
+    /// Optional backing disk file path (e.g., ISO or VMDK path).
+    pub file: Option<std::path::PathBuf>,
     /// Primary master or controller options.
     pub primary: bool,
 }
@@ -752,21 +937,21 @@ pub struct VmConfig {
     /// Box download checksum type.
     pub box_download_checksum_type: Option<String>,
     /// Box download client certificate path.
-    pub box_download_client_cert: Option<String>,
+    pub box_download_client_cert: Option<std::path::PathBuf>,
     /// Box download CA certificate path.
-    pub box_download_ca_cert: Option<String>,
+    pub box_download_ca_cert: Option<std::path::PathBuf>,
     /// Allow insecure downloads without verifying SSL.
     pub box_download_insecure: Option<bool>,
     /// Hostname of the VM.
     pub hostname: Option<String>,
-    /// Explicit guest OS override (e.g. "linux", "windows", "freebsd").
-    pub guest: Option<String>,
+    /// Explicit guest OS override (e.g. `GuestKind::Linux`, `GuestKind::Windows`, `GuestKind::Bsd`).
+    pub guest: Option<GuestKind>,
     /// Post-up message printed after machine is booted.
     pub post_up_message: Option<String>,
     /// Boot timeout.
     pub boot_timeout: Option<u64>,
     /// Communicator.
-    pub communicator: Option<String>,
+    pub communicator: Option<CommunicatorKind>,
     /// Graceful halt timeout.
     pub graceful_halt_timeout: Option<u64>,
     /// Networks defined for this VM.
@@ -897,27 +1082,54 @@ pub struct EnvironmentConfig {
 ///
 /// Returns a `MigratoryError` if evaluation fails.
 pub fn evaluate_vagrantfile(path: &str) -> Result<EnvironmentConfig, crate::error::MigratoryError> {
-    if std::env::var("MIGRATORY_TEST_MOCK_PARSER_NONEMPTY").is_ok() {
-        let mut config = EnvironmentConfig::default();
-        config
-            .machines
-            .insert("node1".to_string(), MachineConfig::default());
-        config
-            .machines
-            .insert("node2".to_string(), MachineConfig::default());
-        return Ok(config);
-    }
     parser::parse_vagrantfile(path)
+}
+
+/// Loads and evaluates the `Vagrantfile` in `cwd`, returning the resulting [`EnvironmentConfig`].
+///
+/// Resolves the `Vagrantfile` path via [`get_vagrantfile_path`], verifies that it exists,
+/// and evaluates it via [`evaluate_vagrantfile`].
+///
+/// # Arguments
+///
+/// * `cwd` - The project root directory containing the `Vagrantfile`.
+///
+/// # Returns
+///
+/// Returns the evaluated [`EnvironmentConfig`].
+///
+/// # Errors
+///
+/// Returns [`crate::error::MigratoryError::NotFound`] if the `Vagrantfile` does not exist,
+/// or a [`crate::error::MigratoryError`] if `Vagrantfile` evaluation fails.
+pub fn load_environment_config(
+    cwd: &std::path::Path,
+) -> Result<EnvironmentConfig, crate::error::MigratoryError> {
+    let path = get_vagrantfile_path(cwd);
+    if !path.exists() {
+        return Err(crate::error::MigratoryError::NotFound(
+            "Vagrantfile".to_string(),
+        ));
+    }
+    evaluate_vagrantfile(&path.to_string_lossy())
 }
 
 /// Returns the Vagrant home directory, respecting `VAGRANT_HOME` or defaulting to `~/.vagrant.d`.
 pub fn get_vagrant_home() -> std::path::PathBuf {
-    if let Ok(home) = std::env::var("VAGRANT_HOME")
-        && !home.trim().is_empty()
+    get_vagrant_home_from(
+        std::env::var("VAGRANT_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+/// Resolves the Vagrant home directory from explicit optional `VAGRANT_HOME` and `HOME` strings.
+pub fn get_vagrant_home_from(vagrant_home: Option<&str>, home: Option<&str>) -> std::path::PathBuf {
+    if let Some(vh) = vagrant_home
+        && !vh.trim().is_empty()
     {
-        return std::path::PathBuf::from(home);
+        return std::path::PathBuf::from(vh);
     }
-    if let Ok(user_home) = std::env::var("HOME")
+    if let Some(user_home) = home
         && !user_home.trim().is_empty()
     {
         return std::path::PathBuf::from(user_home).join(".vagrant.d");
@@ -943,6 +1155,15 @@ pub fn resolve_vagrantfile_hierarchy(
     project_dir: &std::path::Path,
     box_dir: Option<&std::path::Path>,
 ) -> Vec<std::path::PathBuf> {
+    resolve_vagrantfile_hierarchy_with_home(project_dir, box_dir, &get_vagrant_home())
+}
+
+/// Resolves all Vagrantfiles in the evaluation hierarchy with an explicit Vagrant home directory.
+pub fn resolve_vagrantfile_hierarchy_with_home(
+    project_dir: &std::path::Path,
+    box_dir: Option<&std::path::Path>,
+    vagrant_home: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
 
     // 1. Box-level internal Vagrantfile
@@ -959,7 +1180,7 @@ pub fn resolve_vagrantfile_hierarchy(
     }
 
     // 3. User global Vagrantfile
-    let global_vf = get_vagrant_home().join("Vagrantfile");
+    let global_vf = vagrant_home.join("Vagrantfile");
     if global_vf.is_file() {
         files.push(global_vf);
     }
@@ -1287,18 +1508,16 @@ pub fn evaluate_vagrantfile_hierarchy(
     project_dir: &std::path::Path,
     box_dir: Option<&std::path::Path>,
 ) -> Result<EnvironmentConfig, crate::error::MigratoryError> {
-    if std::env::var("MIGRATORY_TEST_MOCK_PARSER_NONEMPTY").is_ok() {
-        let mut config = EnvironmentConfig::default();
-        config
-            .machines
-            .insert("node1".to_string(), MachineConfig::default());
-        config
-            .machines
-            .insert("node2".to_string(), MachineConfig::default());
-        return Ok(config);
-    }
+    evaluate_vagrantfile_hierarchy_with_home(project_dir, box_dir, &get_vagrant_home())
+}
 
-    let files = resolve_vagrantfile_hierarchy(project_dir, box_dir);
+/// Evaluates the complete Vagrantfile hierarchy with an explicit Vagrant home directory.
+pub fn evaluate_vagrantfile_hierarchy_with_home(
+    project_dir: &std::path::Path,
+    box_dir: Option<&std::path::Path>,
+    vagrant_home: &std::path::Path,
+) -> Result<EnvironmentConfig, crate::error::MigratoryError> {
+    let files = resolve_vagrantfile_hierarchy_with_home(project_dir, box_dir, vagrant_home);
     if files.is_empty() {
         return Err(crate::error::MigratoryError::NotFound(
             "Vagrantfile".to_string(),
@@ -1311,7 +1530,12 @@ pub fn evaluate_vagrantfile_hierarchy(
 
 /// Returns the effective project working directory, respecting `VAGRANT_CWD`.
 pub fn get_vagrant_cwd() -> std::path::PathBuf {
-    if let Ok(cwd) = std::env::var("VAGRANT_CWD")
+    get_vagrant_cwd_from(std::env::var("VAGRANT_CWD").ok().as_deref())
+}
+
+/// Resolves the effective project working directory from an optional `VAGRANT_CWD` string.
+pub fn get_vagrant_cwd_from(vagrant_cwd: Option<&str>) -> std::path::PathBuf {
+    if let Some(cwd) = vagrant_cwd
         && !cwd.trim().is_empty()
     {
         return std::path::PathBuf::from(cwd);
@@ -1321,26 +1545,47 @@ pub fn get_vagrant_cwd() -> std::path::PathBuf {
 
 /// Returns the effective Vagrantfile filename, respecting `VAGRANT_VAGRANTFILE`.
 pub fn get_vagrantfile_name() -> String {
-    if let Ok(vf) = std::env::var("VAGRANT_VAGRANTFILE")
+    get_vagrantfile_name_from(std::env::var("VAGRANT_VAGRANTFILE").ok().as_deref())
+}
+
+/// Resolves the effective Vagrantfile filename from an optional `VAGRANT_VAGRANTFILE` string.
+pub fn get_vagrantfile_name_from(vagrant_vf: Option<&str>) -> String {
+    if let Some(vf) = vagrant_vf
         && !vf.trim().is_empty()
     {
-        return vf;
+        return vf.to_string();
     }
     "Vagrantfile".to_string()
 }
 
 /// Returns the effective Vagrantfile path relative to the given directory.
 pub fn get_vagrantfile_path(dir: &std::path::Path) -> std::path::PathBuf {
-    let name = get_vagrantfile_name();
+    get_vagrantfile_path_from(dir, std::env::var("VAGRANT_VAGRANTFILE").ok().as_deref())
+}
+
+/// Resolves the effective Vagrantfile path relative to `dir` given an optional `VAGRANT_VAGRANTFILE` string.
+pub fn get_vagrantfile_path_from(
+    dir: &std::path::Path,
+    vagrant_vf: Option<&str>,
+) -> std::path::PathBuf {
+    let name = get_vagrantfile_name_from(vagrant_vf);
     dir.join(name)
 }
 
 /// Returns the dotfile path (usually `.vagrant`), respecting `VAGRANT_DOTFILE_PATH`.
 pub fn get_dotfile_path(dir: &std::path::Path) -> std::path::PathBuf {
-    if let Ok(dotfile) = std::env::var("VAGRANT_DOTFILE_PATH")
+    get_dotfile_path_from(dir, std::env::var("VAGRANT_DOTFILE_PATH").ok().as_deref())
+}
+
+/// Resolves the dotfile path relative to `dir` given an optional `VAGRANT_DOTFILE_PATH` string.
+pub fn get_dotfile_path_from(
+    dir: &std::path::Path,
+    dotfile_env: Option<&str>,
+) -> std::path::PathBuf {
+    if let Some(dotfile) = dotfile_env
         && !dotfile.trim().is_empty()
     {
-        let path = std::path::PathBuf::from(&dotfile);
+        let path = std::path::PathBuf::from(dotfile);
         if path.is_absolute() {
             return path;
         }
@@ -1588,12 +1833,7 @@ fn execute_triggers_with_guest(
                 for (k, v) in &trigger.env {
                     cmd.env(k, v);
                 }
-                let status = cmd.status().map_err(|e| {
-                    crate::error::MigratoryError::Generic(format!(
-                        "Failed to execute trigger: {}",
-                        e
-                    ))
-                })?;
+                let status = cmd.status()?;
                 if !status.success() && !trigger.ignore_errors {
                     return Err(crate::error::MigratoryError::Generic(format!(
                         "Trigger failed with exit status: {}",
@@ -1606,29 +1846,24 @@ fn execute_triggers_with_guest(
                 for (k, v) in &trigger.env {
                     cmd.env(k, v);
                 }
-                let status = cmd.status().map_err(|e| {
-                    crate::error::MigratoryError::Generic(format!(
-                        "Failed to execute trigger: {}",
-                        e
-                    ))
-                })?;
+                let status = cmd.status()?;
                 if !status.success() && !trigger.ignore_errors {
                     return Err(crate::error::MigratoryError::Generic(format!(
                         "Trigger script {} failed with exit status: {}",
                         path_str, status
                     )));
                 }
-            } else if let Some(remote_cmd) = &trigger.run_remote_inline {
-                if let Some(communicator) = comm {
-                    let res = communicator.execute(remote_cmd);
-                    if let Err(e) = res
-                        && !trigger.ignore_errors
-                    {
-                        return Err(crate::error::MigratoryError::Generic(format!(
-                            "Remote trigger command failed: {}",
-                            e
-                        )));
-                    }
+            } else if let Some(remote_cmd) = &trigger.run_remote_inline
+                && let Some(communicator) = comm
+            {
+                let res = communicator.execute(remote_cmd);
+                if let Err(e) = res
+                    && !trigger.ignore_errors
+                {
+                    return Err(crate::error::MigratoryError::Generic(format!(
+                        "Remote trigger command failed: {}",
+                        e
+                    )));
                 }
             } else if let Some(remote_path) = &trigger.run_remote_path
                 && let Some(communicator) = comm
@@ -1695,35 +1930,31 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_vagrantfile_mock_nonempty() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap();
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PARSER_NONEMPTY", "1");
-        }
-        let config = evaluate_vagrantfile("dummy").unwrap();
+    fn test_evaluate_vagrantfile_mock_nonempty() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("Vagrantfile");
+        std::fs::write(
+            &path,
+            "Vagrant.configure('2') do |c|\n  c.vm.define 'node1'\n  c.vm.define 'node2'\nend",
+        )?;
+        let config = evaluate_vagrantfile(&path.to_string_lossy())?;
         assert_eq!(config.machines.len(), 2);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PARSER_NONEMPTY");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_evaluate_vagrantfile() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_evaluate_vagrantfile() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("Vagrantfile");
         std::fs::write(
             &path,
             "Vagrant_Result = Vagrant.configure('2') do |c|\n c.vm.box = 'foo' \nend",
-        )
-        .expect("operation should succeed");
+        )?;
 
-        let result = evaluate_vagrantfile(path.to_str().expect("operation should succeed"));
-        assert!(result.is_ok());
-        let env = result.expect("operation should succeed");
+        let env = evaluate_vagrantfile(&path.to_string_lossy())?;
         assert!(env.machines.contains_key("default"));
         assert_eq!(env.machines["default"].vm.box_name, Some("foo".to_string()));
+        Ok(())
     }
 
     #[test]
@@ -1772,7 +2003,7 @@ mod tests {
     #[test]
     fn test_provider_provisioner_config() {
         let provider = ProviderConfig {
-            name: "virtualbox".to_string(),
+            name: ProviderKind::VirtualBox,
             options: HashMap::new(),
         };
         assert_eq!(provider.name, "virtualbox");
@@ -1792,66 +2023,58 @@ mod tests {
     }
 
     #[test]
-    fn test_environment_path_helpers() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap();
-
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_environment_path_helpers() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path();
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CWD");
-            std::env::remove_var("VAGRANT_VAGRANTFILE");
-            std::env::remove_var("VAGRANT_DOTFILE_PATH");
-        }
+        let _ = get_vagrant_cwd();
+        let _ = get_vagrantfile_name();
+        let _ = get_vagrantfile_path(path);
+        let _ = get_dotfile_path(path);
 
         assert_eq!(
-            get_vagrant_cwd(),
+            get_vagrant_cwd_from(None),
             std::env::current_dir().unwrap_or(std::path::PathBuf::from("."))
         );
-        assert_eq!(get_vagrantfile_name(), "Vagrantfile");
-        assert_eq!(get_vagrantfile_path(path), path.join("Vagrantfile"));
-        assert_eq!(get_dotfile_path(path), path.join(".vagrant"));
+        assert_eq!(get_vagrantfile_name_from(None), "Vagrantfile");
+        assert_eq!(
+            get_vagrantfile_path_from(path, None),
+            path.join("Vagrantfile")
+        );
+        assert_eq!(get_dotfile_path_from(path, None), path.join(".vagrant"));
 
-        unsafe {
-            std::env::set_var("VAGRANT_CWD", path.to_str().expect("valid utf8"));
-            std::env::set_var("VAGRANT_VAGRANTFILE", "CustomVagrantfile");
-            std::env::set_var("VAGRANT_DOTFILE_PATH", ".custom_vagrant");
-        }
-
-        assert_eq!(get_vagrant_cwd(), path);
-        assert_eq!(get_vagrantfile_name(), "CustomVagrantfile");
-        assert_eq!(get_vagrantfile_path(path), path.join("CustomVagrantfile"));
-        assert_eq!(get_dotfile_path(path), path.join(".custom_vagrant"));
+        let path_str = path.to_str();
+        assert_eq!(get_vagrant_cwd_from(path_str), path);
+        assert_eq!(
+            get_vagrantfile_name_from(Some("CustomVagrantfile")),
+            "CustomVagrantfile"
+        );
+        assert_eq!(
+            get_vagrantfile_path_from(path, Some("CustomVagrantfile")),
+            path.join("CustomVagrantfile")
+        );
+        assert_eq!(
+            get_dotfile_path_from(path, Some(".custom_vagrant")),
+            path.join(".custom_vagrant")
+        );
 
         let abs_dotfile = path.join(".abs_vagrant");
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_DOTFILE_PATH",
-                abs_dotfile.to_str().expect("valid utf8"),
-            );
-        }
-        assert_eq!(get_dotfile_path(path), abs_dotfile);
+        assert_eq!(
+            get_dotfile_path_from(path, abs_dotfile.to_str()),
+            abs_dotfile
+        );
 
         // Test empty string env vars to cover !is_empty() false branches
-        unsafe {
-            std::env::set_var("VAGRANT_CWD", "   ");
-            std::env::set_var("VAGRANT_VAGRANTFILE", "   ");
-            std::env::set_var("VAGRANT_DOTFILE_PATH", "   ");
-        }
         assert_eq!(
-            get_vagrant_cwd(),
+            get_vagrant_cwd_from(Some("   ")),
             std::env::current_dir().unwrap_or(std::path::PathBuf::from("."))
         );
-        assert_eq!(get_vagrantfile_name(), "Vagrantfile");
-        assert_eq!(get_dotfile_path(path), path.join(".vagrant"));
-
-        unsafe {
-            std::env::remove_var("VAGRANT_CWD");
-            std::env::remove_var("VAGRANT_VAGRANTFILE");
-            std::env::remove_var("VAGRANT_DOTFILE_PATH");
-        }
+        assert_eq!(get_vagrantfile_name_from(Some("   ")), "Vagrantfile");
+        assert_eq!(
+            get_dotfile_path_from(path, Some("   ")),
+            path.join(".vagrant")
+        );
+        Ok(())
     }
 
     #[test]
@@ -1963,7 +2186,9 @@ mod tests {
         assert!(default_trigger.actions.is_empty());
     }
 
+    /// Mock communicator for remote trigger execution tests.
     struct MockTriggerComm {
+        /// Whether operations should return an error.
         should_fail: bool,
     }
 
@@ -2082,80 +2307,54 @@ mod tests {
     }
 
     #[test]
-    fn test_vagrant_home_and_hierarchy() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
+    fn test_vagrant_home_and_hierarchy() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let home_dir = temp.path().join("vhome");
-        std::fs::create_dir_all(&home_dir).expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", &home_dir);
-        }
-        assert_eq!(get_vagrant_home(), home_dir);
+        std::fs::create_dir_all(&home_dir)?;
+
+        let _ = get_vagrant_home();
+        assert_eq!(get_vagrant_home_from(home_dir.to_str(), None), home_dir);
 
         // Test with empty VAGRANT_HOME and set HOME
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", "   ");
-            std::env::set_var("HOME", home_dir.to_str().expect("operation should succeed"));
-        }
-        assert_eq!(get_vagrant_home(), home_dir.join(".vagrant.d"));
+        assert_eq!(
+            get_vagrant_home_from(Some("   "), home_dir.to_str()),
+            home_dir.join(".vagrant.d")
+        );
 
         // Test with whitespace HOME
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::set_var("HOME", "   ");
-        }
-        assert_eq!(get_vagrant_home(), std::path::PathBuf::from(".vagrant.d"));
+        assert_eq!(
+            get_vagrant_home_from(None, Some("   ")),
+            std::path::PathBuf::from(".vagrant.d")
+        );
 
         // Test with empty VAGRANT_HOME and empty HOME
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("HOME");
-        }
-        assert_eq!(get_vagrant_home(), std::path::PathBuf::from(".vagrant.d"));
-
-        // Test MIGRATORY_TEST_MOCK_PARSER_NONEMPTY branch
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PARSER_NONEMPTY", "1");
-        }
-        let env_res = evaluate_vagrantfile_hierarchy(temp.path(), None);
-        assert!(env_res.is_ok());
-        let env_cfg = env_res.expect("operation should succeed");
-        assert!(env_cfg.machines.contains_key("node1"));
-        assert!(env_cfg.machines.contains_key("node2"));
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PARSER_NONEMPTY");
-        }
-
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", &home_dir);
-        }
+        assert_eq!(
+            get_vagrant_home_from(None, None),
+            std::path::PathBuf::from(".vagrant.d")
+        );
 
         let box_dir = temp.path().join("box");
         let box_include = box_dir.join("include");
-        std::fs::create_dir_all(&box_include).expect("operation should succeed");
+        std::fs::create_dir_all(&box_include)?;
         let box_include_vf = box_include.join("Vagrantfile");
-        std::fs::write(&box_include_vf, "Vagrant.configure('2') do |c|; end")
-            .expect("operation should succeed");
+        std::fs::write(&box_include_vf, "Vagrant.configure('2') do |c|; end")?;
         let box_vf = box_dir.join("Vagrantfile");
-        std::fs::write(&box_vf, "Vagrant.configure('2') do |c|; end")
-            .expect("operation should succeed");
+        std::fs::write(&box_vf, "Vagrant.configure('2') do |c|; end")?;
 
         let global_vf = home_dir.join("Vagrantfile");
-        std::fs::write(&global_vf, "Vagrant.configure('2') do |c|; end")
-            .expect("operation should succeed");
+        std::fs::write(&global_vf, "Vagrant.configure('2') do |c|; end")?;
 
         let project_dir = temp.path().join("project");
-        std::fs::create_dir_all(&project_dir).expect("operation should succeed");
+        std::fs::create_dir_all(&project_dir)?;
         let project_vf = project_dir.join("Vagrantfile");
         std::fs::write(
             &project_vf,
             "Vagrant.configure('2') do |c|\n c.vm.box = 'testbox'\nend",
-        )
-        .expect("operation should succeed");
+        )?;
 
-        let hierarchy = resolve_vagrantfile_hierarchy(&project_dir, Some(&box_dir));
+        let _ = resolve_vagrantfile_hierarchy(&project_dir, Some(&box_dir));
+        let hierarchy =
+            resolve_vagrantfile_hierarchy_with_home(&project_dir, Some(&box_dir), &home_dir);
         assert_eq!(hierarchy.len(), 4);
         assert_eq!(hierarchy[0], box_include_vf);
         assert_eq!(hierarchy[1], box_vf);
@@ -2163,88 +2362,83 @@ mod tests {
         assert_eq!(hierarchy[3], project_vf);
 
         let empty_proj = temp.path().join("empty_proj");
-        std::fs::create_dir_all(&empty_proj).expect("operation should succeed");
-        let hierarchy_empty = resolve_vagrantfile_hierarchy(&empty_proj, None);
+        std::fs::create_dir_all(&empty_proj)?;
+        let hierarchy_empty = resolve_vagrantfile_hierarchy_with_home(&empty_proj, None, &home_dir);
         assert_eq!(hierarchy_empty.len(), 1); // global_vf only
 
         let box_empty = temp.path().join("box_empty");
-        std::fs::create_dir_all(&box_empty).expect("operation should succeed");
-        let hierarchy_box_empty = resolve_vagrantfile_hierarchy(&empty_proj, Some(&box_empty));
+        std::fs::create_dir_all(&box_empty)?;
+        let hierarchy_box_empty =
+            resolve_vagrantfile_hierarchy_with_home(&empty_proj, Some(&box_empty), &home_dir);
         assert_eq!(hierarchy_box_empty.len(), 1); // global_vf only, no box files
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_evaluate_vagrantfile_hierarchy() {
-        let temp = tempfile::tempdir().unwrap();
+    fn test_evaluate_vagrantfile_hierarchy() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let project_dir = temp.path().join("project");
-        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&project_dir)?;
         let project_vf = project_dir.join("Vagrantfile");
         std::fs::write(
             &project_vf,
             "Vagrant.configure('2') do |c|\n c.vm.box = 'mybox'\nend",
-        )
-        .unwrap();
+        )?;
 
-        let res = evaluate_vagrantfile_hierarchy(&project_dir, None);
-        assert!(res.is_ok());
-        let env = res.unwrap();
+        let env = evaluate_vagrantfile_hierarchy(&project_dir, None)?;
         assert_eq!(
             env.machines["default"].vm.box_name,
             Some("mybox".to_string())
         );
 
         let empty_dir = temp.path().join("empty");
-        std::fs::create_dir_all(&empty_dir).unwrap();
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap();
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", temp.path().join("nonexistent_home"));
-        }
-        let res_err = evaluate_vagrantfile_hierarchy(&empty_dir, None);
+        std::fs::create_dir_all(&empty_dir)?;
+        let res_err = evaluate_vagrantfile_hierarchy_with_home(
+            &empty_dir,
+            None,
+            &temp.path().join("nonexistent_home"),
+        );
         assert!(res_err.is_err());
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_resolve_target_machines_all_cases() {
+    fn test_resolve_target_machines_all_cases() -> Result<(), MigratoryError> {
         let mut machines = HashMap::new();
 
-        let mut web1 = MachineConfig::default();
-        web1.autostart = true;
+        let web1 = MachineConfig {
+            autostart: true,
+            ..Default::default()
+        };
         machines.insert("web1".to_string(), web1);
 
-        let mut web2 = MachineConfig::default();
-        web2.autostart = true;
+        let web2 = MachineConfig {
+            autostart: true,
+            ..Default::default()
+        };
         machines.insert("web2".to_string(), web2);
 
-        let mut db1 = MachineConfig::default();
-        db1.autostart = false;
+        let db1 = MachineConfig {
+            autostart: false,
+            ..Default::default()
+        };
         machines.insert("db1".to_string(), db1);
 
         // 1. None target -> autostart machines ("web1", "web2")
-        let auto = resolve_target_machines(&machines, None).expect("operation should succeed");
+        let auto = resolve_target_machines(&machines, None)?;
         assert_eq!(auto, vec!["web1".to_string(), "web2".to_string()]);
 
         // 2. Exact target match
-        let exact =
-            resolve_target_machines(&machines, Some("db1")).expect("operation should succeed");
+        let exact = resolve_target_machines(&machines, Some("db1"))?;
         assert_eq!(exact, vec!["db1".to_string()]);
 
         // 3. Regex target match
-        let regex_match =
-            resolve_target_machines(&machines, Some("/web/")).expect("operation should succeed");
+        let regex_match = resolve_target_machines(&machines, Some("/web/"))?;
         assert_eq!(regex_match, vec!["web1".to_string(), "web2".to_string()]);
 
         // 4. Regex target match single
-        let regex_single =
-            resolve_target_machines(&machines, Some("/^db/")).expect("operation should succeed");
+        let regex_single = resolve_target_machines(&machines, Some("/^db/"))?;
         assert_eq!(regex_single, vec!["db1".to_string()]);
 
         // 5. Regex target no match
@@ -2256,8 +2450,7 @@ mod tests {
         assert!(matches!(regex_invalid, Err(MigratoryError::Validation(_))));
 
         // 7. Comma-separated list
-        let comma_match =
-            resolve_target_machines(&machines, Some("web1,db1")).expect("operation should succeed");
+        let comma_match = resolve_target_machines(&machines, Some("web1,db1"))?;
         assert_eq!(comma_match, vec!["db1".to_string(), "web1".to_string()]);
 
         // 8. Comma-separated list with invalid name
@@ -2270,32 +2463,36 @@ mod tests {
 
         // 10. Fallback when autostart is false for all machines, but one is primary
         let mut no_auto = HashMap::new();
-        let mut m1 = MachineConfig::default();
-        m1.autostart = false;
-        m1.primary = true;
+        let m1 = MachineConfig {
+            autostart: false,
+            primary: true,
+            ..Default::default()
+        };
         no_auto.insert("primary_vm".to_string(), m1);
-        let mut m2 = MachineConfig::default();
-        m2.autostart = false;
-        m2.primary = false;
+        let m2 = MachineConfig {
+            autostart: false,
+            primary: false,
+            ..Default::default()
+        };
         no_auto.insert("secondary_vm".to_string(), m2);
-        let prim = resolve_target_machines(&no_auto, None).expect("operation should succeed");
+        let prim = resolve_target_machines(&no_auto, None)?;
         assert_eq!(prim, vec!["primary_vm".to_string()]);
 
         // 11. Fallback when neither autostart nor primary is set
         let mut plain = HashMap::new();
-        let mut p1 = MachineConfig::default();
-        p1.autostart = false;
+        let p1 = MachineConfig {
+            autostart: false,
+            ..Default::default()
+        };
         plain.insert("p1".to_string(), p1);
-        let res_plain = resolve_target_machines(&plain, None).expect("operation should succeed");
+        let res_plain = resolve_target_machines(&plain, None)?;
         assert_eq!(res_plain, vec!["p1".to_string()]);
 
         // 12. Empty machines map with "default" target or None
         let empty_map: HashMap<String, MachineConfig> = HashMap::new();
-        let res_empty =
-            resolve_target_machines(&empty_map, None).expect("operation should succeed");
+        let res_empty = resolve_target_machines(&empty_map, None)?;
         assert_eq!(res_empty, vec!["default".to_string()]);
-        let res_empty_def =
-            resolve_target_machines(&empty_map, Some("default")).expect("operation should succeed");
+        let res_empty_def = resolve_target_machines(&empty_map, Some("default"))?;
         assert_eq!(res_empty_def, vec!["default".to_string()]);
 
         // 13. Single slash (starts and ends with / but len < 2), invalid regex, and default on non-empty map
@@ -2308,24 +2505,31 @@ mod tests {
         assert!(bad_regex.is_err());
         let def_non_empty = resolve_target_machines(&plain, Some("default"));
         assert!(def_non_empty.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_sort_machines_by_dependencies() {
+    fn test_sort_machines_by_dependencies() -> Result<(), MigratoryError> {
         let mut machines = HashMap::new();
 
-        let mut db = MachineConfig::default();
-        db.name = "db".to_string();
+        let db = MachineConfig {
+            name: "db".to_string(),
+            ..Default::default()
+        };
         machines.insert("db".to_string(), db);
 
-        let mut backend = MachineConfig::default();
-        backend.name = "backend".to_string();
-        backend.depends_on = vec!["db".to_string()];
+        let backend = MachineConfig {
+            name: "backend".to_string(),
+            depends_on: vec!["db".to_string()],
+            ..Default::default()
+        };
         machines.insert("backend".to_string(), backend);
 
-        let mut frontend = MachineConfig::default();
-        frontend.name = "frontend".to_string();
-        frontend.depends_on = vec!["backend".to_string()];
+        let frontend = MachineConfig {
+            name: "frontend".to_string(),
+            depends_on: vec!["backend".to_string()],
+            ..Default::default()
+        };
         machines.insert("frontend".to_string(), frontend);
 
         // Linear order
@@ -2334,8 +2538,7 @@ mod tests {
             "backend".to_string(),
             "db".to_string(),
         ];
-        let sorted = sort_machines_by_dependencies(&targets, &machines, false)
-            .expect("operation should succeed");
+        let sorted = sort_machines_by_dependencies(&targets, &machines, false)?;
         assert_eq!(
             sorted,
             vec![
@@ -2346,8 +2549,7 @@ mod tests {
         );
 
         // Reverse order (for halt / destroy)
-        let reversed = sort_machines_by_dependencies(&targets, &machines, true)
-            .expect("operation should succeed");
+        let reversed = sort_machines_by_dependencies(&targets, &machines, true)?;
         assert_eq!(
             reversed,
             vec![
@@ -2359,8 +2561,7 @@ mod tests {
 
         // Subset of targets
         let sub_targets = vec!["frontend".to_string(), "backend".to_string()];
-        let sub_sorted = sort_machines_by_dependencies(&sub_targets, &machines, false)
-            .expect("operation should succeed");
+        let sub_sorted = sort_machines_by_dependencies(&sub_targets, &machines, false)?;
         assert_eq!(
             sub_sorted,
             vec!["backend".to_string(), "frontend".to_string()]
@@ -2368,8 +2569,10 @@ mod tests {
 
         // Missing dependency error
         let mut broken_machines = machines.clone();
-        let mut orphan = MachineConfig::default();
-        orphan.depends_on = vec!["missing_node".to_string()];
+        let orphan = MachineConfig {
+            depends_on: vec!["missing_node".to_string()],
+            ..Default::default()
+        };
         broken_machines.insert("orphan".to_string(), orphan);
         let err_missing =
             sort_machines_by_dependencies(&["orphan".to_string()], &broken_machines, false);
@@ -2377,11 +2580,15 @@ mod tests {
 
         // Cyclic dependency error
         let mut cyclic_machines = HashMap::new();
-        let mut node_a = MachineConfig::default();
-        node_a.depends_on = vec!["node_b".to_string()];
+        let node_a = MachineConfig {
+            depends_on: vec!["node_b".to_string()],
+            ..Default::default()
+        };
         cyclic_machines.insert("node_a".to_string(), node_a);
-        let mut node_b = MachineConfig::default();
-        node_b.depends_on = vec!["node_a".to_string()];
+        let node_b = MachineConfig {
+            depends_on: vec!["node_a".to_string()],
+            ..Default::default()
+        };
         cyclic_machines.insert("node_b".to_string(), node_b);
 
         let err_cycle = sort_machines_by_dependencies(
@@ -2392,32 +2599,38 @@ mod tests {
         assert!(matches!(err_cycle, Err(MigratoryError::Validation(_))));
 
         // Unknown target not present in machines map
-        let ghost_sorted = sort_machines_by_dependencies(&["ghost".to_string()], &machines, false)
-            .expect("operation should succeed");
+        let ghost_sorted = sort_machines_by_dependencies(&["ghost".to_string()], &machines, false)?;
         assert_eq!(ghost_sorted, vec!["ghost".to_string()]);
 
         // Self-dependent machine (dep == t)
         let mut self_dep_machines = HashMap::new();
-        let mut self_node = MachineConfig::default();
-        self_node.depends_on = vec!["self".to_string()];
+        let self_node = MachineConfig {
+            depends_on: vec!["self".to_string()],
+            ..Default::default()
+        };
         self_dep_machines.insert("self".to_string(), self_node);
         let self_sorted =
-            sort_machines_by_dependencies(&["self".to_string()], &self_dep_machines, false)
-                .expect("operation should succeed");
+            sort_machines_by_dependencies(&["self".to_string()], &self_dep_machines, false)?;
         assert_eq!(self_sorted, vec!["self".to_string()]);
 
         // Diamond dependency
         let mut diamond = HashMap::new();
         let a = MachineConfig::default();
         diamond.insert("a".to_string(), a);
-        let mut b = MachineConfig::default();
-        b.depends_on = vec!["a".to_string()];
+        let b = MachineConfig {
+            depends_on: vec!["a".to_string()],
+            ..Default::default()
+        };
         diamond.insert("b".to_string(), b);
-        let mut c = MachineConfig::default();
-        c.depends_on = vec!["a".to_string()];
+        let c = MachineConfig {
+            depends_on: vec!["a".to_string()],
+            ..Default::default()
+        };
         diamond.insert("c".to_string(), c);
-        let mut d = MachineConfig::default();
-        d.depends_on = vec!["b".to_string(), "c".to_string()];
+        let d = MachineConfig {
+            depends_on: vec!["b".to_string(), "c".to_string()],
+            ..Default::default()
+        };
         diamond.insert("d".to_string(), d);
 
         let diamond_sorted = sort_machines_by_dependencies(
@@ -2429,21 +2642,20 @@ mod tests {
             ],
             &diamond,
             false,
-        )
-        .expect("operation should succeed");
+        )?;
         assert_eq!(diamond_sorted[0], "a");
         assert_eq!(diamond_sorted[3], "d");
+        Ok(())
     }
 
     #[test]
-    fn test_resolve_vagrantfile_hierarchy_with_cli() {
-        let temp = tempfile::tempdir().expect("operation should succeed");
+    fn test_resolve_vagrantfile_hierarchy_with_cli() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let project_dir = temp.path().join("project");
-        std::fs::create_dir_all(&project_dir).expect("operation should succeed");
+        std::fs::create_dir_all(&project_dir)?;
 
         let cli_vf = temp.path().join("CustomVagrantfile");
-        std::fs::write(&cli_vf, "Vagrant.configure('2') do |c|; end")
-            .expect("operation should succeed");
+        std::fs::write(&cli_vf, "Vagrant.configure('2') do |c|; end")?;
 
         let files = resolve_vagrantfile_hierarchy_with_cli(&project_dir, None, Some(&cli_vf));
         assert!(files.contains(&cli_vf));
@@ -2455,10 +2667,11 @@ mod tests {
 
         let files_none = resolve_vagrantfile_hierarchy_with_cli(&project_dir, None, None);
         assert!(!files_none.contains(&cli_vf));
+        Ok(())
     }
 
     #[test]
-    fn test_merge_environment_configs() {
+    fn test_merge_environment_configs() -> Result<(), MigratoryError> {
         let mut base = EnvironmentConfig::default();
         let mut m_base = MachineConfig {
             name: "web".to_string(),
@@ -2468,8 +2681,8 @@ mod tests {
         m_base.vm.hostname = Some("base_host".to_string());
         m_base.vm.usable_port_range = (2200, 2250);
         m_base.vm.synced_folders.push(SyncedFolderConfig {
-            host_path: "./base".to_string(),
-            guest_path: "/vagrant".to_string(),
+            host_path: std::path::PathBuf::from("./base"),
+            guest_path: std::path::PathBuf::from("/vagrant"),
             folder_type: None,
             disabled: false,
             owner: None,
@@ -2478,8 +2691,8 @@ mod tests {
             args: None,
         });
         m_base.vm.synced_folders.push(SyncedFolderConfig {
-            host_path: "./other".to_string(),
-            guest_path: "/other".to_string(),
+            host_path: std::path::PathBuf::from("./other"),
+            guest_path: std::path::PathBuf::from("/other"),
             folder_type: None,
             disabled: false,
             owner: None,
@@ -2496,7 +2709,7 @@ mod tests {
         let mut prov_opts = HashMap::new();
         prov_opts.insert("cpus".to_string(), "2".to_string());
         m_base.vm.providers.push(ProviderConfig {
-            name: "virtualbox".to_string(),
+            name: ProviderKind::VirtualBox,
             options: prov_opts,
         });
         m_base.ssh.forward_env.push("BASE_ENV".to_string());
@@ -2518,13 +2731,14 @@ mod tests {
             disk_type: "disk".to_string(),
             size: Some("30GB".to_string()),
             name: Some("data".to_string()),
+            file: None,
             primary: false,
         });
         // Override synced folder on same guest_path "/vagrant"
         m_over.vm.synced_folders.push(SyncedFolderConfig {
-            host_path: "./over".to_string(),
-            guest_path: "/vagrant".to_string(),
-            folder_type: Some("rsync".to_string()),
+            host_path: std::path::PathBuf::from("./over"),
+            guest_path: std::path::PathBuf::from("/vagrant"),
+            folder_type: Some(SyncedFolderType::Rsync),
             disabled: false,
             owner: None,
             group: None,
@@ -2533,8 +2747,8 @@ mod tests {
         });
         // Additional synced folder with new guest_path "/extra"
         m_over.vm.synced_folders.push(SyncedFolderConfig {
-            host_path: "./extra".to_string(),
-            guest_path: "/extra".to_string(),
+            host_path: std::path::PathBuf::from("./extra"),
+            guest_path: std::path::PathBuf::from("/extra"),
             folder_type: None,
             disabled: false,
             owner: None,
@@ -2551,11 +2765,11 @@ mod tests {
         let mut prov_opts_over = HashMap::new();
         prov_opts_over.insert("memory".to_string(), "2048".to_string());
         m_over.vm.providers.push(ProviderConfig {
-            name: "virtualbox".to_string(),
+            name: ProviderKind::VirtualBox,
             options: prov_opts_over,
         });
         m_over.vm.providers.push(ProviderConfig {
-            name: "docker".to_string(),
+            name: ProviderKind::Docker,
             options: HashMap::new(),
         });
 
@@ -2565,13 +2779,13 @@ mod tests {
         m_over.vm.box_check_update = Some(false);
         m_over.vm.box_download_checksum = Some("abcd".to_string());
         m_over.vm.box_download_checksum_type = Some("sha256".to_string());
-        m_over.vm.box_download_client_cert = Some("cert.pem".to_string());
-        m_over.vm.box_download_ca_cert = Some("ca.pem".to_string());
+        m_over.vm.box_download_client_cert = Some(std::path::PathBuf::from("cert.pem"));
+        m_over.vm.box_download_ca_cert = Some(std::path::PathBuf::from("ca.pem"));
         m_over.vm.box_download_insecure = Some(true);
-        m_over.vm.guest = Some("linux".to_string());
+        m_over.vm.guest = Some(GuestKind::Linux);
         m_over.vm.post_up_message = Some("hello".to_string());
         m_over.vm.boot_timeout = Some(300);
-        m_over.vm.communicator = Some("ssh".to_string());
+        m_over.vm.communicator = Some(CommunicatorKind::Ssh);
         m_over.vm.graceful_halt_timeout = Some(60);
         m_over.vm.networks.push(NetworkConfig::ForwardedPort {
             guest: 80,
@@ -2587,7 +2801,7 @@ mod tests {
         m_over.ssh.host = "10.0.0.1".to_string();
         m_over.ssh.port = 2200;
         m_over.ssh.guest_port = Some(22);
-        m_over.ssh.private_key_path = Some("/path/to/key".to_string());
+        m_over.ssh.private_key_path = Some(std::path::PathBuf::from("/path/to/key"));
         m_over.ssh.insert_key = false;
         m_over.ssh.forward_agent = true;
         m_over.ssh.forward_x11 = true;
@@ -2647,8 +2861,14 @@ mod tests {
         assert_eq!(web.vm.box_check_update, Some(false));
         assert_eq!(web.vm.box_download_checksum.as_deref(), Some("abcd"));
         assert_eq!(web.vm.box_download_checksum_type.as_deref(), Some("sha256"));
-        assert_eq!(web.vm.box_download_client_cert.as_deref(), Some("cert.pem"));
-        assert_eq!(web.vm.box_download_ca_cert.as_deref(), Some("ca.pem"));
+        assert_eq!(
+            web.vm.box_download_client_cert.as_deref(),
+            Some(std::path::Path::new("cert.pem"))
+        );
+        assert_eq!(
+            web.vm.box_download_ca_cert.as_deref(),
+            Some(std::path::Path::new("ca.pem"))
+        );
         assert_eq!(web.vm.box_download_insecure, Some(true));
         assert_eq!(web.vm.guest.as_deref(), Some("linux"));
         assert_eq!(web.vm.post_up_message.as_deref(), Some("hello"));
@@ -2668,16 +2888,16 @@ mod tests {
             web.vm
                 .synced_folders
                 .iter()
-                .any(|s| s.guest_path == "/extra")
+                .any(|s| s.guest_path == std::path::Path::new("/extra"))
         );
         // /vagrant should be replaced by ./over
         let vagrant_sf = web
             .vm
             .synced_folders
             .iter()
-            .find(|s| s.guest_path == "/vagrant")
-            .expect("operation should succeed");
-        assert_eq!(vagrant_sf.host_path, "./over");
+            .find(|s| s.guest_path == std::path::Path::new("/vagrant"))
+            .ok_or(MigratoryError::NotFound("/vagrant".to_string()))?;
+        assert_eq!(vagrant_sf.host_path, std::path::Path::new("./over"));
         assert_eq!(vagrant_sf.folder_type.as_deref(), Some("rsync"));
 
         // Provisioners should be appended
@@ -2691,7 +2911,7 @@ mod tests {
             .providers
             .iter()
             .find(|p| p.name == "virtualbox")
-            .expect("operation should succeed");
+            .ok_or(MigratoryError::NotFound("virtualbox".to_string()))?;
         assert_eq!(vb.options.get("cpus").map(|s| s.as_str()), Some("2"));
         assert_eq!(vb.options.get("memory").map(|s| s.as_str()), Some("2048"));
         assert!(web.vm.providers.iter().any(|p| p.name == "docker"));
@@ -2702,7 +2922,10 @@ mod tests {
         assert_eq!(web.ssh.host, "10.0.0.1");
         assert_eq!(web.ssh.port, 2200);
         assert_eq!(web.ssh.guest_port, Some(22));
-        assert_eq!(web.ssh.private_key_path.as_deref(), Some("/path/to/key"));
+        assert_eq!(
+            web.ssh.private_key_path.as_deref(),
+            Some(std::path::Path::new("/path/to/key"))
+        );
         assert!(!web.ssh.insert_key);
         assert!(web.ssh.forward_agent);
         assert!(web.ssh.forward_x11);
@@ -2760,10 +2983,11 @@ mod tests {
         let merged_none = merge_environment_configs(&base_for_none, &over_for_none);
         assert_eq!(merged_none.machines["m"].ssh.guest_port, Some(22));
         assert_eq!(merged_none.machines["m"].winrm.guest_port, Some(5985));
+        Ok(())
     }
 
     #[test]
-    fn test_strongly_typed_enums() {
+    fn test_strongly_typed_enums() -> Result<(), MigratoryError> {
         // Architecture
         assert_eq!(Architecture::from_str_lenient("amd64"), Architecture::Amd64);
         assert_eq!(
@@ -2937,12 +3161,171 @@ mod tests {
         assert_eq!(format!("{}", SyncedFolderType::Rsync), "rsync");
 
         // Serde roundtrip checks
-        let json_arch = serde_json::to_string(&Architecture::Arm64).expect("serialize arch");
-        let de_arch: Architecture = serde_json::from_str(&json_arch).expect("deserialize arch");
+        let json_arch = serde_json::to_string(&Architecture::Arm64)?;
+        let de_arch: Architecture = serde_json::from_str(&json_arch)?;
         assert_eq!(de_arch, Architecture::Arm64);
 
-        let json_prov = serde_json::to_string(&ProviderKind::Utm).expect("serialize prov");
-        let de_prov: ProviderKind = serde_json::from_str(&json_prov).expect("deserialize prov");
+        let json_prov = serde_json::to_string(&ProviderKind::Utm)?;
+        let de_prov: ProviderKind = serde_json::from_str(&json_prov)?;
         assert_eq!(de_prov, ProviderKind::Utm);
+
+        // Additional coverage for GuestKind, CommunicatorKind, ProviderKind, SyncedFolderType
+        assert_eq!(GuestKind::parse_raw("linux"), GuestKind::Linux);
+        assert_eq!(
+            GuestKind::parse_raw(":custom_guest"),
+            GuestKind::Custom("custom_guest".to_string())
+        );
+        assert_eq!(GuestKind::Custom("x".to_string()).as_str(), "x");
+        assert!(GuestKind::Linux == "linux");
+        let gk_deref: &str = &GuestKind::Darwin;
+        assert_eq!(gk_deref, "darwin");
+
+        assert_eq!(
+            CommunicatorKind::parse_raw(":custom_comm"),
+            CommunicatorKind::Custom("custom_comm".to_string())
+        );
+        assert_eq!(CommunicatorKind::Custom("c".to_string()).as_str(), "c");
+        assert!(CommunicatorKind::Ssh == "ssh");
+        let ck_deref: &str = &CommunicatorKind::Winrm;
+        assert_eq!(ck_deref, "winrm");
+
+        assert_eq!(
+            ProviderKind::parse_raw(":custom_prov"),
+            ProviderKind::Custom("custom_prov".to_string())
+        );
+        assert_eq!(ProviderKind::Custom("p".to_string()).as_str(), "p");
+        assert!(ProviderKind::Utm == "utm");
+        let utm_str = "utm".to_string();
+        assert!(ProviderKind::Utm == utm_str);
+        let pk_str: &str = ProviderKind::Qemu.as_ref();
+        assert_eq!(pk_str, "qemu");
+        let pk_path: &std::path::Path = ProviderKind::Qemu.as_ref();
+        assert_eq!(pk_path, std::path::Path::new("qemu"));
+        assert_eq!(ProviderKind::from("docker"), ProviderKind::Docker);
+        assert_eq!(
+            ProviderKind::from("docker".to_string()),
+            ProviderKind::Docker
+        );
+        let pk_deref: &str = &ProviderKind::Libvirt;
+        assert_eq!(pk_deref, "libvirt");
+
+        assert_eq!(
+            SyncedFolderType::from_str_lenient("9p"),
+            Some(SyncedFolderType::Plan9)
+        );
+        assert_eq!(
+            SyncedFolderType::parse_raw(":custom_sf"),
+            SyncedFolderType::Custom("custom_sf".to_string())
+        );
+        assert_eq!(SyncedFolderType::Plan9.as_str(), "9p");
+        assert_eq!(SyncedFolderType::Custom("sf".to_string()).as_str(), "sf");
+        assert!(SyncedFolderType::Nfs == "nfs");
+        let sf_deref: &str = &SyncedFolderType::Smb;
+        assert_eq!(sf_deref, "smb");
+
+        // Test get_vagrant_home_from, get_vagrant_cwd_from, get_vagrantfile_name_from, get_dotfile_path_from
+        let _ = get_vagrant_home();
+        assert_eq!(
+            get_vagrant_home_from(Some("/custom/vh"), Some("/home/u")),
+            std::path::PathBuf::from("/custom/vh")
+        );
+        assert_eq!(
+            get_vagrant_home_from(None, Some("/home/u")),
+            std::path::PathBuf::from("/home/u/.vagrant.d")
+        );
+        assert_eq!(
+            get_vagrant_home_from(None, None),
+            std::path::PathBuf::from(".vagrant.d")
+        );
+        assert_eq!(
+            get_vagrant_cwd_from(Some("/custom/cwd")),
+            std::path::PathBuf::from("/custom/cwd")
+        );
+        assert_eq!(get_vagrantfile_name_from(Some("CustomVf")), "CustomVf");
+        assert_eq!(
+            get_dotfile_path_from(std::path::Path::new("/proj"), Some("/abs/dot")),
+            std::path::PathBuf::from("/abs/dot")
+        );
+        assert_eq!(
+            get_dotfile_path_from(std::path::Path::new("/proj"), Some("rel_dot")),
+            std::path::PathBuf::from("/proj/rel_dot")
+        );
+
+        let dir = tempfile::tempdir()?;
+        assert!(evaluate_vagrantfile_hierarchy(dir.path(), None).is_err());
+
+        // Test execute_triggers_with_comm with remote_inline and remote_path
+        struct MockTriggerComm {
+            fail: bool,
+        }
+        impl crate::communicator::Communicator for MockTriggerComm {
+            fn execute(&self, _cmd: &str) -> Result<String, crate::error::MigratoryError> {
+                if self.fail {
+                    Err(crate::error::MigratoryError::Generic("fail".to_string()))
+                } else {
+                    Ok(String::new())
+                }
+            }
+            fn upload(
+                &self,
+                _local: &std::path::Path,
+                _remote: &str,
+            ) -> Result<(), crate::error::MigratoryError> {
+                if self.fail {
+                    Err(crate::error::MigratoryError::Generic("fail".to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let triggers = [
+            TriggerConfig {
+                stage: "before".to_string(),
+                actions: vec!["up".to_string()],
+                info: Some("info msg".to_string()),
+                warn: Some("warn msg".to_string()),
+                run_inline: Some("false".to_string()),
+                ignore_errors: false,
+                env: std::iter::once(("K".to_string(), "V".to_string())).collect(),
+                ..Default::default()
+            },
+            TriggerConfig {
+                stage: "before".to_string(),
+                actions: vec!["up".to_string()],
+                run_path: Some("false".to_string()),
+                ignore_errors: false,
+                env: std::iter::once(("K".to_string(), "V".to_string())).collect(),
+                ..Default::default()
+            },
+            TriggerConfig {
+                stage: "before".to_string(),
+                actions: vec!["up".to_string()],
+                run_remote_inline: Some("echo remote".to_string()),
+                ignore_errors: false,
+                ..Default::default()
+            },
+            TriggerConfig {
+                stage: "before".to_string(),
+                actions: vec!["up".to_string()],
+                run_remote_path: Some("/tmp/script.sh".to_string()),
+                ignore_errors: false,
+                ..Default::default()
+            },
+        ];
+        assert!(execute_triggers("before", "up", &triggers[..1]).is_err());
+        assert!(execute_triggers("before", "up", &triggers[1..2]).is_err());
+        let comm_ok = MockTriggerComm { fail: false };
+        let comm_fail = MockTriggerComm { fail: true };
+        assert!(
+            execute_triggers_with_guest("before", "up", &triggers[2..], Some(&comm_ok)).is_ok()
+        );
+        assert!(
+            execute_triggers_with_guest("before", "up", &triggers[2..3], Some(&comm_fail)).is_err()
+        );
+        assert!(
+            execute_triggers_with_guest("before", "up", &triggers[3..4], Some(&comm_fail)).is_err()
+        );
+        Ok(())
     }
 }

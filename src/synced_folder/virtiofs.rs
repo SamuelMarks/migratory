@@ -173,37 +173,19 @@ impl SyncedFolder for VirtioFsSyncedFolder {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use std::path::Path;
-    use std::time::Duration;
+
     use tempfile::tempdir;
 
+    /// No-op mock communicator for VirtIO-FS synced folder tests.
     struct MockComm;
 
+    /// Failing mock communicator for VirtIO-FS synced folder error tests.
     struct FailComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -211,21 +193,13 @@ mod tests {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Err(MigratoryError::Generic("comm error".to_string()))
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
-    struct SubstringFailComm(&'static str);
+    /// Mock communicator that fails when a command contains a given substring.
+    struct SubstringFailComm(
+        /// Substring that triggers an execution failure.
+        &'static str,
+    );
     impl Communicator for SubstringFailComm {
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             if command.contains(self.0) {
@@ -234,23 +208,11 @@ mod tests {
                 Ok(String::new())
             }
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     #[test]
-    fn test_virtiofs_mount_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_virtiofs_mount_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = VirtioFsSyncedFolder::default();
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -261,12 +223,13 @@ mod tests {
         let comm = MockComm;
         assert!(folder.prepare(&opts).is_ok());
         assert!(folder.mount(&opts, &comm).is_ok());
+        Ok(())
     }
 
     /// Tests virtiofs mount without custom mount options and with fstab persistence.
     #[test]
-    fn test_virtiofs_mount_no_opts_and_fstab() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_virtiofs_mount_no_opts_and_fstab() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = VirtioFsSyncedFolder::default();
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -278,11 +241,12 @@ mod tests {
         let comm = MockComm;
         assert!(folder.prepare(&opts).is_ok());
         assert!(folder.mount(&opts, &comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_plan9_mount_success_and_fstab() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_plan9_mount_success_and_fstab() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = VirtioFsSyncedFolder::new(VirtioFsType::Plan9);
         let opts = SyncedFolderOptions {
             guest_path: "/shared".to_string(),
@@ -294,6 +258,7 @@ mod tests {
         let comm = MockComm;
         assert!(folder.prepare(&opts).is_ok());
         assert!(folder.mount(&opts, &comm).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -351,8 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn test_virtiofs_empty_guest_path() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_virtiofs_empty_guest_path() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = VirtioFsSyncedFolder::default();
         let opts = SyncedFolderOptions {
             guest_path: String::new(),
@@ -361,11 +326,12 @@ mod tests {
         };
         let comm = MockComm;
         assert!(folder.mount(&opts, &comm).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_virtiofs_mount_comm_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_virtiofs_mount_comm_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = VirtioFsSyncedFolder::default();
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -374,12 +340,13 @@ mod tests {
         };
         let comm = FailComm;
         assert!(folder.mount(&opts, &comm).is_err());
+        Ok(())
     }
 
     /// Tests virtiofs mount command failure when mkdir succeeds.
     #[test]
-    fn test_virtiofs_mount_cmd_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_virtiofs_mount_cmd_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = VirtioFsSyncedFolder::default();
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -388,12 +355,13 @@ mod tests {
         };
         let comm = SubstringFailComm("mount");
         assert!(folder.mount(&opts, &comm).is_err());
+        Ok(())
     }
 
     /// Tests virtiofs fstab persistence command failure when mount succeeds.
     #[test]
-    fn test_virtiofs_fstab_cmd_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_virtiofs_fstab_cmd_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = VirtioFsSyncedFolder::default();
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -403,5 +371,6 @@ mod tests {
         };
         let comm = SubstringFailComm("fstab");
         assert!(folder.mount(&opts, &comm).is_err());
+        Ok(())
     }
 }

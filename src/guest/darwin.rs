@@ -84,17 +84,13 @@ impl Guest for DarwinGuest {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
+    /// Mock communicator for Darwin guest capability tests.
     struct MockComm {
+        /// Canned response returned on success.
         response: String,
+        /// Whether `execute` should return an error.
         should_fail: bool,
     }
 
@@ -125,30 +121,26 @@ mod tests {
     }
 
     #[test]
-    fn test_darwin_guest_methods() {
+    fn test_darwin_guest_methods() -> Result<(), MigratoryError> {
         let guest = DarwinGuest;
 
         let ok_comm = MockComm {
-            response: "Darwin
-"
-            .to_string(),
+            response: "Darwin\n".to_string(),
             should_fail: false,
         };
-        assert!(guest.detect(&ok_comm).expect("detect ok"));
+        assert!(guest.detect(&ok_comm)?);
 
         let linux_comm = MockComm {
-            response: "Linux
-"
-            .to_string(),
+            response: "Linux\n".to_string(),
             should_fail: false,
         };
-        assert!(!guest.detect(&linux_comm).expect("detect ok"));
+        assert!(!guest.detect(&linux_comm)?);
 
         let fail_comm = MockComm {
             response: String::new(),
             should_fail: true,
         };
-        assert!(!guest.detect(&fail_comm).expect("detect ok"));
+        assert!(!guest.detect(&fail_comm)?);
 
         assert!(guest.change_hostname(&ok_comm, "bento-macos").is_ok());
         assert!(guest.change_hostname(&fail_comm, "bento-macos").is_err());
@@ -195,5 +187,6 @@ mod tests {
         );
         assert!(guest.halt(&ok_comm).is_ok());
         assert!(guest.update_guest_additions(&ok_comm, "utm", None).is_ok());
+        Ok(())
     }
 }

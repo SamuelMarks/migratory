@@ -3,7 +3,6 @@
 use super::{SyncedFolder, SyncedFolderOptions};
 use crate::communicator::Communicator;
 use crate::error::MigratoryError;
-#[cfg(not(test))]
 use std::process::Command;
 
 /// Rsync Shared Folder.
@@ -160,56 +159,82 @@ impl RsyncSyncedFolder {
     }
 
     /// Executes the mount command on the host.
-    #[cfg(not(test))]
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Options containing host path, guest path, and mount options.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if `rsync` execution fails.
     fn execute_mount_command(&self, options: &SyncedFolderOptions) -> Result<(), MigratoryError> {
-        let cmd_str = Self::build_rsync_command(options);
-
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd_str)
-            .status()
-            .map_err(MigratoryError::Io)?;
-
-        if !status.success() {
-            return Err(MigratoryError::Generic("Failed to run rsync".to_string()));
-        }
-
-        Ok(())
+        let prog = if cfg!(test) { "true" } else { "sh" };
+        self.execute_mount_command_with(options, |cmd_str| {
+            let status = Command::new(prog)
+                .arg("-c")
+                .arg(cmd_str)
+                .status()
+                .map_err(MigratoryError::Io)?;
+            Ok(status.success())
+        })
     }
 
-    /// Executes the mount command on the host (test mock).
-    #[cfg(test)]
-    fn execute_mount_command(&self, _options: &SyncedFolderOptions) -> Result<(), MigratoryError> {
+    /// Executes the mount command on the host using a custom shell runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Options containing host path, guest path, and mount options.
+    /// * `runner` - Closure executing the built rsync command string.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if `runner` fails or returns `false`.
+    pub fn execute_mount_command_with<F>(
+        &self,
+        options: &SyncedFolderOptions,
+        mut runner: F,
+    ) -> Result<(), MigratoryError>
+    where
+        F: FnMut(&str) -> Result<bool, MigratoryError>,
+    {
+        let cmd_str = Self::build_rsync_command(options);
+        if !runner(&cmd_str)? {
+            return Err(MigratoryError::Generic("Failed to run rsync".to_string()));
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use std::cell::Cell;
-    use std::path::Path;
-    use std::time::Duration;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use tempfile::tempdir;
 
+    /// Mock communicator tracking call counts for Rsync synced folder tests.
     #[derive(Default)]
     struct MockComm {
+        /// Fail on the first `execute` call (`mkdir`).
         fail_first_execute: bool,
+        /// Fail on the second `execute` call (`chown`).
         fail_second_execute: bool,
-        execute_count: Cell<usize>,
+        /// Number of `execute` calls made so far.
+        execute_count: AtomicUsize,
     }
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
-            let count = self.execute_count.get();
-            self.execute_count.set(count + 1);
+            let count = self.execute_count.fetch_add(1, Ordering::SeqCst);
             if count == 0 && self.fail_first_execute {
                 return Err(MigratoryError::Generic("mkdir error".to_string()));
             }
@@ -218,23 +243,11 @@ mod tests {
             }
             Ok(String::new())
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     #[test]
-    fn test_rsync_folder_mount_comm_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_rsync_folder_mount_comm_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = RsyncSyncedFolder;
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -246,11 +259,12 @@ mod tests {
             ..Default::default()
         };
         assert!(folder.mount(&opts, &comm).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_rsync_folder_chown_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_rsync_folder_chown_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = RsyncSyncedFolder;
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -262,11 +276,12 @@ mod tests {
             ..Default::default()
         };
         assert!(folder.mount(&opts, &comm).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_rsync_folder_success_with_chown_defaults() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_rsync_folder_success_with_chown_defaults() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = RsyncSyncedFolder;
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -276,11 +291,12 @@ mod tests {
         let comm = MockComm::default();
         assert!(folder.prepare(&opts).is_ok());
         assert!(folder.mount(&opts, &comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_rsync_folder_success_with_chown_custom() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_rsync_folder_success_with_chown_custom() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = RsyncSyncedFolder;
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
@@ -291,11 +307,12 @@ mod tests {
         };
         let comm = MockComm::default();
         assert!(folder.mount(&opts, &comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_rsync_folder_chown_disabled_variations() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_rsync_folder_chown_disabled_variations() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = RsyncSyncedFolder;
 
         for disabled_opt in ["chown=false", "rsync__chown=false", "no_chown"] {
@@ -307,8 +324,9 @@ mod tests {
             };
             let comm = MockComm::default();
             assert!(folder.mount(&opts, &comm).is_ok());
-            assert_eq!(comm.execute_count.get(), 1);
+            assert_eq!(comm.execute_count.load(Ordering::SeqCst), 1);
         }
+        Ok(())
     }
 
     #[test]
@@ -386,8 +404,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rsync_folder_empty_guest_path() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_rsync_folder_empty_guest_path() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let folder = RsyncSyncedFolder;
         let opts = SyncedFolderOptions {
             guest_path: String::new(),
@@ -396,5 +414,11 @@ mod tests {
         };
         let comm = MockComm::default();
         assert!(folder.mount(&opts, &comm).is_err());
+        assert!(
+            folder
+                .execute_mount_command_with(&opts, |_| Ok(false))
+                .is_err()
+        );
+        Ok(())
     }
 }

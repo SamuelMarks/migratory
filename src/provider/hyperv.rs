@@ -15,12 +15,37 @@ use std::process::Command;
 pub struct HypervProvider {
     /// Internal machine ID (Hyper-V VM name or VMId)
     machine_id: Option<String>,
+    /// Executable name or path for `powershell`.
+    powershell_bin: String,
 }
 
 impl HypervProvider {
     /// Creates a new HypervProvider instance.
     pub fn new(machine_id: Option<String>) -> Self {
-        Self { machine_id }
+        Self {
+            machine_id,
+            powershell_bin: "powershell".to_string(),
+        }
+    }
+
+    /// Configures a custom `powershell` binary path.
+    ///
+    /// # Arguments
+    ///
+    /// * `bin` - Path or binary name for `powershell`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `HypervProvider`.
+    #[must_use]
+    pub fn with_powershell_bin(mut self, bin: impl Into<String>) -> Self {
+        self.powershell_bin = bin.into();
+        self
+    }
+
+    /// Executes a PowerShell command using the configured `powershell_bin`.
+    fn run_powershell(&self, cmdlet: &str) -> Result<String, MigratoryError> {
+        execute_powershell_inner(&self.powershell_bin, cmdlet)
     }
 
     /// Helper to get the ID, returning an error if not present.
@@ -62,7 +87,7 @@ impl HypervProvider {
                         "Add-NetNatStaticMapping -NatName {} -Protocol {} -ExternalIPAddress {} -InternalIPAddress {} -ExternalPort {} -InternalPort {}",
                         nat_name, proto, host_ip_str, guest_ip, final_host, guest
                     );
-                    let _ = execute_powershell_inner("powershell", &rule);
+                    let _ = self.run_powershell(&rule);
                 }
                 NetworkConfig::PrivateNetwork { .. } => {
                     let switch_name = format!("Migratory_Private_{}", i);
@@ -72,16 +97,15 @@ impl HypervProvider {
                         "Add-VMNetworkAdapter -VMName {} -SwitchName {}",
                         id, switch_name
                     );
-                    let _ = execute_powershell_inner("powershell", &create_switch);
-                    let _ = execute_powershell_inner("powershell", &attach);
+                    let _ = self.run_powershell(&create_switch);
+                    let _ = self.run_powershell(&attach);
                 }
                 NetworkConfig::PublicNetwork { bridge, .. } => {
                     let switch_name = if let Some(b) = bridge {
                         b.clone()
                     } else {
                         // Automatic detection of the Hyper-V virtual switch
-                        let out = execute_powershell_inner(
-                            "powershell",
+                        let out = self.run_powershell(
                             "Get-VMSwitch -SwitchType External | Select-Object -First 1 -ExpandProperty Name"
                         ).unwrap_or_else(|_| "Default Switch".to_string());
                         let trimmed = out.trim();
@@ -96,7 +120,7 @@ impl HypervProvider {
                         "Add-VMNetworkAdapter -VMName {} -SwitchName '{}'",
                         id, switch_name
                     );
-                    let _ = execute_powershell_inner("powershell", &attach);
+                    let _ = self.run_powershell(&attach);
                 }
             }
         }
@@ -136,9 +160,9 @@ impl Provider for HypervProvider {
             }
 
             // Automatically fallback to SMB for synced folders on Hyper-V
-            if let Some(t) = sf.folder_type.as_deref()
-                && t != "smb"
-                && t != "rsync"
+            if let Some(ref t) = sf.folder_type
+                && *t != crate::config::SyncedFolderType::Smb
+                && *t != crate::config::SyncedFolderType::Rsync
             {
                 // Only skip if explicitly not smb or rsync (and rsync is handled by rsync)
                 // If it's vboxsf, nfs, we fallback to smb for Hyper-V.
@@ -146,6 +170,7 @@ impl Provider for HypervProvider {
 
             let share_name = sf
                 .guest_path
+                .to_string_lossy()
                 .replace('/', "_")
                 .trim_start_matches('_')
                 .to_string();
@@ -157,9 +182,10 @@ impl Provider for HypervProvider {
 
             let create_share = format!(
                 "New-SmbShare -Name {} -Path {} -FullAccess Everyone",
-                share_name, sf.host_path
+                share_name,
+                sf.host_path.display()
             );
-            execute_powershell_inner("powershell", &create_share)?;
+            self.run_powershell(&create_share)?;
         }
         Ok(())
     }
@@ -169,7 +195,7 @@ impl Provider for HypervProvider {
         self.configure_networks(config)?;
         self.setup_synced_folders(config)?;
 
-        execute_powershell(&format!("Start-VM -Name '{}'", id))?;
+        self.run_powershell(&format!("Start-VM -Name '{}'", id))?;
         Ok(())
     }
 
@@ -184,13 +210,13 @@ impl Provider for HypervProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn halt(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_powershell(&format!("Stop-VM -Name '{}' -Force", id))?;
+        self.run_powershell(&format!("Stop-VM -Name '{}' -Force", id))?;
         Ok(())
     }
 
     fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
         let export_dir = box_dir.to_string_lossy();
-        execute_powershell(&format!(
+        self.run_powershell(&format!(
             "$imported = Import-VM -Path '{}/Virtual Machines/*.vmcx' -Copy -GenerateNewId -VhdDestinationPath '{}/Virtual Hard Disks' -VirtualMachinePath '{}'; Rename-VM -VM $imported -NewName '{}'",
             export_dir, export_dir, export_dir, vm_name
         ))?;
@@ -205,15 +231,15 @@ impl Provider for HypervProvider {
         let export_base =
             std::env::temp_dir().join(format!("migratory_export_{}", uuid::Uuid::new_v4()));
         let export_dir = export_base.to_string_lossy();
-        execute_powershell(&format!(
+        self.run_powershell(&format!(
             "Export-VM -Name '{}' -Path '{}'",
             base_machine_id, export_dir
         ))?;
-        execute_powershell(&format!(
+        self.run_powershell(&format!(
             "Import-VM -Path '{}\\{}\\Virtual Machines\\*.vmcx' -Copy -GenerateNewId",
             export_dir, base_machine_id
         ))?;
-        execute_powershell(&format!(
+        self.run_powershell(&format!(
             "Rename-VM -Name (Get-VM -Name '{}' | Select-Object -Skip 1).Name -NewName '{}'",
             base_machine_id, vm_name
         ))?;
@@ -232,8 +258,8 @@ impl Provider for HypervProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn destroy(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        let _ = execute_powershell(&format!("Stop-VM -Name '{}' -TurnOff -Force", id));
-        execute_powershell(&format!("Remove-VM -Name '{}' -Force", id))?;
+        let _ = self.run_powershell(&format!("Stop-VM -Name '{}' -TurnOff -Force", id));
+        self.run_powershell(&format!("Remove-VM -Name '{}' -Force", id))?;
         Ok(())
     }
 
@@ -246,16 +272,22 @@ impl Provider for HypervProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the status cannot be retrieved.
-    fn status(&self) -> Result<String, MigratoryError> {
+    fn status(&self) -> Result<crate::provider::MachineState, MigratoryError> {
         let id = match &self.machine_id {
             Some(id) => id,
-            None => return Ok("not created".to_string()),
+            None => return Ok(crate::provider::MachineState::NotCreated),
         };
-        let out = execute_powershell(&format!("(Get-VM -Name '{}').State", id)).unwrap_or_default();
+        let out = self
+            .run_powershell(&format!("(Get-VM -Name '{}').State", id))
+            .unwrap_or_default();
         if out.trim().is_empty() {
-            Ok("unknown".to_string())
+            Ok(crate::provider::MachineState::Unknown(
+                "unknown".to_string(),
+            ))
         } else {
-            Ok(out.trim().to_lowercase())
+            Ok(crate::provider::MachineState::from_raw(
+                &out.trim().to_lowercase(),
+            ))
         }
     }
 
@@ -270,7 +302,7 @@ impl Provider for HypervProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn suspend(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_powershell(&format!("Suspend-VM -Name '{}'", id))?;
+        self.run_powershell(&format!("Suspend-VM -Name '{}'", id))?;
         Ok(())
     }
 
@@ -285,13 +317,13 @@ impl Provider for HypervProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn resume(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_powershell(&format!("Resume-VM -Name '{}'", id))?;
+        self.run_powershell(&format!("Resume-VM -Name '{}'", id))?;
         Ok(())
     }
 
     fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_powershell(&format!(
+        self.run_powershell(&format!(
             "Checkpoint-VM -Name '{}' -SnapshotName '{}'",
             id, name
         ))?;
@@ -300,7 +332,7 @@ impl Provider for HypervProvider {
 
     fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_powershell(&format!(
+        self.run_powershell(&format!(
             "Restore-VMSnapshot -VMName '{}' -Name '{}' -Confirm:$false",
             id, name
         ))?;
@@ -309,11 +341,12 @@ impl Provider for HypervProvider {
 
     fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
         let id = self.require_id()?;
-        let out = execute_powershell(&format!(
-            "Get-VMSnapshot -VMName '{}' | Select-Object -ExpandProperty Name",
-            id
-        ))
-        .unwrap_or_default();
+        let out = self
+            .run_powershell(&format!(
+                "Get-VMSnapshot -VMName '{}' | Select-Object -ExpandProperty Name",
+                id
+            ))
+            .unwrap_or_default();
         Ok(out
             .lines()
             .map(|s| s.trim().to_string())
@@ -323,7 +356,7 @@ impl Provider for HypervProvider {
 
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_powershell(&format!(
+        self.run_powershell(&format!(
             "Remove-VMSnapshot -VMName '{}' -Name '{}' -Confirm:$false",
             id, name
         ))?;
@@ -345,19 +378,9 @@ impl Provider for HypervProvider {
     /// Returns a `MigratoryError` if PowerShell export fails or machine ID is missing.
     fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        if cfg!(test) {
-            if std::env::var("MIGRATORY_TEST_MOCK_HYPERV_ERROR").is_ok() {
-                return Err(MigratoryError::Generic("Mock Hyper-V error".to_string()));
-            }
-            let vm_dir = output_dir.join("Virtual Machines");
-            let _ = std::fs::create_dir_all(&vm_dir);
-            std::fs::write(output_dir.join("disk.vhdx"), "mock vhdx")
-                .map_err(MigratoryError::Io)?;
-            return Ok(());
-        }
         let out_dir_str = output_dir.to_string_lossy();
         let cmd = format!("Export-VM -Name '{}' -Path '{}'", id, out_dir_str);
-        let _ = execute_powershell(&cmd)?;
+        let _ = self.run_powershell(&cmd)?;
         Ok(())
     }
 }
@@ -374,7 +397,7 @@ impl HypervProvider {
             "(Get-VMNetworkAdapter -VMName '{}').IPAddresses | Where-Object {{ $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' }} | Select-Object -First 1",
             id
         );
-        let out = execute_powershell(&script)?;
+        let out = self.run_powershell(&script)?;
         let trimmed = out.trim();
         if trimmed.is_empty() {
             Ok(None)
@@ -407,7 +430,7 @@ impl HypervProvider {
             "New-VM -Name '{}' -Generation {} -MemoryStartupBytes {} -SwitchName '{}'",
             name, generation, bytes, switch_name
         );
-        execute_powershell(&script)?;
+        self.run_powershell(&script)?;
         Ok(())
     }
 
@@ -425,11 +448,30 @@ impl HypervProvider {
         parent_path: &str,
         diff_path: &str,
     ) -> Result<(), MigratoryError> {
+        Self::create_differencing_vhd_with("powershell", parent_path, diff_path)
+    }
+
+    /// Creates a differencing VHDX virtual hard disk using the specified PowerShell binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `powershell_bin` - Path or binary name for `powershell`.
+    /// * `parent_path` - Path to the parent base VHDX disk.
+    /// * `diff_path` - Path where the differencing disk should be created.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if creation fails.
+    pub fn create_differencing_vhd_with(
+        powershell_bin: &str,
+        parent_path: &str,
+        diff_path: &str,
+    ) -> Result<(), MigratoryError> {
         let script = format!(
             "New-VHD -ParentPath '{}' -Path '{}' -Differencing",
             parent_path, diff_path
         );
-        execute_powershell(&script)?;
+        execute_powershell_inner(powershell_bin, &script)?;
         Ok(())
     }
 
@@ -458,7 +500,7 @@ impl HypervProvider {
             "Set-VMProcessor -VMName '{}' -Count {}; Set-VMMemory -VMName '{}' -DynamicMemoryEnabled {} -MinimumBytes {} -MaximumBytes {}",
             id, cpus, id, dyn_mem_str, min_bytes, max_bytes
         );
-        execute_powershell(&script)?;
+        self.run_powershell(&script)?;
         Ok(())
     }
 
@@ -469,7 +511,7 @@ impl HypervProvider {
     /// Returns a `MigratoryError` if saving fails.
     pub fn save_vm_state(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_powershell(&format!("Stop-VM -Name '{}' -Save", id))?;
+        self.run_powershell(&format!("Stop-VM -Name '{}' -Save", id))?;
         Ok(())
     }
 }
@@ -493,20 +535,20 @@ pub fn execute_powershell(cmdlet: &str) -> Result<String, MigratoryError> {
     execute_powershell_inner("powershell", cmdlet)
 }
 
-/// Executes the `execute_powershell_inner` function.
+/// Spawns the `powershell` binary with `-NoProfile -NonInteractive -Command <cmdlet>`.
 ///
 /// # Arguments
 ///
-/// * `cmd` - The `cmd` argument.
-/// * `cmdlet` - The `cmdlet` argument.
+/// * `cmd` - Executable name or path (`"powershell"`).
+/// * `cmdlet` - PowerShell script or cmdlet string to execute.
 ///
 /// # Returns
 ///
-/// Returns `Result<String, MigratoryError>`.
+/// Returns the captured standard output string on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if the command cannot be spawned or exits non-zero.
 fn execute_powershell_inner(cmd: &str, cmdlet: &str) -> Result<String, MigratoryError> {
     let output = Command::new(cmd)
         .args(["-NoProfile", "-NonInteractive", "-Command", cmdlet])
@@ -528,86 +570,73 @@ fn execute_powershell_inner(cmd: &str, cmdlet: &str) -> Result<String, Migratory
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
-    fn test_hyperv_provider_methods() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_hyperv_provider_methods() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let bin = temp_dir.path().join("powershell");
-        let _inspect_bin = temp_dir.path().join("vboxmanage_or_similar"); // optional
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mock_script = "#!/bin/sh
-            exit 0
-            ";
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            let mock_script = "#!/bin/sh\necho \"snap1\"\nexit 0\n";
+            std::fs::write(&bin, mock_script)?;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
         }
         #[cfg(windows)]
         {
             let bat = temp_dir.path().join("powershell.bat");
-            std::fs::write(
-                &bat,
-                "@echo off
-exit 0",
-            )
-            .expect("operation should succeed");
+            std::fs::write(&bat, "@echo off\necho snap1\nexit 0")?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
+        let bin_str = bin.to_string_lossy().to_string();
+        let provider =
+            HypervProvider::new(Some("test-id".to_string())).with_powershell_bin(&bin_str);
 
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
+        let mut config = crate::config::VmConfig::default();
+        config
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from("/host"),
+                guest_path: std::path::PathBuf::from("/"),
+                disabled: false,
+                folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
+                ..Default::default()
+            });
+        config
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from("/host2"),
+                guest_path: std::path::PathBuf::from("/guest2"),
+                disabled: true,
+                folder_type: None,
+                ..Default::default()
+            });
 
-        let provider = HypervProvider::new(Some("test-id".to_string()));
-
-        let config = crate::config::VmConfig::default();
-        let _ = provider.up(&config);
-        let _ = provider.halt();
-        let _ = provider.suspend();
-        let _ = provider.resume();
-        let _ = provider.destroy();
+        provider.up(&config)?;
+        provider.halt()?;
+        provider.suspend()?;
+        provider.resume()?;
+        provider.snapshot_save("snap1")?;
+        provider.snapshot_restore("snap1")?;
+        let snaps = provider.snapshot_list()?;
+        assert_eq!(snaps, vec!["snap1".to_string()]);
+        provider.snapshot_delete("snap1")?;
+        provider.destroy()?;
 
         let box_path = std::path::Path::new("/dummy");
-        let _ = provider.import(box_path, "vm-1");
-        let _ = provider.clone_machine("base-id", "vm-2");
+        provider.import(box_path, "vm-1")?;
+        provider.clone_machine("base-id", "vm-2")?;
 
-        let _ = provider.status();
+        let _ = provider.status()?;
 
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_hyperv_status_running() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_hyperv_status_running() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let bin = temp_dir.path().join("powershell");
 
         #[cfg(unix)]
@@ -617,44 +646,26 @@ exit 0",
             echo "Running"
             exit 0
             "#;
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&bin, mock_script)?;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
         }
         #[cfg(windows)]
         {
             let bat = temp_dir.path().join("powershell.bat");
-            std::fs::write(&bat, "@echo off\necho Running\nexit 0")
-                .expect("operation should succeed");
+            std::fs::write(&bat, "@echo off\necho Running\nexit 0")?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
+        let bin_str = bin.to_string_lossy().to_string();
+        let provider =
+            HypervProvider::new(Some("test-id".to_string())).with_powershell_bin(&bin_str);
+        assert_eq!(provider.status()?, "running");
+        provider.export(temp_dir.path())?;
 
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = HypervProvider::new(Some("test-id".to_string()));
-        assert_eq!(
-            provider.status().expect("operation should succeed"),
-            "running"
-        );
-        let _ = provider.export(temp_dir.path());
-
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_hyperv_provider() {
+    fn test_hyperv_provider() -> Result<(), MigratoryError> {
         let provider = HypervProvider::new(Some("test-id".to_string()));
         assert_eq!(provider.name(), "hyperv");
         assert!(provider.status().is_ok());
@@ -670,15 +681,13 @@ exit 0",
                 .export(std::path::Path::new("/dummy"))
                 .is_err()
         );
-        assert_eq!(
-            provider_no_id.status().expect("operation should succeed"),
-            "not created"
-        );
+        assert_eq!(provider_no_id.status()?, "not created");
+        Ok(())
     }
 
     #[test]
     fn test_hyperv_provider_networks() {
-        let provider = HypervProvider::new(Some("test-id".to_string()));
+        let provider = HypervProvider::new(Some("test-id".to_string())).with_powershell_bin("echo");
         let mut config = VmConfig::default();
         config.networks.push(NetworkConfig::ForwardedPort {
             guest: 80,
@@ -709,82 +718,57 @@ exit 0",
 
     #[test]
     fn test_execute_powershell_missing_cmd() {
-        // Provide a non-existent command to trigger the Err branch of `Command::output`
+        let _ = execute_powershell("echo 1");
         let result = execute_powershell_inner("this_command_does_not_exist_123", "echo 1");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_execute_powershell_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        // Use 'echo' as a mock for powershell
         let result = execute_powershell_inner("echo", "test");
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_execute_powershell_failure() {
-        // Use 'false' to return a non-zero exit code and hit the stderr error branch.
-        // On some platforms 'false' might not be available or behaves differently,
-        // but typically it returns exit code 1 and fails out.status.success().
         let result = execute_powershell_inner("false", "test");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_hyperv_deep_features() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_hyperv_deep_features() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let bin = temp_dir.path().join("powershell");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mock_script = "#!/bin/sh\necho \"192.168.1.50\"\nexit 0\n";
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&bin, mock_script)?;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
         }
         #[cfg(windows)]
         {
             let bat = temp_dir.path().join("powershell.bat");
-            std::fs::write(&bat, "@echo off\necho 192.168.1.50\nexit 0")
-                .expect("operation should succeed");
+            std::fs::write(&bat, "@echo off\necho 192.168.1.50\nexit 0")?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = HypervProvider::new(Some("test-vm".to_string()));
-        let ip = provider.get_guest_ip();
-        assert!(ip.is_ok());
-        assert_eq!(
-            ip.expect("operation should succeed"),
-            Some("192.168.1.50".to_string())
-        );
+        let bin_str = bin.to_string_lossy().to_string();
+        let provider =
+            HypervProvider::new(Some("test-vm".to_string())).with_powershell_bin(&bin_str);
+        let ip = provider.get_guest_ip()?;
+        assert_eq!(ip, Some("192.168.1.50".to_string()));
 
         assert!(
             provider
                 .create_vm("gen2-vm", 2, 2048, "Default Switch")
                 .is_ok()
         );
-        assert!(HypervProvider::create_differencing_vhd("base.vhdx", "diff.vhdx").is_ok());
+        let _ = HypervProvider::create_differencing_vhd("base.vhdx", "diff.vhdx");
+        assert!(
+            HypervProvider::create_differencing_vhd_with(&bin_str, "base.vhdx", "diff.vhdx")
+                .is_ok()
+        );
         assert!(
             provider
                 .configure_cpu_and_memory(4, 1073741824, 4294967296, true)
@@ -801,9 +785,7 @@ exit 0",
         );
         assert!(no_id.save_vm_state().is_err());
 
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
     #[test]
@@ -833,45 +815,28 @@ exit 0",
     }
 
     #[test]
-    fn test_hyperv_empty_outputs() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_hyperv_empty_outputs() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let bin = temp_dir.path().join("powershell");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mock_script = "#!/bin/sh\nexit 0\n";
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&bin, mock_script)?;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
         }
         #[cfg(windows)]
         {
             let bat = temp_dir.path().join("powershell.bat");
-            std::fs::write(&bat, "@echo off\nexit 0").expect("operation should succeed");
+            std::fs::write(&bat, "@echo off\nexit 0")?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = HypervProvider::new(Some("test-vm".to_string()));
-        let ip = provider.get_guest_ip();
-        assert!(ip.is_ok());
-        assert_eq!(ip.expect("operation should succeed"), None);
+        let bin_str = bin.to_string_lossy().to_string();
+        let provider =
+            HypervProvider::new(Some("test-vm".to_string())).with_powershell_bin(&bin_str);
+        let ip = provider.get_guest_ip()?;
+        assert_eq!(ip, None);
 
         // Public network with bridge: None and empty powershell output (line 84 Default Switch)
         let mut config = VmConfig::default();
@@ -889,48 +854,30 @@ exit 0",
                 .is_ok()
         );
 
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_hyperv_powershell_cmd_failures() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_hyperv_powershell_cmd_failures() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let bin = temp_dir.path().join("powershell");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mock_script = "#!/bin/sh\nexit 1\n";
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&bin, mock_script)?;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
         }
         #[cfg(windows)]
         {
             let bat = temp_dir.path().join("powershell.bat");
-            std::fs::write(&bat, "@echo off\nexit 1").expect("operation should succeed");
+            std::fs::write(&bat, "@echo off\nexit 1")?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = HypervProvider::new(Some("test-vm".to_string()));
+        let bin_str = bin.to_string_lossy().to_string();
+        let provider =
+            HypervProvider::new(Some("test-vm".to_string())).with_powershell_bin(&bin_str);
         let config = VmConfig::default();
 
         assert!(provider.up(&config).is_err());
@@ -940,8 +887,8 @@ exit 0",
         sf_config
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: "/host".to_string(),
-                guest_path: "/guest".to_string(),
+                host_path: std::path::PathBuf::from("/host"),
+                guest_path: std::path::PathBuf::from("/guest"),
                 disabled: false,
                 folder_type: None,
                 ..Default::default()
@@ -958,9 +905,13 @@ exit 0",
         assert!(provider.destroy().is_err());
         assert!(provider.suspend().is_err());
         assert!(provider.resume().is_err());
+        assert!(provider.snapshot_save("snap").is_err());
+        assert!(provider.snapshot_restore("snap").is_err());
+        assert!(provider.snapshot_delete("snap").is_err());
+        assert!(provider.export(temp_dir.path()).is_err());
         assert!(provider.get_guest_ip().is_err());
         assert!(provider.create_vm("vm", 1, 1024, "Switch").is_err());
-        assert!(HypervProvider::create_differencing_vhd("base", "diff").is_err());
+        assert!(HypervProvider::create_differencing_vhd_with(&bin_str, "base", "diff").is_err());
         assert!(
             provider
                 .configure_cpu_and_memory(2, 1024, 2048, true)
@@ -986,13 +937,12 @@ if echo "$*" | grep -q "Rename-VM"; then
 fi
 exit 0
 "#;
-            std::fs::write(&bin, rename_fail_script).expect("operation should succeed");
+            std::fs::write(&bin, rename_fail_script)?;
         }
         #[cfg(windows)]
         {
             let rename_fail_bat = "@echo off\necho %* | findstr /i \"Rename-VM\" >nul\nif %errorlevel% equ 0 exit /b 1\nexit /b 0\n";
-            std::fs::write(temp_dir.path().join("powershell.bat"), rename_fail_bat)
-                .expect("operation should succeed");
+            std::fs::write(temp_dir.path().join("powershell.bat"), rename_fail_bat)?;
         }
         assert!(
             provider
@@ -1010,18 +960,15 @@ if echo "$*" | grep -q "Import-VM"; then
 fi
 exit 0
 "#;
-            std::fs::write(&bin, import_fail_script).expect("operation should succeed");
+            std::fs::write(&bin, import_fail_script)?;
         }
         #[cfg(windows)]
         {
             let import_fail_bat = "@echo off\necho %* | findstr /i \"Import-VM\" >nul\nif %errorlevel% equ 0 exit /b 1\nexit /b 0\n";
-            std::fs::write(temp_dir.path().join("powershell.bat"), import_fail_bat)
-                .expect("operation should succeed");
+            std::fs::write(temp_dir.path().join("powershell.bat"), import_fail_bat)?;
         }
         assert!(provider.clone_machine("base", "vm").is_err());
 
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 }

@@ -64,25 +64,24 @@ pub fn parse_vboxmanage_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `VBoxManage`.
 pub fn query_virtualbox_ports(machine_id: &str) -> Option<Vec<ForwardedPortEntry>> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_LIVE_PORTS") {
-        let mut entries = Vec::new();
-        for item in mock.split(';') {
-            let parts: Vec<&str> = item.split(',').collect();
-            if parts.len() == 3
-                && let (Ok(g), Ok(h)) = (parts[0].parse(), parts[1].parse())
-            {
-                entries.push(ForwardedPortEntry {
-                    guest: g,
-                    host: h,
-                    protocol: parts[2].to_string(),
-                });
-            }
-        }
-        return Some(entries);
-    }
+    query_virtualbox_ports_with("VBoxManage", machine_id)
+}
 
-    let output = std::process::Command::new("VBoxManage")
+/// Queries live forwarded ports for a VirtualBox machine using a custom `VBoxManage` binary.
+///
+/// # Arguments
+///
+/// * `vboxmanage_bin` - Executable name or path for `VBoxManage`.
+/// * `machine_id` - The VirtualBox machine UUID or name.
+///
+/// # Returns
+///
+/// Returns a list of `ForwardedPortEntry` if successfully retrieved.
+pub fn query_virtualbox_ports_with(
+    vboxmanage_bin: &str,
+    machine_id: &str,
+) -> Option<Vec<ForwardedPortEntry>> {
+    let output = std::process::Command::new(vboxmanage_bin)
         .args(["showvminfo", machine_id, "--machinereadable"])
         .output()
         .ok()?;
@@ -153,12 +152,24 @@ pub fn parse_docker_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `docker port`.
 pub fn query_docker_ports(container_id: &str) -> Option<Vec<ForwardedPortEntry>> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_DOCKER_PORTS") {
-        return parse_docker_ports(&mock);
-    }
+    query_docker_ports_with("docker", container_id)
+}
 
-    let output = std::process::Command::new("docker")
+/// Queries live forwarded ports for a Docker container using a custom `docker` binary.
+///
+/// # Arguments
+///
+/// * `docker_bin` - Executable name or path for `docker`.
+/// * `container_id` - The Docker container name or ID.
+///
+/// # Returns
+///
+/// Returns a list of `ForwardedPortEntry` if successfully retrieved.
+pub fn query_docker_ports_with(
+    docker_bin: &str,
+    container_id: &str,
+) -> Option<Vec<ForwardedPortEntry>> {
+    let output = std::process::Command::new(docker_bin)
         .args(["port", container_id])
         .output()
         .ok()?;
@@ -190,23 +201,22 @@ pub fn parse_qemu_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
         let trimmed = line.trim();
         for part in trimmed.split("hostfwd=").skip(1) {
             let spec = part.split([',', ' ']).next().unwrap_or(part);
-            if let Some((host_part, guest_part)) = spec.split_once('-') {
+            if let Some((host_part, guest_part)) = spec.split_once('-')
+                && let Some(host) = host_part
+                    .rfind(':')
+                    .and_then(|p| host_part[p + 1..].parse::<u16>().ok())
+                && let Some(guest) = guest_part
+                    .rfind(':')
+                    .and_then(|p| guest_part[p + 1..].parse::<u16>().ok())
+            {
                 let proto = host_part.split(':').next().unwrap_or("tcp").to_lowercase();
-                let host_port = host_part
-                    .rfind(':')
-                    .and_then(|p| host_part[p + 1..].parse::<u16>().ok());
-                let guest_port = guest_part
-                    .rfind(':')
-                    .and_then(|p| guest_part[p + 1..].parse::<u16>().ok());
-                if let (Some(host), Some(guest)) = (host_port, guest_port) {
-                    let entry = ForwardedPortEntry {
-                        guest,
-                        host,
-                        protocol: proto,
-                    };
-                    if !entries.contains(&entry) {
-                        entries.push(entry);
-                    }
+                let entry = ForwardedPortEntry {
+                    guest,
+                    host,
+                    protocol: proto,
+                };
+                if !entries.contains(&entry) {
+                    entries.push(entry);
                 }
             }
         }
@@ -249,12 +259,21 @@ pub fn parse_qemu_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `virsh`.
 pub fn query_qemu_ports(domain_id: &str) -> Option<Vec<ForwardedPortEntry>> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_QEMU_PORTS") {
-        return parse_qemu_ports(&mock);
-    }
+    query_qemu_ports_with("virsh", domain_id)
+}
 
-    let output = std::process::Command::new("virsh")
+/// Queries live forwarded ports for a QEMU domain using a custom `virsh` binary.
+///
+/// # Arguments
+///
+/// * `virsh_bin` - Executable name or path for `virsh`.
+/// * `domain_id` - The domain name or UUID.
+///
+/// # Returns
+///
+/// Returns a list of `ForwardedPortEntry` if successfully retrieved.
+pub fn query_qemu_ports_with(virsh_bin: &str, domain_id: &str) -> Option<Vec<ForwardedPortEntry>> {
+    let output = std::process::Command::new(virsh_bin)
         .args(["qemu-monitor-command", domain_id, "--hmp", "info usernet"])
         .output()
         .ok()?;
@@ -379,18 +398,30 @@ pub fn parse_hyperv_ports(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 ///
 /// # Arguments
 ///
-/// * `_vm_id` - The Hyper-V virtual machine identifier.
+/// * `vm_id` - The Hyper-V virtual machine identifier.
 ///
 /// # Returns
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from PowerShell.
-pub fn query_hyperv_ports(_vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_HYPERV_PORTS") {
-        return parse_hyperv_ports(&mock);
-    }
+pub fn query_hyperv_ports(vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
+    query_hyperv_ports_with("powershell", vm_id)
+}
 
-    let output = std::process::Command::new("powershell")
+/// Queries live forwarded ports for Hyper-V using a custom `powershell` binary.
+///
+/// # Arguments
+///
+/// * `powershell_bin` - Executable name or path for `powershell`.
+/// * `_vm_id` - The Hyper-V virtual machine identifier.
+///
+/// # Returns
+///
+/// Returns a list of `ForwardedPortEntry` if successfully retrieved.
+pub fn query_hyperv_ports_with(
+    powershell_bin: &str,
+    _vm_id: &str,
+) -> Option<Vec<ForwardedPortEntry>> {
+    let output = std::process::Command::new(powershell_bin)
         .args([
             "-NoProfile",
             "-Command",
@@ -482,17 +513,25 @@ pub fn parse_vmware_nat_conf(text: &str) -> Option<Vec<ForwardedPortEntry>> {
 ///
 /// Returns a list of `ForwardedPortEntry` if successfully retrieved from `nat.conf`.
 pub fn query_vmware_ports(_vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_VMWARE_PORTS") {
-        return parse_vmware_nat_conf(&mock);
-    }
-
     let candidate_paths = [
         "/Library/Preferences/VMware Fusion/vmnet8/nat.conf",
         "/etc/vmware/vmnet8/nat/nat.conf",
         r"C:\ProgramData\VMware\vmnetnat.conf",
     ];
 
+    query_vmware_ports_from_paths(&candidate_paths)
+}
+
+/// Queries live forwarded ports for VMware by checking the provided NAT configuration file paths.
+///
+/// # Arguments
+///
+/// * `candidate_paths` - Slice of file path strings to inspect.
+///
+/// # Returns
+///
+/// Returns a list of `ForwardedPortEntry` if successfully retrieved from any candidate `nat.conf`.
+pub fn query_vmware_ports_from_paths(candidate_paths: &[&str]) -> Option<Vec<ForwardedPortEntry>> {
     for path in candidate_paths {
         if let Ok(content) = std::fs::read_to_string(path)
             && let Some(ports) = parse_vmware_nat_conf(&content)
@@ -502,6 +541,20 @@ pub fn query_vmware_ports(_vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
     }
 
     None
+}
+
+/// Default live port query dispatcher by provider name and machine ID.
+fn default_query_live_ports(provider_name: &str, id: &str) -> Option<Vec<ForwardedPortEntry>> {
+    match provider_name {
+        "virtualbox" => query_virtualbox_ports(id),
+        "docker" => query_docker_ports(id),
+        "qemu" | "libvirt" => query_qemu_ports(id),
+        "hyperv" | "hyper-v" => query_hyperv_ports(id),
+        "vmware" | "vmware_desktop" | "vmware_fusion" | "vmware_workstation" => {
+            query_vmware_ports(id)
+        }
+        _ => None,
+    }
 }
 
 /// Executes the `port` command.
@@ -519,13 +572,33 @@ pub fn query_vmware_ports(_vm_id: &str) -> Option<Vec<ForwardedPortEntry>> {
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or if a specified machine is missing.
 pub fn execute(cwd: &Path, args: &PortArgs) -> Result<(), MigratoryError> {
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    execute_with_querier(cwd, args, default_query_live_ports)
+}
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
+/// Executes the `port` command with a customizable live port querier.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `port` command.
+/// * `querier` - Function taking `(provider_name, machine_id)` and returning live forwarded ports.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or if a specified machine is missing.
+pub fn execute_with_querier<Q>(
+    cwd: &Path,
+    args: &PortArgs,
+    mut querier: Q,
+) -> Result<(), MigratoryError>
+where
+    Q: FnMut(&str, &str) -> Option<Vec<ForwardedPortEntry>>,
+{
+    let env_config = crate::config::load_environment_config(cwd)?;
 
     if let Some(target_name) = &args.name
         && !env_config.machines.contains_key(target_name)
@@ -544,7 +617,7 @@ pub fn execute(cwd: &Path, args: &PortArgs) -> Result<(), MigratoryError> {
         println!("provider supports automatic port collision resolution and the port was in use.");
     }
 
-    let state_mgr = crate::provider::StateManager::new(cwd.join(".vagrant"));
+    let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
 
     for (m_name, machine) in &env_config.machines {
         if let Some(target_name) = &args.name
@@ -561,18 +634,12 @@ pub fn execute(cwd: &Path, args: &PortArgs) -> Result<(), MigratoryError> {
             .unwrap_or("virtualbox");
 
         let machine_id = state_mgr.read_id(m_name, provider_name).ok().flatten();
+        let persisted_ports = state_mgr
+            .read_forwarded_ports(m_name, provider_name)
+            .unwrap_or_default();
 
         let live_ports = if let Some(ref id) = machine_id {
-            match provider_name {
-                "virtualbox" => query_virtualbox_ports(id),
-                "docker" => query_docker_ports(id),
-                "qemu" | "libvirt" => query_qemu_ports(id),
-                "hyperv" | "hyper-v" => query_hyperv_ports(id),
-                "vmware" | "vmware_desktop" | "vmware_fusion" | "vmware_workstation" => {
-                    query_vmware_ports(id)
-                }
-                _ => None,
-            }
+            querier(provider_name, id)
         } else {
             None
         };
@@ -586,26 +653,21 @@ pub fn execute(cwd: &Path, args: &PortArgs) -> Result<(), MigratoryError> {
                 }
                 println!("{} ({}) -> {}", port.guest, port.protocol, port.host);
             }
+        } else if !persisted_ports.is_empty() {
+            for port in persisted_ports {
+                if let Some(target_guest) = args.guest
+                    && port.guest != target_guest
+                {
+                    continue;
+                }
+                println!("{} ({}) -> {}", port.guest, port.protocol, port.host);
+            }
         } else {
             for net in &machine.vm.networks {
-                if let crate::config::NetworkConfig::ForwardedPort {
-                    guest,
-                    host,
-                    protocol,
-                    ..
-                } = net
+                if let Some((guest, host, proto)) = net.as_forwarded_port()
+                    && args.guest.is_none_or(|g| g == guest)
                 {
-                    if let Some(target_guest) = args.guest
-                        && *guest != target_guest
-                    {
-                        continue;
-                    }
-                    println!(
-                        "{} ({}) -> {}",
-                        guest,
-                        protocol.as_deref().unwrap_or("tcp"),
-                        host
-                    );
+                    println!("{guest} ({proto}) -> {host}");
                 }
             }
         }
@@ -616,23 +678,13 @@ pub fn execute(cwd: &Path, args: &PortArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_port_missing() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = PortArgs {
             name: None,
@@ -641,17 +693,15 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_port_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PortArgs {
             name: None,
@@ -659,17 +709,15 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_port_success_no_guest() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_success_no_guest() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PortArgs {
             name: None,
@@ -677,17 +725,15 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_port_unknown_machine() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_unknown_machine() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PortArgs {
             name: Some("unknown_machine".to_string()),
@@ -695,14 +741,12 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_port_with_forwarded_ports() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_with_forwarded_ports() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let content = r#"
@@ -716,7 +760,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), content)?;
 
         let args_all = PortArgs {
             name: None,
@@ -741,14 +785,12 @@ end
             guest: None,
         };
         assert!(execute(cwd, &args_db).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_port_with_live_ports() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_with_live_ports() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let content = r#"
@@ -758,39 +800,43 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), content)?;
 
         let state_dir = cwd.join(".vagrant/machines/web/virtualbox");
-        fs::create_dir_all(&state_dir).expect("create_dir failed");
-        fs::write(state_dir.join("id"), "web-vm-uuid").expect("write failed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "web-vm-uuid")?;
 
-        unsafe {
-            std::env::set_var(
-                "MIGRATORY_TEST_MOCK_LIVE_PORTS",
-                "80,8081,tcp;invalid_parts;bad_guest,8082,tcp;443,8443,tcp",
-            );
-        }
+        let mock_ports = vec![
+            ForwardedPortEntry {
+                guest: 80,
+                host: 8081,
+                protocol: "tcp".to_string(),
+            },
+            ForwardedPortEntry {
+                guest: 443,
+                host: 8443,
+                protocol: "tcp".to_string(),
+            },
+        ];
 
         let args = PortArgs {
             name: Some("web".to_string()),
             guest: Some(80),
         };
-        let result = execute(cwd, &args);
+        let result = execute_with_querier(cwd, &args, |_, _| Some(mock_ports.clone()));
         assert!(result.is_ok());
 
         let args_nomatch = PortArgs {
             name: Some("web".to_string()),
             guest: Some(9999),
         };
-        assert!(execute(cwd, &args_nomatch).is_ok());
+        assert!(execute_with_querier(cwd, &args_nomatch, |_, _| Some(mock_ports.clone())).is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_LIVE_PORTS");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vboxmanage_ports_edge_cases() {
+    fn test_parse_vboxmanage_ports_edge_cases() -> Result<(), MigratoryError> {
         assert_eq!(parse_vboxmanage_ports(""), None);
         assert_eq!(parse_vboxmanage_ports("VMState=\"running\"\n"), None);
         assert_eq!(parse_vboxmanage_ports("Forwarding(0)broken\n"), None);
@@ -808,7 +854,8 @@ end
         );
 
         let valid = "Forwarding(0)=\"rule,tcp,127.0.0.1,8080,,80\"\nForwarding(1)=\"ssh,tcp,127.0.0.1,2222,,22\"\n";
-        let parsed = parse_vboxmanage_ports(valid).expect("should parse");
+        let parsed = parse_vboxmanage_ports(valid)
+            .ok_or(MigratoryError::Generic("expected parsed ports".to_string()))?;
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].guest, 80);
         assert_eq!(parsed[0].host, 8080);
@@ -816,75 +863,53 @@ end
         assert_eq!(parsed[1].guest, 22);
         assert_eq!(parsed[1].host, 2222);
         assert_eq!(parsed[1].protocol, "tcp");
+        Ok(())
     }
 
     #[test]
-    fn test_query_virtualbox_ports_with_mock_vboxmanage() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_query_virtualbox_ports_with_mock_vboxmanage() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&bin_dir).expect("create_dir failed");
+        fs::create_dir_all(&bin_dir)?;
 
-        let old_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", &bin_dir);
-            std::env::remove_var("MIGRATORY_TEST_MOCK_LIVE_PORTS");
-        }
-        assert_eq!(query_virtualbox_ports("vm-id-1"), None);
+        let _ = query_virtualbox_ports("vm-id-1");
+        assert_eq!(
+            query_virtualbox_ports_with("nonexistent_vboxmanage_xyz", "vm-id-1"),
+            None
+        );
+        assert_eq!(query_virtualbox_ports_with("false", "vm-id-2"), None);
 
         let script_path = bin_dir.join("VBoxManage");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::write(&script_path, "#!/bin/sh\nexit 1\n").expect("write failed");
-            let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).expect("set_permissions");
-        }
-        #[cfg(windows)]
-        {
-            fs::write(bin_dir.join("VBoxManage.bat"), "@echo off\nexit /b 1\n")
-                .expect("write failed");
-        }
-        assert_eq!(query_virtualbox_ports("vm-id-2"), None);
-
-        #[cfg(unix)]
-        {
             fs::write(
                 &script_path,
                 "#!/bin/sh\necho 'Forwarding(0)=\"ssh,tcp,127.0.0.1,2222,,22\"'\nexit 0\n",
-            )
-            .expect("write failed");
+            )?;
+            let mut perms = fs::metadata(&script_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms)?;
         }
         #[cfg(windows)]
         {
             fs::write(
                 bin_dir.join("VBoxManage.bat"),
                 "@echo off\necho Forwarding(0)=\"ssh,tcp,127.0.0.1,2222,,22\"\nexit /b 0\n",
-            )
-            .expect("write failed");
+            )?;
         }
-        let ports = query_virtualbox_ports("vm-id-3").expect("should return ports");
+        let ports = query_virtualbox_ports_with(&script_path.to_string_lossy(), "vm-id-3")
+            .ok_or(MigratoryError::Generic("expected ports".to_string()))?;
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].guest, 22);
         assert_eq!(ports[0].host, 2222);
 
-        unsafe {
-            if let Some(p) = old_path {
-                std::env::set_var("PATH", p);
-            }
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_port_custom_provider_and_private_network() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_custom_provider_and_private_network() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let content = r#"
@@ -900,11 +925,11 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), content)?;
 
         let other_state = cwd.join(".vagrant/machines/other/unknown_provider");
-        fs::create_dir_all(&other_state).expect("mkdir failed");
-        fs::write(other_state.join("id"), "other-vm-id").expect("write failed");
+        fs::create_dir_all(&other_state)?;
+        fs::write(other_state.join("id"), "other-vm-id")?;
 
         let args = PortArgs {
             name: Some("custom".to_string()),
@@ -918,14 +943,11 @@ end
             guest: None,
         };
         assert!(execute(cwd, &args_other).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_docker_port_parsing_and_query() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
+    fn test_docker_port_parsing_and_query() -> Result<(), MigratoryError> {
         assert_eq!(parse_docker_ports(""), None);
         assert_eq!(parse_docker_ports("invalid line without arrow\n"), None);
         assert_eq!(parse_docker_ports("bad/tcp -> 0.0.0.0:8080\n"), None);
@@ -937,7 +959,8 @@ end
 80/tcp -> :::8080
 443/udp -> 127.0.0.1:8443
 ";
-        let parsed = parse_docker_ports(sample).expect("should parse");
+        let parsed = parse_docker_ports(sample)
+            .ok_or(MigratoryError::Generic("expected parsed".to_string()))?;
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].guest, 80);
         assert_eq!(parsed[0].host, 8080);
@@ -946,22 +969,25 @@ end
         assert_eq!(parsed[1].host, 8443);
         assert_eq!(parsed[1].protocol, "udp");
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_PORTS", sample);
+        let _ = query_docker_ports("container-123");
+        assert_eq!(query_docker_ports_with("false", "container-123"), None);
+
+        let dir = tempdir()?;
+        let script = dir.path().join("mock_docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&script, format!("#!/bin/sh\necho '{}'\nexit 0\n", sample))?;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
         }
-        let queried = query_docker_ports("container-123").expect("query should succeed");
+        let queried = query_docker_ports_with(&script.to_string_lossy(), "container-123")
+            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
         assert_eq!(queried.len(), 2);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_PORTS");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_qemu_port_parsing_and_query() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
+    fn test_qemu_port_parsing_and_query() -> Result<(), MigratoryError> {
         assert_eq!(parse_qemu_ports(""), None);
         assert_eq!(parse_qemu_ports("random info output\n"), None);
         assert_eq!(parse_qemu_ports("hostfwd=bad\n"), None);
@@ -973,7 +999,9 @@ VLAN -1 (net0):
   TCP[HOST_FORWARD]  13       127.0.0.1  2222       10.0.2.15    22     0     0
   UDP[HOST_FORWARD]  14       0.0.0.0    8080       10.0.2.15    80     0     0
 ";
-        let parsed_usernet = parse_qemu_ports(usernet_sample).expect("should parse usernet");
+        let parsed_usernet = parse_qemu_ports(usernet_sample).ok_or(MigratoryError::Generic(
+            "expected parsed usernet".to_string(),
+        ))?;
         assert_eq!(parsed_usernet.len(), 2);
         assert_eq!(parsed_usernet[0].guest, 22);
         assert_eq!(parsed_usernet[0].host, 2222);
@@ -983,29 +1011,37 @@ VLAN -1 (net0):
         assert_eq!(parsed_usernet[1].protocol, "udp");
 
         let hostfwd_sample = "qemu -net nic -net user,hostfwd=tcp::2222-:22,hostfwd=udp::5353-:53";
-        let parsed_hostfwd = parse_qemu_ports(hostfwd_sample).expect("should parse hostfwd");
+        let parsed_hostfwd = parse_qemu_ports(hostfwd_sample).ok_or(MigratoryError::Generic(
+            "expected parsed hostfwd".to_string(),
+        ))?;
         assert_eq!(parsed_hostfwd.len(), 2);
         assert_eq!(parsed_hostfwd[0].guest, 22);
         assert_eq!(parsed_hostfwd[0].host, 2222);
         assert_eq!(parsed_hostfwd[1].guest, 53);
         assert_eq!(parsed_hostfwd[1].host, 5353);
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_QEMU_PORTS", usernet_sample);
+        let _ = query_qemu_ports("qemu-domain-456");
+        assert_eq!(query_qemu_ports_with("false", "qemu-domain-456"), None);
+
+        let dir = tempdir()?;
+        let script = dir.path().join("mock_virsh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(
+                &script,
+                format!("#!/bin/sh\necho '{}'\nexit 0\n", usernet_sample),
+            )?;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
         }
-        let queried = query_qemu_ports("qemu-domain-456").expect("query should succeed");
+        let queried = query_qemu_ports_with(&script.to_string_lossy(), "qemu-domain-456")
+            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
         assert_eq!(queried.len(), 2);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_QEMU_PORTS");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_hyperv_port_parsing_and_query() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
+    fn test_hyperv_port_parsing_and_query() -> Result<(), MigratoryError> {
         assert_eq!(parse_hyperv_ports(""), None);
         assert_eq!(parse_hyperv_ports("Status: Running\n"), None);
         assert_eq!(parse_hyperv_ports("42"), None);
@@ -1019,7 +1055,8 @@ Protocol     : UDP
 ExternalPort : 5353
 InternalPort : 53
 ";
-        let parsed_kv = parse_hyperv_ports(kv_sample).expect("should parse key-value");
+        let parsed_kv = parse_hyperv_ports(kv_sample)
+            .ok_or(MigratoryError::Generic("expected parsed kv".to_string()))?;
         assert_eq!(parsed_kv.len(), 2);
         assert_eq!(parsed_kv[0].guest, 22);
         assert_eq!(parsed_kv[0].host, 2222);
@@ -1029,35 +1066,46 @@ InternalPort : 53
         assert_eq!(parsed_kv[1].protocol, "udp");
 
         let json_sample = r#"[
+            {"Protocol": "TCP"},
+            {"Protocol": "TCP", "ExternalPort": 8080, "InternalPort": 80},
             {"Protocol": "TCP", "ExternalPort": 8080, "InternalPort": 80},
             {"Protocol": "UDP", "ExternalPort": 9090, "InternalPort": 90}
         ]"#;
-        let parsed_json = parse_hyperv_ports(json_sample).expect("should parse json");
+        let parsed_json = parse_hyperv_ports(json_sample)
+            .ok_or(MigratoryError::Generic("expected parsed json".to_string()))?;
         assert_eq!(parsed_json.len(), 2);
         assert_eq!(parsed_json[0].guest, 80);
         assert_eq!(parsed_json[0].host, 8080);
         assert_eq!(parsed_json[0].protocol, "tcp");
 
         let single_json = r#"{"Protocol": "TCP", "ExternalPort": 3000, "InternalPort": 3000}"#;
-        let parsed_single = parse_hyperv_ports(single_json).expect("should parse single json");
+        let parsed_single = parse_hyperv_ports(single_json).ok_or(MigratoryError::Generic(
+            "expected parsed single".to_string(),
+        ))?;
         assert_eq!(parsed_single.len(), 1);
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_HYPERV_PORTS", json_sample);
+        let _ = query_hyperv_ports("hyperv-vm-789");
+        assert_eq!(query_hyperv_ports_with("false", "hyperv-vm-789"), None);
+
+        let dir = tempdir()?;
+        let script = dir.path().join("mock_powershell");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(
+                &script,
+                format!("#!/bin/sh\necho '{}'\nexit 0\n", json_sample),
+            )?;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
         }
-        let queried = query_hyperv_ports("hyperv-vm-789").expect("query should succeed");
+        let queried = query_hyperv_ports_with(&script.to_string_lossy(), "hyperv-vm-789")
+            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
         assert_eq!(queried.len(), 2);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_HYPERV_PORTS");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_vmware_nat_conf_parsing_and_query() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
+    fn test_vmware_nat_conf_parsing_and_query() -> Result<(), MigratoryError> {
         assert_eq!(parse_vmware_nat_conf(""), None);
         assert_eq!(parse_vmware_nat_conf("# Comment only\n"), None);
         assert_eq!(parse_vmware_nat_conf("[incomingtcp]\n8080 = bad\n"), None);
@@ -1077,7 +1125,8 @@ invalid_line
 [other_section]
 9999 = 192.168.56.10:99
 ";
-        let parsed = parse_vmware_nat_conf(conf_sample).expect("should parse nat conf");
+        let parsed = parse_vmware_nat_conf(conf_sample)
+            .ok_or(MigratoryError::Generic("expected parsed".to_string()))?;
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed[0].guest, 22);
         assert_eq!(parsed[0].host, 2222);
@@ -1089,22 +1138,25 @@ invalid_line
         assert_eq!(parsed[2].host, 5353);
         assert_eq!(parsed[2].protocol, "udp");
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VMWARE_PORTS", conf_sample);
-        }
-        let queried = query_vmware_ports("vmware-vm-101").expect("query should succeed");
+        let _ = query_vmware_ports("vmware-vm-101");
+        assert_eq!(
+            query_vmware_ports_from_paths(&["/nonexistent/nat.conf"]),
+            None
+        );
+
+        let dir = tempdir()?;
+        let nat_file = dir.path().join("nat.conf");
+        fs::write(&nat_file, conf_sample)?;
+        let nat_str = nat_file.to_string_lossy();
+        let queried = query_vmware_ports_from_paths(&[&nat_str])
+            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
         assert_eq!(queried.len(), 3);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VMWARE_PORTS");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_port_multi_provider_live() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_port_multi_provider_live() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let content = r#"
@@ -1123,57 +1175,92 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), content)?;
 
         let vagrant_dir = cwd.join(".vagrant/machines");
-        fs::create_dir_all(vagrant_dir.join("docker_node/docker")).expect("mkdir failed");
-        fs::write(vagrant_dir.join("docker_node/docker/id"), "container-id").expect("write");
+        fs::create_dir_all(vagrant_dir.join("docker_node/docker"))?;
+        fs::write(vagrant_dir.join("docker_node/docker/id"), "container-id")?;
 
-        fs::create_dir_all(vagrant_dir.join("qemu_node/qemu")).expect("mkdir failed");
-        fs::write(vagrant_dir.join("qemu_node/qemu/id"), "domain-id").expect("write");
+        fs::create_dir_all(vagrant_dir.join("qemu_node/qemu"))?;
+        fs::write(vagrant_dir.join("qemu_node/qemu/id"), "domain-id")?;
 
-        fs::create_dir_all(vagrant_dir.join("hyperv_node/hyperv")).expect("mkdir failed");
-        fs::write(vagrant_dir.join("hyperv_node/hyperv/id"), "vm-id").expect("write");
+        fs::create_dir_all(vagrant_dir.join("hyperv_node/hyperv"))?;
+        fs::write(vagrant_dir.join("hyperv_node/hyperv/id"), "vm-id")?;
 
-        fs::create_dir_all(vagrant_dir.join("vmware_node/vmware")).expect("mkdir failed");
-        fs::write(vagrant_dir.join("vmware_node/vmware/id"), "vmx-path").expect("write");
-
-        unsafe {
-            std::env::set_var(
-                "MIGRATORY_TEST_MOCK_DOCKER_PORTS",
-                "80/tcp -> 0.0.0.0:8080
-",
-            );
-            std::env::set_var(
-                "MIGRATORY_TEST_MOCK_QEMU_PORTS",
-                "TCP[HOST_FORWARD] 13 127.0.0.1 2222 10.0.2.15 22
-",
-            );
-            std::env::set_var(
-                "MIGRATORY_TEST_MOCK_HYPERV_PORTS",
-                r#"[{"Protocol": "TCP", "ExternalPort": 3389, "InternalPort": 3389}]"#,
-            );
-            std::env::set_var(
-                "MIGRATORY_TEST_MOCK_VMWARE_PORTS",
-                "[incomingtcp]
-8443 = 192.168.1.1:443
-",
-            );
-        }
+        fs::create_dir_all(vagrant_dir.join("vmware_node/vmware_desktop"))?;
+        fs::write(
+            vagrant_dir.join("vmware_node/vmware_desktop/id"),
+            "vmx-path",
+        )?;
 
         let args = PortArgs {
             name: None,
             guest: None,
         };
-        let result = execute(cwd, &args);
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_PORTS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_QEMU_PORTS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_HYPERV_PORTS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VMWARE_PORTS");
-        }
-
+        let result = execute_with_querier(cwd, &args, |prov, _| match prov {
+            "docker" => parse_docker_ports("80/tcp -> 0.0.0.0:8080\n"),
+            "qemu" => parse_qemu_ports("TCP[HOST_FORWARD] 13 127.0.0.1 2222 10.0.2.15 22\n"),
+            "hyperv" => parse_hyperv_ports(
+                r#"[{"Protocol": "TCP", "ExternalPort": 3389, "InternalPort": 3389}]"#,
+            ),
+            _ => parse_vmware_nat_conf("[incomingtcp]\n8443 = 192.168.1.1:443\n"),
+        });
         assert!(result.is_ok());
+
+        // Also exercise default_query_live_ports for all providers
+        let _ = default_query_live_ports("virtualbox", "id");
+        let _ = default_query_live_ports("docker", "id");
+        let _ = default_query_live_ports("qemu", "id");
+        let _ = default_query_live_ports("hyperv", "id");
+        let _ = default_query_live_ports("vmware", "id");
+        let _ = default_query_live_ports("unknown", "id");
+
+        // Exercise args.guest filtering on live_ports and persisted_ports
+        let args_guest = PortArgs {
+            name: Some("docker_node".to_string()),
+            guest: Some(9999),
+        };
+        assert!(
+            execute_with_querier(cwd, &args_guest, |_, _| parse_docker_ports(
+                "80/tcp -> 0.0.0.0:8080\n9999/tcp -> 0.0.0.0:9999\n"
+            ))
+            .is_ok()
+        );
+
+        let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
+        let ms = state_mgr.machine_state("docker_node", "docker");
+        ms.set_forwarded_ports(&[
+            crate::state::local::PersistedForwardedPort {
+                guest: 80,
+                host: 8080,
+                protocol: "tcp".to_string(),
+                host_ip: None,
+            },
+            crate::state::local::PersistedForwardedPort {
+                guest: 9999,
+                host: 9999,
+                protocol: "tcp".to_string(),
+                host_ip: None,
+            },
+        ])?;
+        assert!(execute_with_querier(cwd, &args_guest, |_, _| None).is_ok());
+
+        // Test args.guest filtering on Vagrantfile networks when neither live nor persisted ports exist
+        let vf_dir = tempdir()?;
+        let vf_ports = r#"
+Vagrant.configure("2") do |config|
+  config.vm.network "private_network", ip: "192.168.56.10"
+  config.vm.network "forwarded_port", guest: 80, host: 8080
+  config.vm.network "forwarded_port", guest: 443, host: 8443
+end
+"#;
+        fs::write(vf_dir.path().join("Vagrantfile"), vf_ports)?;
+        let args_vf_guest = PortArgs {
+            name: Some("default".to_string()),
+            guest: Some(80),
+        };
+        assert!(execute_with_querier(vf_dir.path(), &args_vf_guest, |_, _| None).is_ok());
+
+        Ok(())
     }
 }

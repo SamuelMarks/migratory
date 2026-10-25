@@ -25,18 +25,10 @@ pub fn execute() -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
     fn test_execute_list_commands() {
-        // Assert that executing the list-commands command does not panic and returns Ok.
         let result = execute();
         assert!(result.is_ok());
     }

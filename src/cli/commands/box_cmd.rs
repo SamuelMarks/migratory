@@ -25,15 +25,19 @@ use std::io::Write;
 ///
 /// Returns a `MigratoryError` if writing to the output stream fails.
 pub fn execute(cmd: &BoxCommands, mut writer: impl Write) -> Result<(), MigratoryError> {
-    execute_inner(cmd, &mut writer)
+    let home_dir = std::env::var("VAGRANT_HOME").unwrap_or_else(|_| ".vagrant.d".to_string());
+    let global_dir = std::path::Path::new(&home_dir);
+    execute_with_config(cmd, &mut writer, global_dir, CloudClient::new)
 }
 
-/// Internal non-generic implementation of box command execution.
+/// Executes the `box` command with an explicit global state directory and CloudClient factory.
 ///
 /// # Arguments
 ///
 /// * `cmd` - The box subcommand to execute.
 /// * `writer` - A mutable reference to a trait object writer.
+/// * `global_dir` - Base directory for Vagrant global state.
+/// * `cloud_factory` - Factory function creating a [`CloudClient`].
 ///
 /// # Returns
 ///
@@ -41,11 +45,16 @@ pub fn execute(cmd: &BoxCommands, mut writer: impl Write) -> Result<(), Migrator
 ///
 /// # Errors
 ///
-/// Returns a `MigratoryError` if writing to the output stream fails.
-fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), MigratoryError> {
-    let home_dir = std::env::var("VAGRANT_HOME").unwrap_or_else(|_| ".vagrant.d".to_string());
-    let global_dir = std::path::Path::new(&home_dir);
-
+/// Returns a `MigratoryError` if writing to the output stream or executing the box operation fails.
+pub fn execute_with_config<C>(
+    cmd: &BoxCommands,
+    writer: &mut dyn Write,
+    global_dir: &std::path::Path,
+    mut cloud_factory: C,
+) -> Result<(), MigratoryError>
+where
+    C: FnMut() -> Result<CloudClient, MigratoryError>,
+{
     match cmd {
         BoxCommands::Add(args) => {
             let ui = ConsoleUi;
@@ -68,7 +77,7 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
 
             if !is_url_or_path {
                 ui.detail("box", "Fetching metadata from Vagrant Cloud...");
-                let cloud_client = CloudClient::new()?;
+                let cloud_client = cloud_factory()?;
                 let metadata = cloud_client.fetch_metadata(&args.name)?;
 
                 // Find matching version/provider
@@ -244,7 +253,7 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
                 return Ok(());
             }
 
-            let cloud_client = CloudClient::new()?;
+            let cloud_client = cloud_factory()?;
             let mut any_outdated = false;
 
             if args.global {
@@ -289,8 +298,7 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
                         {
                             writeln!(
                                 writer,
-                                "Box '{}' is outdated! Local: {}, Remote: {}",
-                                box_name, max_local_version, max_remote_version
+                                "Box '{box_name}' is outdated! Local: {max_local_version}, Remote: {max_remote_version}"
                             )?;
                             any_outdated = true;
                         } else {
@@ -313,7 +321,7 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
                 return Ok(());
             }
 
-            let cloud_client = CloudClient::new()?;
+            let cloud_client = cloud_factory()?;
             let mut any_updated = false;
 
             let target_box = args.box_name.clone();
@@ -420,27 +428,15 @@ fn execute_inner(cmd: &BoxCommands, writer: &mut dyn Write) -> Result<(), Migrat
 
 /// Test helpers and synchronization locks for box commands.
 #[cfg(test)]
-pub mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
-    /// Global lock used to serialize environment variable mutations during tests.
-    pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+pub(crate) mod tests {
     use super::*;
     use crate::cli::*;
 
+    /// Writer implementation that unconditionally returns an I/O error on write.
     pub(crate) struct FailingWriter;
     impl Write for FailingWriter {
         fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "write failed",
-            ))
+            Err(std::io::Error::other("write failed"))
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
@@ -453,6 +449,7 @@ pub mod tests {
         assert!(writer.flush().is_ok());
     }
 
+    /// Creates default `BoxAddArgs` for tests.
     pub(crate) fn mock_add_args() -> BoxAddArgs {
         BoxAddArgs {
             name: "test/box".to_string(),
@@ -472,10 +469,12 @@ pub mod tests {
         }
     }
 
+    /// Creates default `BoxListArgs` for tests.
     pub(crate) fn mock_list_args() -> BoxListArgs {
         BoxListArgs { box_info: false }
     }
 
+    /// Creates default `BoxRemoveArgs` for tests.
     pub(crate) fn mock_remove_args() -> BoxRemoveArgs {
         BoxRemoveArgs {
             name: "test/box".to_string(),
@@ -489,6 +488,7 @@ pub mod tests {
         }
     }
 
+    /// Creates default `BoxOutdatedArgs` for tests.
     pub(crate) fn mock_outdated_args() -> BoxOutdatedArgs {
         BoxOutdatedArgs {
             global: false,
@@ -500,6 +500,7 @@ pub mod tests {
         }
     }
 
+    /// Creates default `BoxUpdateArgs` for tests.
     pub(crate) fn mock_update_args() -> BoxUpdateArgs {
         BoxUpdateArgs {
             box_name: None,
@@ -513,6 +514,7 @@ pub mod tests {
         }
     }
 
+    /// Creates default `BoxPruneArgs` for tests.
     pub(crate) fn mock_prune_args() -> BoxPruneArgs {
         BoxPruneArgs {
             provider: None,
@@ -523,6 +525,7 @@ pub mod tests {
         }
     }
 
+    /// Creates default `BoxRepackageArgs` for tests.
     pub(crate) fn mock_repackage_args() -> BoxRepackageArgs {
         BoxRepackageArgs {
             name: "test/box".to_string(),
@@ -532,37 +535,26 @@ pub mod tests {
     }
 
     #[test]
-    fn test_execute_box_add() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let dir = tempfile::tempdir().expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
+    fn test_execute_box_add() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
 
         let _cmd = BoxCommands::Add(mock_add_args());
         let mut out = Vec::new();
         let mut args = mock_add_args();
         let box_path = dir.path().join("dummy.box");
-        std::fs::write(&box_path, b"dummy content").expect("operation should succeed");
+        std::fs::write(&box_path, b"dummy content")?;
 
-        args.name = box_path
-            .to_str()
-            .expect("operation should succeed")
-            .to_string();
+        args.name = box_path.to_string_lossy().to_string();
         let cmd = BoxCommands::Add(args);
 
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new);
         assert!(result.is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_add_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_add_write_error() -> Result<(), MigratoryError> {
         use httpmock::prelude::*;
 
         let server = MockServer::start();
@@ -578,68 +570,66 @@ pub mod tests {
             then.status(200).json_body(metadata_json);
         });
 
-        let temp = tempfile::tempdir().expect("operation should succeed");
-        std::fs::create_dir_all(temp.path().join("boxes")).expect("operation should succeed");
-        std::fs::create_dir_all(temp.path().join("tmp")).expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var("VAGRANT_HOME", temp.path());
-        }
+        let temp = tempfile::tempdir()?;
+        std::fs::create_dir_all(temp.path().join("boxes"))?;
+        std::fs::create_dir_all(temp.path().join("tmp"))?;
 
         let mut args = mock_add_args();
         args.name = "test/write_error".to_string();
         let cmd = BoxCommands::Add(args);
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
+        let url = server.url("");
+        let result = execute_with_config(&cmd, &mut out, temp.path(), || {
+            CloudClient::with_config(crate::cloud::CloudClientConfig {
+                base_url: url.clone(),
+                token: None,
+            })
+        });
         assert!(result.is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_list() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_list() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::List(mock_list_args());
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new).is_ok());
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("There are no installed boxes"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_list_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_list_write_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::List(mock_list_args());
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
-        let _err = result.expect_err("operation should fail");
+        let result = execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new);
+        assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_remove() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_remove() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Remove(mock_remove_args());
         let mut out = Vec::new();
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_remove_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", temp.path());
-        }
+    fn test_execute_box_remove_write_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let box_dir = temp.path().join("boxes").join("test-VAGRANTSLASH-box");
-        std::fs::create_dir_all(&box_dir).expect("operation should succeed");
+        std::fs::create_dir_all(&box_dir)?;
 
         let cmd = BoxCommands::Remove(mock_remove_args());
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new);
         assert!(result.is_err());
 
         let box_ver_dir = temp
@@ -647,7 +637,7 @@ pub mod tests {
             .join("boxes")
             .join("test-VAGRANTSLASH-box2")
             .join("1.0.0");
-        std::fs::create_dir_all(box_ver_dir.join("virtualbox")).expect("operation should succeed");
+        std::fs::create_dir_all(box_ver_dir.join("virtualbox"))?;
         let cmd2 = BoxCommands::Remove(BoxRemoveArgs {
             name: "test/box2".to_string(),
             provider: Some("virtualbox".to_string()),
@@ -659,29 +649,23 @@ pub mod tests {
             all_architectures: false,
         });
         let mut out2 = FailingWriter;
-        let result2 = execute(&cmd2, &mut out2);
+        let result2 = execute_with_config(&cmd2, &mut out2, temp.path(), CloudClient::new);
         assert!(result2.is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_remove_by_provider_and_all() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", temp.path());
-        }
+    fn test_execute_box_remove_by_provider_and_all() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
 
         let box_dir = temp
             .path()
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("1.0.0");
-        std::fs::create_dir_all(box_dir.join("virtualbox")).expect("operation should succeed");
-        std::fs::create_dir_all(box_dir.join("qemu")).expect("operation should succeed");
+        std::fs::create_dir_all(box_dir.join("virtualbox"))?;
+        std::fs::create_dir_all(box_dir.join("qemu"))?;
 
         // 1. Remove non-existent provider returns error
         let cmd_nonexistent_prov = BoxCommands::Remove(BoxRemoveArgs {
@@ -695,7 +679,15 @@ pub mod tests {
             all_architectures: false,
         });
         let mut out1 = Vec::new();
-        assert!(execute(&cmd_nonexistent_prov, &mut out1).is_err());
+        assert!(
+            execute_with_config(
+                &cmd_nonexistent_prov,
+                &mut out1,
+                temp.path(),
+                CloudClient::new
+            )
+            .is_err()
+        );
 
         // 2. Remove with version mismatch
         let cmd_version_mismatch = BoxCommands::Remove(BoxRemoveArgs {
@@ -709,7 +701,15 @@ pub mod tests {
             all_architectures: false,
         });
         let mut out2 = Vec::new();
-        assert!(execute(&cmd_version_mismatch, &mut out2).is_err());
+        assert!(
+            execute_with_config(
+                &cmd_version_mismatch,
+                &mut out2,
+                temp.path(),
+                CloudClient::new
+            )
+            .is_err()
+        );
 
         // 3. Remove specific provider virtualbox succeeds
         let cmd_remove_vbox = BoxCommands::Remove(BoxRemoveArgs {
@@ -723,7 +723,9 @@ pub mod tests {
             all_architectures: false,
         });
         let mut out3 = Vec::new();
-        assert!(execute(&cmd_remove_vbox, &mut out3).is_ok());
+        assert!(
+            execute_with_config(&cmd_remove_vbox, &mut out3, temp.path(), CloudClient::new).is_ok()
+        );
         assert!(!box_dir.join("virtualbox").exists());
         assert!(box_dir.join("qemu").exists());
 
@@ -739,7 +741,10 @@ pub mod tests {
             all_architectures: false,
         });
         let mut out3b = Vec::new();
-        assert!(execute(&cmd_remove_qemu, &mut out3b).is_ok());
+        assert!(
+            execute_with_config(&cmd_remove_qemu, &mut out3b, temp.path(), CloudClient::new)
+                .is_ok()
+        );
         assert!(
             !temp
                 .path()
@@ -748,13 +753,13 @@ pub mod tests {
                 .exists()
         );
 
-        // 3c. Recreate with version 2.0.0 and test remove by box_version without provider (lines 204-205)
+        // 3c. Recreate with version 2.0.0 and test remove by box_version without provider
         let box_dir_v2 = temp
             .path()
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("2.0.0");
-        std::fs::create_dir_all(box_dir_v2.join("hyperv")).expect("operation should succeed");
+        std::fs::create_dir_all(box_dir_v2.join("hyperv"))?;
         let cmd_remove_version_only = BoxCommands::Remove(BoxRemoveArgs {
             name: "test/box".to_string(),
             provider: None,
@@ -766,7 +771,15 @@ pub mod tests {
             all_architectures: false,
         });
         let mut out3c = Vec::new();
-        assert!(execute(&cmd_remove_version_only, &mut out3c).is_ok());
+        assert!(
+            execute_with_config(
+                &cmd_remove_version_only,
+                &mut out3c,
+                temp.path(),
+                CloudClient::new
+            )
+            .is_ok()
+        );
         assert!(
             !temp
                 .path()
@@ -781,7 +794,7 @@ pub mod tests {
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("3.0.0");
-        std::fs::create_dir_all(box_dir_v3.join("utm")).expect("operation should succeed");
+        std::fs::create_dir_all(box_dir_v3.join("utm"))?;
         let cmd_remove_all = BoxCommands::Remove(BoxRemoveArgs {
             name: "test/box".to_string(),
             provider: None,
@@ -793,7 +806,9 @@ pub mod tests {
             all_architectures: false,
         });
         let mut out4 = Vec::new();
-        assert!(execute(&cmd_remove_all, &mut out4).is_ok());
+        assert!(
+            execute_with_config(&cmd_remove_all, &mut out4, temp.path(), CloudClient::new).is_ok()
+        );
         assert!(
             !temp
                 .path()
@@ -802,118 +817,121 @@ pub mod tests {
                 .exists()
         );
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_outdated() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_outdated() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Outdated(mock_outdated_args());
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new).is_ok());
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("There are no installed boxes to check."));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_outdated_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_outdated_write_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Outdated(mock_outdated_args());
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
-        let _err = result.expect_err("operation should fail");
+        let result = execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new);
+        assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_update() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_update() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Update(mock_update_args());
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new).is_ok());
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("There are no installed boxes to update"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_update_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_update_write_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Update(mock_update_args());
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
-        let _err = result.expect_err("operation should fail");
+        let result = execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new);
+        assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_prune() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_prune() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Prune(mock_prune_args());
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new).is_ok());
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(output_str.trim(), "Box pruned successfully.");
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_prune_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_prune_write_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Prune(mock_prune_args());
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
-        let _err = result.expect_err("operation should fail");
+        let result = execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new);
+        assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_repackage() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_repackage() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Repackage(mock_repackage_args());
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_err());
+        assert!(execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_repackage_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_repackage_write_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let cmd = BoxCommands::Repackage(mock_repackage_args());
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_config(&cmd, &mut out, temp.path(), CloudClient::new);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_add_cloud_failure() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_add_cloud_failure() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let mut args = mock_add_args();
         args.name = "invalid/tag/for/cloud".to_string(); // not ending with .box or ://
         let cmd = BoxCommands::Add(args);
         let mut out = Vec::new();
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_config(&cmd, &mut out, temp.path(), || {
+            CloudClient::with_config(crate::cloud::CloudClientConfig {
+                base_url: "http://127.0.0.1:1".to_string(),
+                token: None,
+            })
+        });
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_prune_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_box_prune_error() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join(".vagrant.d");
-        std::fs::create_dir_all(&file_path).expect("operation should succeed");
+        std::fs::create_dir_all(&file_path)?;
         let boxes_file = file_path.join("boxes");
-        std::fs::write(&boxes_file, "not a dir").expect("operation should succeed");
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                file_path.to_str().expect("operation should succeed"),
-            );
-        }
+        std::fs::write(&boxes_file, "not a dir")?;
 
         let cmd = BoxCommands::Prune(mock_prune_args());
         let mut out = Vec::new();
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_config(&cmd, &mut out, &file_path, CloudClient::new);
         assert!(result.is_err());
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
@@ -927,8 +945,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_execute_box_add_cloud_paths() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_box_add_cloud_paths() -> Result<(), MigratoryError> {
         use flate2::Compression;
         use flate2::write::GzEncoder;
         use httpmock::prelude::*;
@@ -939,7 +956,7 @@ pub mod tests {
         {
             let enc = GzEncoder::new(&mut tar_gz, Compression::default());
             let mut tar = tar::Builder::new(enc);
-            tar.finish().expect("operation should succeed");
+            tar.finish()?;
         }
 
         let box_mock = server.mock(|when, then| {
@@ -969,11 +986,7 @@ pub mod tests {
             then.status(200).json_body(metadata_json_success);
         });
 
-        let temp = tempfile::tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var("VAGRANT_HOME", temp.path());
-        }
+        let temp = tempfile::tempdir()?;
 
         let mut args_success = mock_add_args();
         args_success.name = "test/box".to_string();
@@ -981,114 +994,72 @@ pub mod tests {
         let cmd_success = BoxCommands::Add(args_success);
 
         let mut out = Vec::new();
-        let result_success = execute(&cmd_success, &mut out);
+        let url = server.url("");
+        let result_success = execute_with_config(&cmd_success, &mut out, temp.path(), || {
+            CloudClient::with_config(crate::cloud::CloudClientConfig {
+                base_url: url.clone(),
+                token: None,
+            })
+        });
         assert!(result_success.is_ok(), "{:?}", result_success);
         metadata_mock.assert_calls(1);
         box_mock.assert_calls(1);
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod extra_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::cli::*;
     use httpmock::prelude::*;
     use std::fs;
     use tempfile::tempdir;
 
-    pub(crate) fn setup_fake_boxes(dir: &std::path::Path) {
+    /// Populates a temporary directory with fake box versions (`1.0.0` and `2.0.0`).
+    pub(crate) fn setup_fake_boxes(dir: &std::path::Path) -> Result<(), MigratoryError> {
         let boxes_dir = dir.join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
+        fs::create_dir_all(&boxes_dir)?;
         let box_path = boxes_dir.join("test-VAGRANTSLASH-box");
         let v1_dir = box_path.join("1.0.0").join("virtualbox");
         let v2_dir = box_path.join("2.0.0").join("virtualbox");
-        fs::create_dir_all(&v1_dir).expect("operation should succeed");
-        fs::create_dir_all(&v2_dir).expect("operation should succeed");
+        fs::create_dir_all(&v1_dir)?;
+        fs::create_dir_all(&v2_dir)?;
+        Ok(())
     }
 
     #[test]
-    fn test_list_with_boxes() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_list_with_boxes() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let cmd = BoxCommands::List(BoxListArgs { box_info: false });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
-        let output = String::from_utf8(out).expect("operation should succeed");
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
+        let output = String::from_utf8(out)?;
         assert!(output.contains("test/box (virtualbox, 1.0.0)"));
         assert!(output.contains("test/box (virtualbox, 2.0.0)"));
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_list_write_error_with_boxes() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_list_write_error_with_boxes() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let cmd = BoxCommands::List(BoxListArgs { box_info: false });
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut out = FailingWriter;
-        assert!(execute(&cmd, &mut out).is_err());
+        let mut out = super::tests::FailingWriter;
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_remove_success() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_remove_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let cmd = BoxCommands::Remove(BoxRemoveArgs {
             name: "test/box".to_string(),
@@ -1101,26 +1072,15 @@ mod extra_tests {
             all_architectures: false,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_remove_write_error() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_remove_write_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let cmd = BoxCommands::Remove(BoxRemoveArgs {
             name: "test/box".to_string(),
@@ -1132,36 +1092,16 @@ mod extra_tests {
             all_providers: false,
             all_architectures: false,
         });
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut out = FailingWriter;
-        assert!(execute(&cmd, &mut out).is_err());
+        let mut out = super::tests::FailingWriter;
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_outdated_global_false() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_outdated_global_false() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let cmd = BoxCommands::Outdated(BoxOutdatedArgs {
             global: false,
@@ -1172,33 +1112,19 @@ mod extra_tests {
             force: false,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
-        let output = String::from_utf8(out).expect("operation should succeed");
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
+        let output = String::from_utf8(out)?;
         assert!(output.contains("Box is outdated: false"));
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_outdated_global_true_with_updates() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_outdated_global_true_with_updates() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-        }
         let metadata_json = serde_json::json!({
             "name": "test/box",
             "description_markdown": "test box",
@@ -1224,35 +1150,29 @@ mod extra_tests {
             force: false,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
-        let output = String::from_utf8(out).expect("operation should succeed");
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut out, dir.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
+        let output = String::from_utf8(out)?;
         assert!(output.contains("Box 'test/box' is outdated! Local: 2.0.0, Remote: 3.0.0"));
         assert!(output.contains("Box is outdated: true"));
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_outdated_global_true_no_updates() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_outdated_global_true_no_updates() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-        }
         let metadata_json = serde_json::json!({
             "name": "test/box",
             "description_markdown": "test box",
@@ -1278,40 +1198,34 @@ mod extra_tests {
             force: false,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
-        let output = String::from_utf8(out).expect("operation should succeed");
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut out, dir.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
+        let output = String::from_utf8(out)?;
         assert!(output.contains("Box 'test/box' is up to date."));
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_update_with_updates() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_update_with_updates() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-        }
 
         let mut tar_gz = Vec::new();
         {
             let enc = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
             let mut tar = tar::Builder::new(enc);
-            tar.finish().expect("operation should succeed");
+            tar.finish()?;
         }
         let _box_mock = server.mock(|when, then| {
             when.method(GET).path("/box.box");
@@ -1345,7 +1259,16 @@ mod extra_tests {
             cert: None,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut out, dir.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
 
         // Check if v3.0.0 was downloaded
         let v3_dir = dir
@@ -1356,30 +1279,15 @@ mod extra_tests {
             .join("virtualbox");
         assert!(v3_dir.exists());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_update_no_updates() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_update_no_updates() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box",
@@ -1408,31 +1316,26 @@ mod extra_tests {
             cert: None,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
-        let output = String::from_utf8(out).expect("operation should succeed");
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut out, dir.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
+        let output = String::from_utf8(out)?;
         assert!(output.contains("No boxes were updated."));
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_repackage_success_cmd() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
-        setup_fake_boxes(dir.path());
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
-
-        // Add a fake file to be repackaged so tar doesn't fail if it requires content, wait actually BoxManager handles it.
+    fn test_repackage_success_cmd() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        setup_fake_boxes(dir.path())?;
 
         let cmd = BoxCommands::Repackage(BoxRepackageArgs {
             name: "test/box".to_string(),
@@ -1440,7 +1343,7 @@ mod extra_tests {
             version: "2.0.0".to_string(),
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
 
         let package_name = "package-test-VAGRANTSLASH-box-2.0.0-virtualbox.box";
         let dest_file = std::env::current_dir()
@@ -1449,21 +1352,12 @@ mod extra_tests {
         assert!(dest_file.exists());
         let _ = fs::remove_file(dest_file);
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod extra_tests2 {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::cli::*;
     use httpmock::prelude::*;
@@ -1471,17 +1365,14 @@ mod extra_tests2 {
     use tempfile::tempdir;
 
     #[test]
-    fn test_add_with_version_and_provider_match() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_add_with_version_and_provider_match() -> Result<(), MigratoryError> {
         let server = MockServer::start();
 
         let mut tar_gz = Vec::new();
         {
             let enc = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
             let mut tar = tar::Builder::new(enc);
-            tar.finish().expect("operation should succeed");
+            tar.finish()?;
         }
         let _box_mock = server.mock(|when, then| {
             when.method(GET).path("/box.box");
@@ -1504,14 +1395,7 @@ mod extra_tests2 {
             then.status(200).json_body(metadata_json);
         });
 
-        let temp = tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var(
-                "VAGRANT_HOME",
-                temp.path().to_str().expect("operation should succeed"),
-            );
-        }
+        let temp = tempdir()?;
 
         let mut args = super::tests::mock_add_args();
         args.name = "test/box".to_string();
@@ -1520,67 +1404,42 @@ mod extra_tests2 {
         let cmd = BoxCommands::Add(args);
 
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut out, temp.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_list_empty_boxes_dir() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_list_empty_boxes_dir() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed"); // Exists but is empty!
-
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+        fs::create_dir_all(&boxes_dir)?; // Exists but is empty!
 
         let cmd = BoxCommands::List(BoxListArgs { box_info: false });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
 
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut fail_out = FailingWriter;
-        assert!(execute(&cmd, &mut fail_out).is_err());
+        let mut fail_out = super::tests::FailingWriter;
+        assert!(execute_with_config(&cmd, &mut fail_out, dir.path(), CloudClient::new).is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_outdated_empty_version_dir() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_outdated_empty_version_dir() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         let box_path = boxes_dir.join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(&box_path).expect("operation should succeed"); // Box dir exists but has no versions
-
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+        fs::create_dir_all(&box_path)?; // Box dir exists but has no versions
 
         let cmd = BoxCommands::Outdated(BoxOutdatedArgs {
             global: true,
@@ -1591,32 +1450,20 @@ mod extra_tests2 {
             force: false,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_outdated_write_error_with_updates() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_outdated_write_error_with_updates() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         let box_path = boxes_dir.join("test-VAGRANTSLASH-box");
         let v1_dir = box_path.join("1.0.0").join("virtualbox");
-        fs::create_dir_all(&v1_dir).expect("operation should succeed");
+        fs::create_dir_all(&v1_dir)?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box",
@@ -1642,41 +1489,28 @@ mod extra_tests2 {
             cert: None,
             force: false,
         });
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut fail_out = FailingWriter;
-        assert!(execute(&cmd, &mut fail_out).is_err());
+        let mut fail_out = super::tests::FailingWriter;
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut fail_out, dir.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_err()
+        );
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_update_target_box_mismatch() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_update_target_box_mismatch() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         let box_path = boxes_dir.join("test-VAGRANTSLASH-box");
         let v1_dir = box_path.join("1.0.0").join("virtualbox");
-        fs::create_dir_all(&v1_dir).expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+        fs::create_dir_all(&v1_dir)?;
 
         let cmd = BoxCommands::Update(BoxUpdateArgs {
             box_name: Some("other/box".to_string()),
@@ -1689,29 +1523,17 @@ mod extra_tests2 {
             cert: None,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_update_empty_version_dir() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_update_empty_version_dir() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         let box_path = boxes_dir.join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(&box_path).expect("operation should succeed"); // Box dir exists but has no versions
-
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
+        fs::create_dir_all(&box_path)?; // Box dir exists but has no versions
 
         let cmd = BoxCommands::Update(BoxUpdateArgs {
             box_name: None,
@@ -1724,38 +1546,26 @@ mod extra_tests2 {
             cert: None,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_config(&cmd, &mut out, dir.path(), CloudClient::new).is_ok());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_update_with_provider_filter() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_update_with_provider_filter() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         let box_path = boxes_dir.join("test-VAGRANTSLASH-box");
         let v1_dir = box_path.join("1.0.0").join("virtualbox");
-        fs::create_dir_all(&v1_dir).expect("operation should succeed");
+        fs::create_dir_all(&v1_dir)?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
 
         let mut tar_gz = Vec::new();
         {
             let enc = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
             let mut tar = tar::Builder::new(enc);
-            tar.finish().expect("operation should succeed");
+            tar.finish()?;
         }
         let _box_mock = server.mock(|when, then| {
             when.method(GET).path("/box.box");
@@ -1789,24 +1599,23 @@ mod extra_tests2 {
             cert: None,
         });
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut out, dir.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod extra_tests3 {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::cli::*;
     use httpmock::prelude::*;
@@ -1814,25 +1623,15 @@ mod extra_tests3 {
     use tempfile::tempdir;
 
     #[test]
-    fn test_outdated_global_true_write_error() {
-        let _guard = super::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_outdated_global_true_write_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
+        fs::create_dir_all(&boxes_dir)?;
         let box_path = boxes_dir.join("test-VAGRANTSLASH-box");
         let v1_dir = box_path.join("1.0.0").join("virtualbox");
-        fs::create_dir_all(&v1_dir).expect("operation should succeed");
+        fs::create_dir_all(&v1_dir)?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var(
-                "VAGRANT_HOME",
-                dir.path().to_str().expect("operation should succeed"),
-            );
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box",
@@ -1859,56 +1658,41 @@ mod extra_tests3 {
             force: false,
         });
 
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "err"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut fail_out = FailingWriter;
-        assert!(execute(&cmd, &mut fail_out).is_err());
+        let mut fail_out = super::tests::FailingWriter;
+        let url = server.url("");
+        assert!(
+            execute_with_config(&cmd, &mut fail_out, dir.path(), || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_err()
+        );
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 }
+
 #[cfg(test)]
 mod extra_box_cmd_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use crate::cli::commands::box_cmd::tests::ENV_LOCK;
     use httpmock::MockServer;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_box_outdated_with_outdated_box() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-
-        let temp = tempdir().unwrap();
+    fn test_execute_box_outdated_with_outdated_box() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
-        fs::create_dir_all(&boxes_dir).unwrap();
+        fs::create_dir_all(&boxes_dir)?;
 
         // Create local box "hashicorp/bionic64" with version "1.0.0"
         let box_dir = boxes_dir.join("hashicorp-VAGRANTSLASH-bionic64");
-        fs::create_dir_all(box_dir.join("1.0.0")).unwrap();
-
-        unsafe { std::env::set_var("VAGRANT_HOME", &vagrant_home) };
+        fs::create_dir_all(box_dir.join("1.0.0"))?;
 
         let server = MockServer::start();
-        unsafe { std::env::set_var("VAGRANT_CLOUD_URL", server.base_url()) };
 
         let mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
@@ -1936,48 +1720,43 @@ mod extra_box_cmd_tests {
         let cmd = BoxCommands::Outdated(args);
 
         let mut out = Vec::new();
-        let result = execute(&cmd, &mut out);
+        let url = server.base_url();
+        let result = execute_with_config(&cmd, &mut out, &vagrant_home, || {
+            CloudClient::with_config(crate::cloud::CloudClientConfig {
+                base_url: url.clone(),
+                token: None,
+            })
+        });
 
         let output_str = String::from_utf8(out).unwrap_or_default();
-        println!("OUTPUT: {}", output_str);
 
         assert!(result.is_ok());
         assert!(output_str.contains("is outdated!"));
 
         mock.assert();
+        Ok(())
     }
 }
+
 #[cfg(test)]
 mod extra_box_cmd_tests_2 {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use crate::cli::commands::box_cmd::tests::{ENV_LOCK, FailingWriter};
+    use crate::cli::commands::box_cmd::tests::FailingWriter;
     use httpmock::MockServer;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_box_outdated_with_outdated_box_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-
-        let temp = tempdir().unwrap();
+    fn test_execute_box_outdated_with_outdated_box_write_error() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
-        fs::create_dir_all(&boxes_dir).unwrap();
+        fs::create_dir_all(&boxes_dir)?;
 
         let box_dir = boxes_dir.join("hashicorp-VAGRANTSLASH-bionic64");
-        fs::create_dir_all(box_dir.join("1.0.0")).unwrap();
-
-        unsafe { std::env::set_var("VAGRANT_HOME", &vagrant_home) };
+        fs::create_dir_all(box_dir.join("1.0.0"))?;
 
         let server = MockServer::start();
-        unsafe { std::env::set_var("VAGRANT_CLOUD_URL", server.base_url()) };
 
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
@@ -2005,21 +1784,21 @@ mod extra_box_cmd_tests_2 {
         let cmd = BoxCommands::Outdated(args);
 
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
+        let url = server.base_url();
+        let result = execute_with_config(&cmd, &mut out, &vagrant_home, || {
+            CloudClient::with_config(crate::cloud::CloudClientConfig {
+                base_url: url.clone(),
+                token: None,
+            })
+        });
 
         assert!(result.is_err());
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod missing_coverage_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::tests::*;
     use super::*;
     use crate::cli::*;
@@ -2029,12 +1808,9 @@ mod missing_coverage_tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_add_download_box_fails() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_add_download_box_fails() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box", "description_markdown": "Test", "short_description": "Test",
@@ -2058,34 +1834,37 @@ mod missing_coverage_tests {
         args.name = "test/box".to_string();
         args.provider = Some("virtualbox".to_string());
 
-        let res = execute(&BoxCommands::Add(args), &mut Vec::new());
+        let url = server.url("");
+        let res = execute_with_config(
+            &BoxCommands::Add(args),
+            &mut Vec::new(),
+            temp.path(),
+            || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            },
+        );
         assert!(res.is_err());
         metadata_mock.assert_calls(1);
         box_mock.assert_calls(1);
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_update_add_box_fails_and_loop_miss() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_update_add_box_fails_and_loop_miss() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
+        fs::create_dir_all(&boxes_dir)?;
         fs::create_dir_all(
             boxes_dir
                 .join("test-VAGRANTSLASH-box")
                 .join("1.0.0")
                 .join("virtualbox"),
-        )
-        .unwrap();
+        )?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box", "description_markdown": "Test", "short_description": "Test",
@@ -2109,23 +1888,28 @@ mod missing_coverage_tests {
         args.box_name = Some("test/box".to_string());
         args.provider = Some("virtualbox".to_string());
 
-        let res = execute(&BoxCommands::Update(args), &mut Vec::new());
+        let url = server.url("");
+        let res = execute_with_config(
+            &BoxCommands::Update(args),
+            &mut Vec::new(),
+            dir.path(),
+            || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            },
+        );
         assert!(res.is_err());
         metadata_mock.assert_calls(1);
         box_mock.assert_calls(1);
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_add_provider_not_found() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_execute_add_provider_not_found() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box", "description_markdown": "Test", "short_description": "Test",
@@ -2140,33 +1924,36 @@ mod missing_coverage_tests {
         let mut args = mock_add_args();
         args.name = "test/box".to_string();
         args.provider = Some("vmware".to_string());
-        let res = execute(&BoxCommands::Add(args), &mut Vec::new());
+        let url = server.url("");
+        let res = execute_with_config(
+            &BoxCommands::Add(args),
+            &mut Vec::new(),
+            temp.path(),
+            || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            },
+        );
         assert!(res.is_err());
         metadata_mock.assert_calls(1);
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_update_provider_not_found() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_update_provider_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
+        fs::create_dir_all(&boxes_dir)?;
         fs::create_dir_all(
             boxes_dir
                 .join("test-VAGRANTSLASH-box")
                 .join("1.0.0")
                 .join("virtualbox"),
-        )
-        .unwrap();
+        )?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box", "description_markdown": "Test", "short_description": "Test",
@@ -2181,34 +1968,36 @@ mod missing_coverage_tests {
         let mut args = mock_update_args();
         args.box_name = Some("test/box".to_string());
         args.provider = Some("vmware".to_string());
-        let res = execute(&BoxCommands::Update(args), &mut Vec::new());
+        let url = server.url("");
+        let res = execute_with_config(
+            &BoxCommands::Update(args),
+            &mut Vec::new(),
+            dir.path(),
+            || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            },
+        );
         assert!(res.is_ok());
         metadata_mock.assert_calls(1);
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_outdated_global_true_uptodate_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_outdated_global_true_uptodate_write_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
+        fs::create_dir_all(&boxes_dir)?;
         fs::create_dir_all(
             boxes_dir
                 .join("test-VAGRANTSLASH-box")
                 .join("1.0.0")
                 .join("virtualbox"),
-        )
-        .unwrap();
+        )?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url(""));
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
 
         let metadata_json = serde_json::json!({
             "name": "test/box", "description_markdown": "Test", "short_description": "Test",
@@ -2220,8 +2009,9 @@ mod missing_coverage_tests {
         });
 
         let mut fail_out = FailingWriter;
+        let url = server.url("");
         assert!(
-            execute(
+            execute_with_config(
                 &BoxCommands::Outdated(BoxOutdatedArgs {
                     global: true,
                     insecure: false,
@@ -2230,33 +2020,30 @@ mod missing_coverage_tests {
                     cert: None,
                     force: false,
                 }),
-                &mut fail_out
+                &mut fail_out,
+                dir.path(),
+                || CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
             )
             .is_err()
         );
 
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_outdated_with_up_to_date_box() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-
-        let temp = tempdir().unwrap();
+    fn test_execute_box_outdated_with_up_to_date_box() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
-        fs::create_dir_all(&boxes_dir).unwrap();
+        fs::create_dir_all(&boxes_dir)?;
 
         let box_dir = boxes_dir.join("hashicorp-VAGRANTSLASH-bionic64");
-        fs::create_dir_all(box_dir.join("2.0.0")).unwrap();
-
-        unsafe { std::env::set_var("VAGRANT_HOME", &vagrant_home) };
+        fs::create_dir_all(box_dir.join("2.0.0"))?;
 
         let server = MockServer::start();
-        unsafe { std::env::set_var("VAGRANT_CLOUD_URL", server.base_url()) };
 
         let mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
@@ -2288,62 +2075,73 @@ mod missing_coverage_tests {
         };
         let cmd = BoxCommands::Outdated(args);
 
-        assert!(execute(&cmd, &mut out).is_ok());
-
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        let url = server.base_url();
+        assert!(
+            execute_with_config(&cmd, &mut out, &vagrant_home, || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
 
         mock.assert();
-        let output_str = String::from_utf8(out).unwrap();
+        let output_str = String::from_utf8(out)?;
         assert!(output_str.contains("is up to date."));
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod final_box_coverage_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::cli::commands::box_cmd::tests::{
-        ENV_LOCK, mock_add_args, mock_outdated_args, mock_update_args,
+        mock_add_args, mock_outdated_args, mock_update_args,
     };
     use httpmock::prelude::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_client_new_errors() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
+    fn test_client_new_errors() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let boxes_dir = temp.path().join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", temp.path());
-            std::env::set_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR", "1");
-        }
+        fs::create_dir_all(&boxes_dir)?;
         let mut out = Vec::new();
-        assert!(execute(&BoxCommands::Add(mock_add_args()), &mut out).is_err());
-        assert!(execute(&BoxCommands::Outdated(mock_outdated_args()), &mut out).is_err());
-        assert!(execute(&BoxCommands::Update(mock_update_args()), &mut out).is_err());
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR");
-        }
+        assert!(
+            execute_with_config(
+                &BoxCommands::Add(mock_add_args()),
+                &mut out,
+                temp.path(),
+                || { Err(MigratoryError::Generic("client err".to_string())) }
+            )
+            .is_err()
+        );
+        assert!(
+            execute_with_config(
+                &BoxCommands::Outdated(mock_outdated_args()),
+                &mut out,
+                temp.path(),
+                || Err(MigratoryError::Generic("client err".to_string()))
+            )
+            .is_err()
+        );
+        assert!(
+            execute_with_config(
+                &BoxCommands::Update(mock_update_args()),
+                &mut out,
+                temp.path(),
+                || Err(MigratoryError::Generic("client err".to_string()))
+            )
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_box_add_version_loop_miss() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
+    fn test_box_add_version_loop_miss() -> Result<(), MigratoryError> {
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.base_url());
-        }
 
         server.mock(|when, then| {
             when.method(GET).path("/boxes/test/box");
@@ -2373,31 +2171,28 @@ mod final_box_coverage_tests {
         args.box_version = Some("2.0.0".to_string());
         args.provider = Some("virtualbox".to_string());
 
-        let temp = tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", temp.path());
-        }
+        let temp = tempdir()?;
         let mut out = Vec::new();
-        let _ = execute(&BoxCommands::Add(args), &mut out);
+        let url = server.base_url();
+        let _ = execute_with_config(&BoxCommands::Add(args), &mut out, temp.path(), || {
+            CloudClient::with_config(crate::cloud::CloudClientConfig {
+                base_url: url.clone(),
+                token: None,
+            })
+        });
+        Ok(())
     }
 
     #[test]
-    fn test_outdated_version_comparisons_and_metadata_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
+    fn test_outdated_version_comparisons_and_metadata_error() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
         let box_dir = boxes_dir.join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(box_dir.join("2.0.0")).expect("operation should succeed");
-        fs::create_dir_all(box_dir.join("1.0.0")).expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", &vagrant_home);
-        }
+        fs::create_dir_all(box_dir.join("2.0.0"))?;
+        fs::create_dir_all(box_dir.join("1.0.0"))?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.base_url());
-        }
 
         server.mock(|when, then| {
             when.method(GET).path("/boxes/test/box");
@@ -2415,36 +2210,55 @@ mod final_box_coverage_tests {
         let mut args = mock_outdated_args();
         args.global = true;
         let mut out = Vec::new();
-        assert!(execute(&BoxCommands::Outdated(args.clone()), &mut out).is_ok());
+        let url = server.base_url();
+        assert!(
+            execute_with_config(
+                &BoxCommands::Outdated(args.clone()),
+                &mut out,
+                &vagrant_home,
+                || {
+                    CloudClient::with_config(crate::cloud::CloudClientConfig {
+                        base_url: url.clone(),
+                        token: None,
+                    })
+                }
+            )
+            .is_ok()
+        );
 
         let server_err = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server_err.base_url());
-        }
         server_err.mock(|when, then| {
             when.method(GET).path("/boxes/test/box");
             then.status(404);
         });
-        assert!(execute(&BoxCommands::Outdated(args), &mut out).is_ok());
+        let url_err = server_err.base_url();
+        assert!(
+            execute_with_config(
+                &BoxCommands::Outdated(args),
+                &mut out,
+                &vagrant_home,
+                || {
+                    CloudClient::with_config(crate::cloud::CloudClientConfig {
+                        base_url: url_err.clone(),
+                        token: None,
+                    })
+                }
+            )
+            .is_ok()
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_update_version_comparisons_and_download_fail() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
+    fn test_update_version_comparisons_and_download_fail() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
         let box_dir = boxes_dir.join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(box_dir.join("2.0.0")).expect("operation should succeed");
-        fs::create_dir_all(box_dir.join("1.0.0")).expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", &vagrant_home);
-        }
+        fs::create_dir_all(box_dir.join("2.0.0"))?;
+        fs::create_dir_all(box_dir.join("1.0.0"))?;
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.base_url());
-        }
 
         server.mock(|when, then| {
             when.method(GET).path("/boxes/test/box");
@@ -2471,41 +2285,63 @@ mod final_box_coverage_tests {
 
         let args = mock_update_args();
         let mut out = Vec::new();
-        assert!(execute(&BoxCommands::Update(args.clone()), &mut out).is_err());
+        let url = server.base_url();
+        assert!(
+            execute_with_config(
+                &BoxCommands::Update(args.clone()),
+                &mut out,
+                &vagrant_home,
+                || {
+                    CloudClient::with_config(crate::cloud::CloudClientConfig {
+                        base_url: url.clone(),
+                        token: None,
+                    })
+                }
+            )
+            .is_err()
+        );
 
         let server_err = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server_err.base_url());
-        }
         server_err.mock(|when, then| {
             when.method(GET).path("/boxes/test/box");
             then.status(404);
         });
-        assert!(execute(&BoxCommands::Update(args), &mut out).is_ok());
+        let url_err = server_err.base_url();
+        assert!(
+            execute_with_config(&BoxCommands::Update(args), &mut out, &vagrant_home, || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url_err.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_writeln_failures_in_outdated_update_repackage() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
+    fn test_writeln_failures_in_outdated_update_repackage() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", &vagrant_home);
-        }
+        fs::create_dir_all(&boxes_dir)?;
 
         let mut out = tests::FailingWriter;
         let mut args = mock_outdated_args();
         args.global = false;
-        assert!(execute(&BoxCommands::Outdated(args), &mut out).is_err());
+        assert!(
+            execute_with_config(
+                &BoxCommands::Outdated(args),
+                &mut out,
+                &vagrant_home,
+                CloudClient::new
+            )
+            .is_err()
+        );
 
         let box_dir = boxes_dir.join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(box_dir.join("1.0.0")).expect("operation should succeed");
+        fs::create_dir_all(box_dir.join("1.0.0"))?;
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.base_url());
-        }
         server.mock(|when, then| {
             when.method(GET).path("/boxes/test/box");
             then.status(404);
@@ -2513,80 +2349,119 @@ mod final_box_coverage_tests {
         let mut out2 = tests::FailingWriter;
         let mut args2 = mock_outdated_args();
         args2.global = true;
-        assert!(execute(&BoxCommands::Outdated(args2), &mut out2).is_err());
+        let url = server.base_url();
+        assert!(
+            execute_with_config(
+                &BoxCommands::Outdated(args2),
+                &mut out2,
+                &vagrant_home,
+                || {
+                    CloudClient::with_config(crate::cloud::CloudClientConfig {
+                        base_url: url.clone(),
+                        token: None,
+                    })
+                }
+            )
+            .is_err()
+        );
 
         let mut out3 = tests::FailingWriter;
-        assert!(execute(&BoxCommands::Update(mock_update_args()), &mut out3).is_err());
+        assert!(
+            execute_with_config(
+                &BoxCommands::Update(mock_update_args()),
+                &mut out3,
+                &vagrant_home,
+                || CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            )
+            .is_err()
+        );
 
-        let temp_rep = tempdir().expect("operation should succeed");
-        super::extra_tests::setup_fake_boxes(temp_rep.path());
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", temp_rep.path());
-        }
+        let temp_rep = tempdir()?;
+        super::extra_tests::setup_fake_boxes(temp_rep.path())?;
         let mut out4 = tests::FailingWriter;
         let rep_args = crate::cli::BoxRepackageArgs {
             name: "test/box".to_string(),
             provider: "virtualbox".to_string(),
             version: "1.0.0".to_string(),
         };
-        assert!(execute(&BoxCommands::Repackage(rep_args), &mut out4).is_err());
+        assert!(
+            execute_with_config(
+                &BoxCommands::Repackage(rep_args),
+                &mut out4,
+                temp_rep.path(),
+                CloudClient::new
+            )
+            .is_err()
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_permission_denied_branches() {
+    fn test_permission_denied_branches() -> Result<(), MigratoryError> {
         use std::os::unix::fs::PermissionsExt;
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
         let box_dir = boxes_dir.join("test-VAGRANTSLASH-box");
         let ver_dir = box_dir.join("1.0.0");
         let prov_dir = ver_dir.join("virtualbox");
-        fs::create_dir_all(&prov_dir).expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", &vagrant_home);
-        }
+        fs::create_dir_all(&prov_dir)?;
 
-        fs::set_permissions(&box_dir, fs::Permissions::from_mode(0o444))
-            .expect("operation should succeed");
+        fs::set_permissions(&box_dir, fs::Permissions::from_mode(0o444))?;
         let mut out = Vec::new();
         let remove_args = crate::cli::BoxRemoveArgs {
             name: "test/box".to_string(),
             force: true,
             ..Default::default()
         };
-        let res_remove = execute(&BoxCommands::Remove(remove_args), &mut out);
-        fs::set_permissions(&box_dir, fs::Permissions::from_mode(0o755))
-            .expect("operation should succeed");
+        let res_remove = execute_with_config(
+            &BoxCommands::Remove(remove_args),
+            &mut out,
+            &vagrant_home,
+            CloudClient::new,
+        );
+        fs::set_permissions(&box_dir, fs::Permissions::from_mode(0o755))?;
         assert!(res_remove.is_err());
 
-        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o000))
-            .expect("operation should succeed");
+        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o000))?;
         let mut out = Vec::new();
-        let _ = execute(&BoxCommands::List(Default::default()), &mut out);
-        let _ = execute(&BoxCommands::Outdated(mock_outdated_args()), &mut out);
-        let _ = execute(&BoxCommands::Update(mock_update_args()), &mut out);
-        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o755))
-            .expect("operation should succeed");
+        let _ = execute_with_config(
+            &BoxCommands::List(crate::cli::BoxListArgs::default()),
+            &mut out,
+            &vagrant_home,
+            CloudClient::new,
+        );
+        let _ = execute_with_config(
+            &BoxCommands::Outdated(mock_outdated_args()),
+            &mut out,
+            &vagrant_home,
+            CloudClient::new,
+        );
+        let _ = execute_with_config(
+            &BoxCommands::Update(mock_update_args()),
+            &mut out,
+            &vagrant_home,
+            CloudClient::new,
+        );
+        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o755))?;
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_outdated_with_empty_remote_versions() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-
-        let temp = tempdir().expect("operation should succeed");
+    fn test_execute_box_outdated_with_empty_remote_versions() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
         let boxes_dir = vagrant_home.join("boxes");
-        fs::create_dir_all(&boxes_dir).expect("operation should succeed");
+        fs::create_dir_all(&boxes_dir)?;
 
         let box_dir = boxes_dir.join("hashicorp-VAGRANTSLASH-bionic64");
-        fs::create_dir_all(box_dir.join("1.0.0")).expect("operation should succeed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", &vagrant_home) };
+        fs::create_dir_all(box_dir.join("1.0.0"))?;
 
         let server = MockServer::start();
-        unsafe { std::env::set_var("VAGRANT_CLOUD_URL", server.base_url()) };
 
         let _mock = server.mock(|when, then| {
             when.method(GET).path("/boxes/hashicorp/bionic64");
@@ -2603,47 +2478,73 @@ mod final_box_coverage_tests {
         let cmd = BoxCommands::Outdated(args);
 
         let mut out = Vec::new();
-        let result = execute(&cmd, &mut out);
+        let url = server.base_url();
+        let result = execute_with_config(&cmd, &mut out, &vagrant_home, || {
+            CloudClient::with_config(crate::cloud::CloudClientConfig {
+                base_url: url.clone(),
+                token: None,
+            })
+        });
         assert!(result.is_ok());
         let out_str = String::from_utf8_lossy(&out);
         assert!(out_str.contains("is up to date"));
+
+        // Also test when remote version is newer than local version
+        let server_newer = MockServer::start();
+        let _mock_newer = server_newer.mock(|when, then| {
+            when.method(GET).path("/boxes/hashicorp/bionic64");
+            then.status(200).json_body(serde_json::json!({
+                "description_markdown": "Test Box",
+                "short_description": "Short",
+                "name": "hashicorp/bionic64",
+                "versions": [{"version": "2.0.0", "status": "active", "description_html": "", "description_markdown": "", "providers": []}]
+            }));
+        });
+        let mut out_newer = Vec::new();
+        let url_newer = server_newer.base_url();
+        assert!(
+            execute_with_config(&cmd, &mut out_newer, &vagrant_home, || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url_newer.clone(),
+                    token: None,
+                })
+            })
+            .is_ok()
+        );
+        assert!(String::from_utf8_lossy(&out_newer).contains("is outdated!"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_add_local_box_file_suffix() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-
-        let temp = tempdir().expect("operation should succeed");
+    fn test_execute_box_add_local_box_file_suffix() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
-        fs::create_dir_all(&vagrant_home).expect("operation should succeed");
+        fs::create_dir_all(&vagrant_home)?;
 
         let box_file = temp.path().join("local_package.box");
-        fs::write(&box_file, "dummy content").expect("operation should succeed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", &vagrant_home) };
+        fs::write(&box_file, "dummy content")?;
 
         let mut args = mock_add_args();
         args.name = box_file.to_string_lossy().to_string();
         let cmd = BoxCommands::Add(args);
 
         let mut out = Vec::new();
-        let _ = execute(&cmd, &mut out);
+        let _ = execute_with_config(&cmd, &mut out, &vagrant_home, CloudClient::new);
+        Ok(())
     }
 
     #[test]
-    fn test_execute_box_add_http_url() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-
-        let temp = tempdir().expect("operation should succeed");
+    fn test_execute_box_add_http_url() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let vagrant_home = temp.path().join(".vagrant.d");
-        fs::create_dir_all(&vagrant_home).expect("operation should succeed");
-        unsafe { std::env::set_var("VAGRANT_HOME", &vagrant_home) };
+        fs::create_dir_all(&vagrant_home)?;
 
         let mut args = mock_add_args();
         args.name = "http://127.0.0.1:9/box.box".to_string();
         let cmd = BoxCommands::Add(args);
 
         let mut out = Vec::new();
-        let _ = execute(&cmd, &mut out);
+        let _ = execute_with_config(&cmd, &mut out, &vagrant_home, CloudClient::new);
+        Ok(())
     }
 }

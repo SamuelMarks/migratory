@@ -23,21 +23,16 @@ use std::path::Path;
 ///
 /// Returns a `MigratoryError` if the Vagrantfile does not exist or if it fails evaluation.
 pub fn execute(cwd: &Path, args: &ValidateArgs) -> Result<(), MigratoryError> {
-    let path = cwd.join("Vagrantfile");
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
-
     if args.ignore_provider {
         println!("Validating Vagrantfile (ignoring provider validation)...");
     }
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    match config::evaluate_vagrantfile(path_str) {
+    match config::load_environment_config(cwd) {
         Ok(_) => {
             println!("Vagrantfile validated successfully.");
             Ok(())
         }
+        Err(MigratoryError::NotFound(e)) => Err(MigratoryError::NotFound(e)),
         Err(e) => {
             println!("Vagrantfile validation failed.");
             Err(e)
@@ -47,20 +42,13 @@ pub fn execute(cwd: &Path, args: &ValidateArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_validate_missing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_validate_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = ValidateArgs {
             ignore_provider: false,
@@ -68,36 +56,36 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_validate_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_validate_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write a mock vagrantfile so it exists
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = ValidateArgs {
             ignore_provider: true,
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_validate_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_validate_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write invalid ruby to make parsing fail
-        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")
-            .expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")?;
 
         let args = ValidateArgs {
             ignore_provider: false,
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 }

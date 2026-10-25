@@ -28,7 +28,32 @@ pub fn convert_disk(
     dst_disk: &Path,
     target_fmt: &str,
 ) -> Result<(), MigratoryError> {
-    let status = std::process::Command::new("qemu-img")
+    convert_disk_with("qemu-img", src_disk, dst_disk, target_fmt)
+}
+
+/// Converts a disk image to the target format using a customizable `qemu-img` binary or fallback copy.
+///
+/// # Arguments
+///
+/// * `qemu_img_bin` - Path or binary name for `qemu-img`.
+/// * `src_disk` - Path to the source virtual disk file.
+/// * `dst_disk` - Path to the destination virtual disk file.
+/// * `target_fmt` - Target format string (e.g. `"qcow2"` or `"vmdk"`).
+///
+/// # Returns
+///
+/// Returns `Ok(())` on successful conversion or fallback copy.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the disk conversion fails.
+pub fn convert_disk_with(
+    qemu_img_bin: &str,
+    src_disk: &Path,
+    dst_disk: &Path,
+    target_fmt: &str,
+) -> Result<(), MigratoryError> {
+    let status = std::process::Command::new(qemu_img_bin)
         .arg("convert")
         .arg("-O")
         .arg(target_fmt)
@@ -110,6 +135,30 @@ pub fn find_source_provider_dir(
 ///
 /// Returns a `MigratoryError` if the box cannot be mutated.
 pub fn execute(args: &MutateArgs) -> Result<(), MigratoryError> {
+    let home_dir = std::env::var("VAGRANT_HOME").unwrap_or_else(|_| ".vagrant.d".to_string());
+    execute_with_config(args, Path::new(&home_dir), "qemu-img")
+}
+
+/// Executes the `mutate` command with explicit Vagrant home directory and `qemu-img` binary path.
+///
+/// # Arguments
+///
+/// * `args` - The parsed arguments for the `mutate` command.
+/// * `vagrant_home` - Base directory for Vagrant global state.
+/// * `qemu_img_bin` - Path or binary name for `qemu-img`.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the box cannot be mutated.
+pub fn execute_with_config(
+    args: &MutateArgs,
+    vagrant_home: &Path,
+    qemu_img_bin: &str,
+) -> Result<(), MigratoryError> {
     let box_name = match &args.box_name {
         Some(name) => name,
         None => return Err(MigratoryError::Generic("Box name required".to_string())),
@@ -125,9 +174,7 @@ pub fn execute(args: &MutateArgs) -> Result<(), MigratoryError> {
 
     println!("Extracting box '{}' to a temporary directory...", box_name);
 
-    let home_dir = std::env::var("VAGRANT_HOME").unwrap_or_else(|_| ".vagrant.d".to_string());
-    let pb = PathBuf::from(home_dir);
-    let manager = crate::box_manager::BoxManager::new(&pb);
+    let manager = crate::box_manager::BoxManager::new(vagrant_home);
     let safe_name = box_name.replace('/', "-VAGRANTSLASH-");
     let box_dir = manager.global_boxes_dir.join(&safe_name);
     if !box_dir.exists() {
@@ -177,7 +224,7 @@ pub fn execute(args: &MutateArgs) -> Result<(), MigratoryError> {
 
         if let Some(src) = source_disk {
             let dst = dest_dir.join(target_disk_name);
-            convert_disk(&src, &dst, target_fmt)?;
+            convert_disk_with(qemu_img_bin, &src, &dst, target_fmt)?;
         }
 
         // Write converted metadata.json
@@ -213,28 +260,15 @@ pub fn execute(args: &MutateArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_mutate() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_dir = dir.path().join("boxes").join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(&box_dir).expect("create dir failed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        fs::create_dir_all(&box_dir)?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -242,42 +276,32 @@ mod tests {
             input_provider: None,
             force_virtio: true,
         };
-        let result = execute(&args);
-
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_mutate_with_actual_files() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate_with_actual_files() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let source_dir = dir
             .path()
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("1.0.0")
             .join("virtualbox");
-        fs::create_dir_all(&source_dir).expect("create dir failed");
+        fs::create_dir_all(&source_dir)?;
 
-        fs::write(source_dir.join("box.ovf"), "<ovf/>").expect("write ovf failed");
-        fs::write(source_dir.join("box-disk1.vmdk"), "dummy-vmdk-bytes")
-            .expect("write disk failed");
+        fs::write(source_dir.join("box.ovf"), "<ovf/>")?;
+        fs::write(source_dir.join("box-disk1.vmdk"), "dummy-vmdk-bytes")?;
         fs::write(
             source_dir.join("metadata.json"),
             r#"{"provider": "virtualbox"}"#,
-        )
-        .expect("write metadata failed");
+        )?;
         fs::write(
             source_dir.join("Vagrantfile"),
             "Vagrant.configure(\"2\") do |config|\n  config.vm.provider :virtualbox\nend\n",
-        )
-        .expect("write vagrantfile failed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        )?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -285,9 +309,7 @@ mod tests {
             input_provider: Some("virtualbox".to_string()),
             force_virtio: true,
         };
-        let result = execute(&args);
-
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_ok());
 
         let mutated_dir = dir
@@ -300,18 +322,14 @@ mod tests {
         assert!(mutated_dir.join("metadata.json").exists());
         assert!(mutated_dir.join("box.img").exists());
         assert!(mutated_dir.join("Vagrantfile").exists());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_mutate_no_force() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate_no_force() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_dir = dir.path().join("boxes").join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(&box_dir).expect("create dir failed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        fs::create_dir_all(&box_dir)?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -319,20 +337,13 @@ mod tests {
             input_provider: None,
             force_virtio: false,
         };
-        let result = execute(&args);
-
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
     fn test_execute_mutate_no_env() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
         let args = MutateArgs {
             box_name: Some("missing/box".to_string()),
             destination_provider: Some("libvirt".to_string()),
@@ -344,13 +355,8 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_mutate_box_not_found() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+    fn test_execute_mutate_box_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
 
         let args = MutateArgs {
             box_name: Some("missing/box".to_string()),
@@ -358,18 +364,13 @@ mod tests {
             input_provider: None,
             force_virtio: false,
         };
-        let result = execute(&args);
-
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
     fn test_execute_mutate_missing_args() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
         let args = MutateArgs {
             box_name: None,
             destination_provider: None,
@@ -382,10 +383,6 @@ mod tests {
 
     #[test]
     fn test_execute_mutate_missing_dest() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
             destination_provider: None,
@@ -397,104 +394,83 @@ mod tests {
     }
 
     #[test]
-    fn test_find_source_provider_dir_nonexistent() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_find_source_provider_dir_nonexistent() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let non_existent = dir.path().join("does-not-exist");
-        let res = find_source_provider_dir(&non_existent, None);
-        assert!(res.is_ok());
-        assert!(res.expect("operation should succeed").is_none());
+        let res = find_source_provider_dir(&non_existent, None)?;
+        assert!(res.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_find_source_provider_dir_branches() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_find_source_provider_dir_branches() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_dir = dir.path().join("my-box");
         let ver_dir = box_dir.join("1.0.0");
         let prov_dir = ver_dir.join("virtualbox");
-        fs::create_dir_all(&prov_dir).expect("mkdir failed");
+        fs::create_dir_all(&prov_dir)?;
 
         // Add stray files that are not directories
-        fs::write(box_dir.join("stray_file.txt"), "stray").expect("write failed");
-        fs::write(ver_dir.join("stray_file.txt"), "stray").expect("write failed");
+        fs::write(box_dir.join("stray_file.txt"), "stray")?;
+        fs::write(ver_dir.join("stray_file.txt"), "stray")?;
 
         // requested_input_provider is None -> matches first provider
-        let res_none = find_source_provider_dir(&box_dir, None);
-        assert!(res_none.is_ok());
-        assert!(res_none.expect("operation should succeed").is_some());
+        let res_none = find_source_provider_dir(&box_dir, None)?;
+        assert!(res_none.is_some());
 
         // requested_input_provider does not match
-        let res_other = find_source_provider_dir(&box_dir, Some("vmware"));
-        assert!(res_other.is_ok());
-        assert!(res_other.expect("operation should succeed").is_none());
+        let res_other = find_source_provider_dir(&box_dir, Some("vmware"))?;
+        assert!(res_other.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_convert_disk_paths() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_convert_disk_paths() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let src_disk = dir.path().join("src.vmdk");
         let dst_disk = dir.path().join("dst.qcow2");
-        fs::write(&src_disk, "dummy disk bytes").expect("write failed");
+        fs::write(&src_disk, "dummy disk bytes")?;
 
-        let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&bin_dir).expect("mkdir failed");
+        let _ = convert_disk(&src_disk, &dst_disk, "qcow2");
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        // 0. qemu-img succeeds
+        let res_ok = convert_disk_with("echo", &src_disk, &dst_disk, "qcow2");
+        assert!(res_ok.is_ok());
 
         // 1. qemu-img fails with non-zero exit code
-        let fail_script = bin_dir.join("qemu-img");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::write(&fail_script, "#!/bin/sh\nexit 1\n").expect("write failed");
-            fs::set_permissions(&fail_script, fs::Permissions::from_mode(0o755))
-                .expect("chmod failed");
-        }
-        #[cfg(windows)]
-        {
-            let fail_bat = bin_dir.join("qemu-img.bat");
-            fs::write(&fail_bat, "@exit 1\n").expect("write failed");
-        }
-        unsafe { std::env::set_var("PATH", &bin_dir) };
-        let res_fail = convert_disk(&src_disk, &dst_disk, "qcow2");
+        let res_fail = convert_disk_with("false", &src_disk, &dst_disk, "qcow2");
         assert!(res_fail.is_err());
 
         // 2. qemu-img binary not found -> fallback copy
-        let empty_bin = dir.path().join("empty_bin");
-        fs::create_dir_all(&empty_bin).expect("mkdir failed");
-        unsafe { std::env::set_var("PATH", &empty_bin) };
-        let res_fallback = convert_disk(&src_disk, &dst_disk, "qcow2");
+        let res_fallback =
+            convert_disk_with("nonexistent_qemu_img_xyz", &src_disk, &dst_disk, "qcow2");
         assert!(res_fallback.is_ok());
         assert!(dst_disk.exists());
 
         // 3. Fallback copy fails (source file does not exist)
-        let res_copy_err = convert_disk(Path::new("/nonexistent/disk.vmdk"), &dst_disk, "qcow2");
-        unsafe { std::env::set_var("PATH", &old_path) };
+        let res_copy_err = convert_disk_with(
+            "nonexistent_qemu_img_xyz",
+            Path::new("/nonexistent/disk.vmdk"),
+            &dst_disk,
+            "qcow2",
+        );
         assert!(res_copy_err.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_mutate_to_virtualbox_without_vagrantfile() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate_to_virtualbox_without_vagrantfile() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let source_dir = dir
             .path()
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("1.0.0")
             .join("libvirt");
-        fs::create_dir_all(&source_dir).expect("create dir failed");
+        fs::create_dir_all(&source_dir)?;
 
         // Use a .qcow2 disk file to test extension matching
-        fs::write(source_dir.join("box.qcow2"), "dummy-qcow2-bytes").expect("write disk failed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        fs::write(source_dir.join("box.qcow2"), "dummy-qcow2-bytes")?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -502,9 +478,7 @@ mod tests {
             input_provider: Some("libvirt".to_string()),
             force_virtio: false,
         };
-        let result = execute(&args);
-
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_ok());
 
         let mutated_dir = dir
@@ -517,29 +491,23 @@ mod tests {
         assert!(mutated_dir.join("metadata.json").exists());
         assert!(mutated_dir.join("box-disk1.vmdk").exists());
         assert!(mutated_dir.join("Vagrantfile").exists());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_mutate_to_qemu_with_force_virtio() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate_to_qemu_with_force_virtio() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let source_dir = dir
             .path()
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("1.0.0")
             .join("virtualbox");
-        fs::create_dir_all(&source_dir).expect("create dir failed");
+        fs::create_dir_all(&source_dir)?;
         fs::write(
             source_dir.join("Vagrantfile"),
             "Vagrant.configure(\"2\") do |config|\nend\n",
-        )
-        .expect("write failed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        )?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -547,48 +515,22 @@ mod tests {
             input_provider: None,
             force_virtio: true,
         };
-        let result = execute(&args);
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_mutate_convert_disk_failure() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate_convert_disk_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let source_dir = dir
             .path()
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("1.0.0")
             .join("virtualbox");
-        fs::create_dir_all(&source_dir).expect("create dir failed");
-        fs::write(source_dir.join("box-disk1.vmdk"), "dummy").expect("write failed");
-
-        let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&bin_dir).expect("mkdir failed");
-        let fail_script = bin_dir.join("qemu-img");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::write(&fail_script, "#!/bin/sh\nexit 1\n").expect("write failed");
-            fs::set_permissions(&fail_script, fs::Permissions::from_mode(0o755))
-                .expect("chmod failed");
-        }
-        #[cfg(windows)]
-        {
-            let fail_bat = bin_dir.join("qemu-img.bat");
-            fs::write(&fail_bat, "@exit 1\n").expect("write failed");
-        }
-
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        unsafe {
-            std::env::set_var("PATH", &bin_dir);
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
+        fs::create_dir_all(&source_dir)?;
+        fs::write(source_dir.join("box-disk1.vmdk"), "dummy")?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -596,88 +538,76 @@ mod tests {
             input_provider: None,
             force_virtio: false,
         };
-        let result = execute(&args);
-        unsafe {
-            std::env::set_var("PATH", &old_path);
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        let result = execute_with_config(&args, dir.path(), "false");
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_find_source_provider_dir_not_a_directory() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_find_source_provider_dir_not_a_directory() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let file_as_box_dir = dir.path().join("file_box");
-        fs::write(&file_as_box_dir, "not a dir").expect("write failed");
+        fs::write(&file_as_box_dir, "not a dir")?;
         let res = find_source_provider_dir(&file_as_box_dir, None);
         assert!(res.is_err());
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_find_source_provider_dir_unreadable_version() {
+    fn test_find_source_provider_dir_unreadable_version() -> Result<(), MigratoryError> {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir().expect("tempdir failed");
+        let dir = tempdir()?;
         let box_dir = dir.path().join("box");
         let ver_dir = box_dir.join("1.0.0");
-        fs::create_dir_all(&ver_dir).expect("mkdir failed");
-        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o000)).expect("chmod failed");
+        fs::create_dir_all(&ver_dir)?;
+        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o000))?;
         let res = find_source_provider_dir(&box_dir, None);
-        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o755)).expect("chmod failed");
+        fs::set_permissions(&ver_dir, fs::Permissions::from_mode(0o755))?;
         assert!(res.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_mutate_io_failures() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_mutate_io_failures() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_dir = dir.path().join("boxes").join("test-VAGRANTSLASH-box");
         let source_dir = box_dir.join("1.0.0").join("virtualbox");
-        fs::create_dir_all(&source_dir).expect("create dir failed");
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        fs::create_dir_all(&source_dir)?;
 
         // 1. dest_dir is a file -> create_dir_all fails
         let dest_dir = box_dir.join("1.0.0").join("libvirt");
-        fs::write(&dest_dir, "blocking_file").expect("write failed");
+        fs::write(&dest_dir, "blocking_file")?;
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
             destination_provider: Some("libvirt".to_string()),
             input_provider: None,
             force_virtio: false,
         };
-        let res = execute(&args);
+        let res = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(res.is_err());
-        fs::remove_file(&dest_dir).expect("remove failed");
+        fs::remove_file(&dest_dir)?;
 
         // 2. metadata.json is a directory -> fs::write fails
-        fs::create_dir_all(dest_dir.join("metadata.json")).expect("mkdir failed");
-        let res2 = execute(&args);
+        fs::create_dir_all(dest_dir.join("metadata.json"))?;
+        let res2 = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(res2.is_err());
-        fs::remove_dir(dest_dir.join("metadata.json")).expect("rmdir failed");
+        fs::remove_dir(dest_dir.join("metadata.json"))?;
 
         // 3. Vagrantfile is a directory -> fs::write fails
-        fs::create_dir_all(dest_dir.join("Vagrantfile")).expect("mkdir failed");
-        let res3 = execute(&args);
+        fs::create_dir_all(dest_dir.join("Vagrantfile"))?;
+        let res3 = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(res3.is_err());
 
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        Ok(())
     }
 
     #[test]
-    fn test_execute_mutate_box_dir_is_file() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate_box_dir_is_file() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let box_file = dir.path().join("boxes").join("test-VAGRANTSLASH-box");
-        fs::create_dir_all(dir.path().join("boxes")).expect("create dir failed");
-        fs::write(&box_file, "blocking_file").expect("write failed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        fs::create_dir_all(dir.path().join("boxes"))?;
+        fs::write(&box_file, "blocking_file")?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -685,35 +615,27 @@ mod tests {
             input_provider: None,
             force_virtio: false,
         };
-        let result = execute(&args);
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_mutate_force_virtio_non_qemu_with_vagrantfile() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_mutate_force_virtio_non_qemu_with_vagrantfile() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let source_dir = dir
             .path()
             .join("boxes")
             .join("test-VAGRANTSLASH-box")
             .join("1.0.0")
             .join("virtualbox");
-        fs::create_dir_all(&source_dir).expect("create dir failed");
+        fs::create_dir_all(&source_dir)?;
 
-        fs::write(source_dir.join("box-disk1.vmdk"), "dummy-vmdk-bytes")
-            .expect("write disk failed");
+        fs::write(source_dir.join("box-disk1.vmdk"), "dummy-vmdk-bytes")?;
         fs::write(
             source_dir.join("Vagrantfile"),
             "Vagrant.configure('2') do |c|\n  c.vm.provider :virtualbox\nend\n",
-        )
-        .expect("write vf failed");
-
-        unsafe { std::env::set_var("VAGRANT_HOME", dir.path()) };
+        )?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -721,9 +643,8 @@ mod tests {
             input_provider: Some("virtualbox".to_string()),
             force_virtio: true,
         };
-        let result = execute(&args);
-
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
+        let result = execute_with_config(&args, dir.path(), "nonexistent_qemu_img_xyz");
         assert!(result.is_ok());
+        Ok(())
     }
 }

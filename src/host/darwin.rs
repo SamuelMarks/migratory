@@ -5,8 +5,40 @@
 
 use super::Host;
 use crate::error::MigratoryError;
-#[cfg(not(test))]
 use std::process::Command;
+
+/// Executes a command and returns `(success, stdout)` or an IO error.
+///
+/// # Arguments
+///
+/// * `prog` - Program name.
+/// * `args` - Command-line arguments.
+///
+/// # Returns
+///
+/// Returns `Ok((status.success(), stdout))` on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError::Io`] if spawning fails.
+fn default_darwin_runner(prog: &str, args: &[&str]) -> Result<(bool, String), MigratoryError> {
+    if cfg!(test) && prog != "echo" {
+        let out = match prog {
+            "id" => "0\n".to_string(),
+            "ifconfig" => "en0 en1 bridge0\n".to_string(),
+            _ => String::new(),
+        };
+        return Ok((true, out));
+    }
+    let output = Command::new(prog)
+        .args(args)
+        .output()
+        .map_err(MigratoryError::Io)?;
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
 
 /// Darwin (macOS) host implementation.
 ///
@@ -30,10 +62,7 @@ impl Host for DarwinHost {
     ///
     /// Returns `true` if `std::env::consts::OS` is `"macos"`.
     fn is_match(&self) -> bool {
-        if let Ok(mock) = std::env::var("MOCK_OS") {
-            return mock == "macos" || mock == "darwin";
-        }
-        std::env::consts::OS == "macos"
+        self.is_match_os(std::env::consts::OS)
     }
 
     /// Configures NFS exports on the macOS host.
@@ -44,45 +73,12 @@ impl Host for DarwinHost {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if manipulating `/etc/exports` fails (currently a no-op).
+    /// Returns a `MigratoryError` if manipulating `/etc/exports` fails.
     fn configure_nfs(
         &self,
-        _folders: &[crate::config::SyncedFolderConfig],
+        folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
-        #[cfg(not(test))]
-        {
-            let uid = std::process::Command::new("id")
-                .arg("-u")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "501".to_string());
-            let gid = std::process::Command::new("id")
-                .arg("-g")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "20".to_string());
-
-            let export_line = Self::generate_nfs_exports(_folders, &uid, &gid);
-            let cmd = format!(
-                "echo '{}' | sudo tee -a /etc/exports > /dev/null",
-                export_line
-            );
-            let _ = Command::new("sh").arg("-c").arg(cmd).status();
-
-            let status = Command::new("sudo")
-                .arg("nfsd")
-                .arg("restart")
-                .status()
-                .map_err(MigratoryError::Io)?;
-
-            if !status.success() {
-                return Err(MigratoryError::Generic(
-                    "Failed to restart NFS daemon on Darwin".to_string(),
-                ));
-            }
-        }
-
-        Ok(())
+        self.configure_nfs_with(folders, default_darwin_runner)
     }
 
     /// Configures SMB sharing on the macOS host.
@@ -93,45 +89,12 @@ impl Host for DarwinHost {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if the configuration fails (currently a no-op).
+    /// Returns a `MigratoryError` if the configuration fails.
     fn configure_smb(
         &self,
-        _folders: &[crate::config::SyncedFolderConfig],
+        folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
-        #[cfg(not(test))]
-        {
-            for sf in _folders {
-                if sf.folder_type.as_deref() == Some("smb") && !sf.disabled {
-                    let share_name = sf
-                        .guest_path
-                        .replace('/', "_")
-                        .trim_start_matches('_')
-                        .to_string();
-                    let share_name = if share_name.is_empty() {
-                        "vagrant".to_string()
-                    } else {
-                        share_name
-                    };
-
-                    let status = Command::new("sudo")
-                        .arg("sharing")
-                        .arg("-a")
-                        .arg(&sf.host_path)
-                        .arg("-S")
-                        .arg(&share_name)
-                        .status()
-                        .map_err(MigratoryError::Io)?;
-
-                    if !status.success() {
-                        return Err(MigratoryError::Generic(format!(
-                            "Failed to configure SMB share on Darwin: {}",
-                            share_name
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.configure_smb_with(folders, default_darwin_runner)
     }
 
     /// Checks if the current user has administrative (root) privileges on macOS.
@@ -142,23 +105,13 @@ impl Host for DarwinHost {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if the check cannot be completed (currently a mocked `Ok(true)`).
+    /// Returns a `MigratoryError` if the check cannot be completed.
     fn check_admin(&self) -> Result<bool, MigratoryError> {
-        #[cfg(not(test))]
-        {
-            let output = Command::new("id")
-                .arg("-u")
-                .output()
-                .map_err(MigratoryError::Io)?;
-            let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok(uid == "0")
-        }
-        #[cfg(test)]
-        Ok(true)
+        self.check_admin_with(default_darwin_runner)
     }
 
     fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
-        resolve_darwin_host_ip()
+        self.resolve_host_ip_with(default_darwin_runner)
     }
 
     fn service_manager(&self) -> &str {
@@ -166,116 +119,245 @@ impl Host for DarwinHost {
     }
 
     fn list_bridge_interfaces(&self) -> Result<Vec<String>, MigratoryError> {
-        list_darwin_bridge_interfaces()
+        self.list_bridge_interfaces_with(default_darwin_runner)
     }
-}
-
-/// Resolves the primary local IPv4 address for macOS hosts.
-///
-/// # Returns
-///
-/// Returns the resolved IPv4 address as a `String`.
-///
-/// # Errors
-///
-/// Returns a `MigratoryError` if network interfaces cannot be inspected.
-#[cfg(not(test))]
-fn resolve_darwin_host_ip() -> Result<String, MigratoryError> {
-    if let Ok(output) = std::process::Command::new("route")
-        .args(["-n", "get", "default"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if let Some(iface) = trimmed.strip_prefix("interface:") {
-                let iface = iface.trim();
-                if let Ok(ip_output) = std::process::Command::new("ipconfig")
-                    .args(["getifaddr", iface])
-                    .output()
-                {
-                    let ip = String::from_utf8_lossy(&ip_output.stdout)
-                        .trim()
-                        .to_string();
-                    if !ip.is_empty() {
-                        return Ok(ip);
-                    }
-                }
-            }
-        }
-    }
-    Ok("192.168.1.2".to_string())
-}
-
-/// Resolves the host IP for macOS in test mode, respecting mock overrides.
-///
-/// # Returns
-///
-/// Returns the resolved or mock IPv4 address as a `String`.
-///
-/// # Errors
-///
-/// Returns a `MigratoryError` on failure.
-#[cfg(test)]
-fn resolve_darwin_host_ip() -> Result<String, MigratoryError> {
-    if let Ok(mock_ip) = std::env::var("MIGRATORY_TEST_MOCK_HOST_IP") {
-        return Ok(mock_ip);
-    }
-    Ok("192.168.1.2".to_string())
-}
-
-#[cfg(not(test))]
-/// Executes the `list_darwin_bridge_interfaces` function.
-///
-/// # Arguments
-///
-/// * None
-///
-/// # Returns
-///
-/// Returns `Result<Vec<String>, MigratoryError>`.
-///
-/// # Errors
-///
-/// Returns an error if the operation fails.
-fn list_darwin_bridge_interfaces() -> Result<Vec<String>, MigratoryError> {
-    let output = std::process::Command::new("ifconfig")
-        .arg("-l")
-        .output()
-        .map_err(MigratoryError::Io)?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(text.split_whitespace().map(|s| s.to_string()).collect())
-}
-
-#[cfg(test)]
-fn list_darwin_bridge_interfaces() -> Result<Vec<String>, MigratoryError> {
-    Ok(vec![
-        "en0".to_string(),
-        "en1".to_string(),
-        "bridge0".to_string(),
-    ])
 }
 
 impl DarwinHost {
-    /// Checks for Hypervisor framework privileges (entitlements check).
-    pub fn check_hypervisor_privileges(&self) -> Result<bool, MigratoryError> {
-        #[cfg(not(test))]
-        {
-            let status = Command::new("sysctl")
-                .arg("kern.hv_support")
-                .status()
-                .map_err(MigratoryError::Io)?;
-            Ok(status.success())
+    /// Checks whether the given `os` identifier matches macOS / Darwin.
+    ///
+    /// # Arguments
+    ///
+    /// * `os` - Target OS name string.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if `os` is `"macos"` or `"darwin"`.
+    pub fn is_match_os(&self, os: &str) -> bool {
+        matches!(os, "macos" | "darwin")
+    }
+
+    /// Configures NFS exports on macOS using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if restarting `nfsd` fails.
+    pub fn configure_nfs_with<F>(
+        &self,
+        folders: &[crate::config::SyncedFolderConfig],
+        mut runner: F,
+    ) -> Result<(), MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        let uid = runner("id", &["-u"])
+            .map(|(_, s)| s.trim().to_string())
+            .unwrap_or_else(|_| "501".to_string());
+        let gid = runner("id", &["-g"])
+            .map(|(_, s)| s.trim().to_string())
+            .unwrap_or_else(|_| "20".to_string());
+
+        let export_line = Self::generate_nfs_exports(folders, &uid, &gid);
+        let cmd = format!("echo '{export_line}' | sudo tee -a /etc/exports > /dev/null");
+        let _ = runner("sh", &["-c", &cmd]);
+
+        let (ok, _) = runner("sudo", &["nfsd", "restart"])?;
+        if !ok {
+            return Err(MigratoryError::Generic(
+                "Failed to restart NFS daemon on Darwin".to_string(),
+            ));
         }
-        #[cfg(test)]
-        Ok(true)
+        Ok(())
+    }
+
+    /// Configures SMB sharing on macOS using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if `sharing` fails.
+    pub fn configure_smb_with<F>(
+        &self,
+        folders: &[crate::config::SyncedFolderConfig],
+        mut runner: F,
+    ) -> Result<(), MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        for sf in folders {
+            if sf.folder_type == Some(crate::config::SyncedFolderType::Smb) && !sf.disabled {
+                let share_name = sf
+                    .guest_path
+                    .to_string_lossy()
+                    .replace('/', "_")
+                    .trim_start_matches('_')
+                    .to_string();
+                let share_name = if share_name.is_empty() {
+                    "vagrant".to_string()
+                } else {
+                    share_name
+                };
+                let host_str = sf.host_path.to_string_lossy();
+                let (ok, _) = runner("sudo", &["sharing", "-a", &host_str, "-S", &share_name])?;
+                if !ok {
+                    return Err(MigratoryError::Generic(format!(
+                        "Failed to configure SMB share on Darwin: {}",
+                        share_name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks whether the current user is root (UID 0) using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if UID is `"0"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if the command fails.
+    pub fn check_admin_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        let (_, stdout) = runner("id", &["-u"])?;
+        Ok(stdout.trim() == "0")
+    }
+
+    /// Resolves the primary local IPv4 address for macOS hosts using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns the resolved IPv4 address string.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` on failure.
+    pub fn resolve_host_ip_with<F>(&self, mut runner: F) -> Result<String, MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        if let Ok((_, stdout)) = runner("route", &["-n", "get", "default"]) {
+            for line in stdout.lines() {
+                if let Some(iface) = line.trim().strip_prefix("interface:")
+                    && let Ok((_, ip_stdout)) = runner("ipconfig", &["getifaddr", iface.trim()])
+                    && !ip_stdout.trim().is_empty()
+                {
+                    return Ok(ip_stdout.trim().to_string());
+                }
+            }
+        }
+        Ok("192.168.1.2".to_string())
+    }
+
+    /// Enumerates available network interfaces on macOS via `ifconfig -l`.
+    ///
+    /// # Arguments
+    ///
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of interface names.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if `ifconfig` fails.
+    pub fn list_bridge_interfaces_with<F>(
+        &self,
+        mut runner: F,
+    ) -> Result<Vec<String>, MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        let (_, text) = runner("ifconfig", &["-l"])?;
+        Ok(text.split_whitespace().map(|s| s.to_string()).collect())
+    }
+
+    /// Checks for Hypervisor framework privileges (entitlements check).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if the hypervisor framework is supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if querying `sysctl` fails.
+    pub fn check_hypervisor_privileges(&self) -> Result<bool, MigratoryError> {
+        self.check_hypervisor_privileges_with(default_darwin_runner)
+    }
+
+    /// Checks for Hypervisor framework privileges using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if `sysctl kern.hv_support` succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if querying `sysctl` fails.
+    pub fn check_hypervisor_privileges_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        let (ok, _) = runner("sysctl", &["kern.hv_support"])?;
+        Ok(ok)
     }
 
     /// Detects host capabilities like hypervisors.
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of available hypervisor names.
     pub fn capabilities(&self) -> Vec<String> {
+        self.capabilities_with("VBoxManage", "vmrun")
+    }
+
+    /// Detects host capabilities using custom binary paths for `VBoxManage` and `vmrun`.
+    ///
+    /// # Arguments
+    ///
+    /// * `vbox_bin` - Path or binary name for `VBoxManage`.
+    /// * `vmrun_bin` - Path or binary name for `vmrun`.
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of available hypervisor names.
+    pub fn capabilities_with(&self, vbox_bin: &str, vmrun_bin: &str) -> Vec<String> {
         let mut caps = Vec::new();
-        // Check for virtualbox
-        if std::process::Command::new("VBoxManage")
+        if std::process::Command::new(vbox_bin)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -283,8 +365,7 @@ impl DarwinHost {
         {
             caps.push("virtualbox".to_string());
         }
-        // Check for vmware
-        if std::process::Command::new("vmrun")
+        if std::process::Command::new(vmrun_bin)
             .arg("list")
             .output()
             .map(|o| o.status.success())
@@ -314,11 +395,14 @@ impl DarwinHost {
         let mut lines = String::new();
         lines.push_str("# VAGRANT-BEGIN\n");
         for sf in folders {
-            if sf.folder_type.as_deref() == Some("nfs") && !sf.disabled {
+            if sf.folder_type == Some(crate::config::SyncedFolderType::Nfs) && !sf.disabled {
                 lines.push_str(&format!(
-                    "\"{}\" -alldirs -mapall={}:{} 127.0.0.1\n",
-                    sf.host_path, uid, gid
+                    r#""{}" -alldirs -mapall={}:{} 127.0.0.1"#,
+                    sf.host_path.display(),
+                    uid,
+                    gid
                 ));
+                lines.push('\n');
             }
         }
         lines.push_str("# VAGRANT-END\n");
@@ -336,164 +420,154 @@ impl DarwinHost {
     ///
     /// Returns the command line string.
     pub fn generate_smb_sharing_command(host_path: &str, share_name: &str) -> String {
-        format!("sharing -a \"{}\" -S \"{}\"", host_path, share_name)
+        format!(r#"sharing -a "{}" -S "{}""#, host_path, share_name)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
-    fn restore_mock_os(orig: Option<String>) {
-        unsafe {
-            if let Some(val) = orig {
-                std::env::set_var("MOCK_OS", val);
-            } else {
-                std::env::remove_var("MOCK_OS");
-            }
-        }
-    }
-
     #[test]
-    fn test_darwin_host() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
+    fn test_darwin_host() -> Result<(), MigratoryError> {
         let host = DarwinHost;
+        let _ = default_darwin_runner("echo", &["0"]);
         assert_eq!(host.name(), "darwin");
         assert_eq!(host.service_manager(), "launchd");
         assert!(host.list_bridge_interfaces().is_ok());
-        assert!(host.resolve_host_ip().is_ok());
-        unsafe { std::env::set_var("MIGRATORY_TEST_MOCK_HOST_IP", "10.0.0.88") };
-        assert_eq!(
-            host.resolve_host_ip().expect("resolve ip should succeed"),
-            "10.0.0.88"
-        );
-        unsafe { std::env::remove_var("MIGRATORY_TEST_MOCK_HOST_IP") };
+        assert_eq!(host.resolve_host_ip()?, "192.168.1.2");
         assert!(host.configure_nfs(&[]).is_ok());
         assert!(host.configure_smb(&[]).is_ok());
-        assert!(host.check_admin().expect("admin check should succeed"));
+        assert!(host.check_admin()?);
+        assert!(host.check_hypervisor_privileges()?);
+
+        // Test configure_nfs_with & configure_smb_with & resolve_host_ip_with branches
         assert!(
-            host.check_hypervisor_privileges()
-                .expect("hv check should succeed")
+            host.configure_nfs_with(&[], |prog, _| {
+                if prog == "id" {
+                    Err(MigratoryError::Generic("id err".to_string()))
+                } else {
+                    Ok((false, String::new()))
+                }
+            })
+            .is_err()
         );
-        let original_mock_os = std::env::var("MOCK_OS").ok();
+        let smb_folders = vec![
+            crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from("/Users/user/share"),
+                guest_path: std::path::PathBuf::from("/shared"),
+                folder_type: Some(crate::config::SyncedFolderType::Smb),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from("/Users/user/root"),
+                guest_path: std::path::PathBuf::from("/"),
+                folder_type: Some(crate::config::SyncedFolderType::Smb),
+                disabled: false,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from("/Users/user/disabled"),
+                guest_path: std::path::PathBuf::from("/disabled"),
+                folder_type: Some(crate::config::SyncedFolderType::Smb),
+                disabled: true,
+                ..Default::default()
+            },
+        ];
+        assert!(
+            host.configure_smb_with(&smb_folders, |_, _| Ok((true, String::new())))
+                .is_ok()
+        );
+        assert!(
+            host.configure_smb_with(&smb_folders, |_, _| Ok((false, String::new())))
+                .is_err()
+        );
+        assert!(!host.check_admin_with(|_, _| Ok((true, "501".to_string())))?);
+        assert_eq!(
+            host.resolve_host_ip_with(|prog, _| {
+                if prog == "route" {
+                    Ok((
+                        true,
+                        "  interface: en0
+"
+                        .to_string(),
+                    ))
+                } else {
+                    Ok((
+                        true,
+                        "10.0.1.55
+"
+                        .to_string(),
+                    ))
+                }
+            })?,
+            "10.0.1.55"
+        );
+        assert_eq!(
+            host.resolve_host_ip_with(|prog, _| {
+                if prog == "route" {
+                    Ok((
+                        true,
+                        "  interface: en0
+"
+                        .to_string(),
+                    ))
+                } else {
+                    Ok((
+                        true,
+                        "   
+"
+                        .to_string(),
+                    ))
+                }
+            })?,
+            "192.168.1.2"
+        );
+        assert_eq!(
+            host.resolve_host_ip_with(|_, _| Err(MigratoryError::Generic("err".to_string())))?,
+            "192.168.1.2"
+        );
+        assert!(!host.check_hypervisor_privileges_with(|_, _| Ok((false, String::new())))?);
 
-        unsafe { std::env::set_var("MOCK_OS", "macos") };
-        assert!(host.is_match());
-
-        unsafe { std::env::set_var("MOCK_OS", "windows") };
-        assert!(!host.is_match());
-
-        unsafe { std::env::remove_var("MOCK_OS") };
-        // This exercises the `std::env::consts::OS == "macos"` branch
+        assert!(host.is_match_os("macos"));
+        assert!(host.is_match_os("darwin"));
+        assert!(!host.is_match_os("windows"));
         assert_eq!(host.is_match(), std::env::consts::OS == "macos");
 
-        restore_mock_os(original_mock_os);
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        // Test configure_nfs failure coverage
-        unsafe { std::env::set_var("PATH", "") };
-        let _ = host.configure_nfs(&[]);
-        unsafe { std::env::set_var("PATH", old_path.clone()) };
-        // Mock VBoxManage and vmrun to guarantee coverage
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
-        let vbox = temp_dir.path().join("VBoxManage");
-        let vmrun = temp_dir.path().join("vmrun");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&vbox, "#!/bin/sh\nexit 0").expect("operation should succeed");
-            std::fs::set_permissions(&vbox, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-            std::fs::write(&vmrun, "#!/bin/sh\nexit 0").expect("operation should succeed");
-            std::fs::set_permissions(&vmrun, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-        }
-        #[cfg(windows)]
-        {
-            let vbox_bat = temp_dir.path().join("VBoxManage.bat");
-            std::fs::write(&vbox_bat, "@echo off\nexit 0").expect("operation should succeed");
-            let vmrun_bat = temp_dir.path().join("vmrun.bat");
-            std::fs::write(&vmrun_bat, "@echo off\nexit 0").expect("operation should succeed");
-        }
-
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-        let caps = host.capabilities();
-        unsafe {
-            std::env::set_var("PATH", "");
-        }
-        let missing_caps = host.capabilities();
-        unsafe {
-            std::env::set_var("PATH", &old_path);
-        }
+        let _ = host.capabilities();
+        let caps = host.capabilities_with("echo", "echo");
+        let missing_caps = host.capabilities_with("nonexistent_vbox_xyz", "nonexistent_vmrun_xyz");
+        let failed_caps = host.capabilities_with("false", "false");
 
         assert!(caps.contains(&"virtualbox".to_string()));
         assert!(caps.contains(&"vmware".to_string()));
         assert!(missing_caps.is_empty());
-
-        // Test with scripts returning non-zero status
-        #[cfg(unix)]
-        {
-            std::fs::write(&vbox, "#!/bin/sh\nexit 1").expect("operation should succeed");
-            std::fs::write(&vmrun, "#!/bin/sh\nexit 1").expect("operation should succeed");
-        }
-        #[cfg(windows)]
-        {
-            let vbox_bat = temp_dir.path().join("VBoxManage.bat");
-            std::fs::write(&vbox_bat, "@echo off\nexit /b 1").expect("operation should succeed");
-            let vmrun_bat = temp_dir.path().join("vmrun.bat");
-            std::fs::write(&vmrun_bat, "@echo off\nexit /b 1").expect("operation should succeed");
-        }
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-        let failed_caps = host.capabilities();
-        unsafe {
-            std::env::set_var("PATH", &old_path);
-        }
         assert!(failed_caps.is_empty());
+        Ok(())
     }
 
     #[test]
     fn test_darwin_nfs_and_smb_generation() {
         let folders = vec![
             crate::config::SyncedFolderConfig {
-                host_path: "/Users/user/project".to_string(),
-                guest_path: "/vagrant".to_string(),
-                folder_type: Some("nfs".to_string()),
+                host_path: std::path::PathBuf::from("/Users/user/project"),
+                guest_path: std::path::PathBuf::from("/vagrant"),
+                folder_type: Some(crate::config::SyncedFolderType::Nfs),
                 disabled: false,
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {
-                host_path: "/Users/user/disabled".to_string(),
-                guest_path: "/disabled".to_string(),
-                folder_type: Some("nfs".to_string()),
+                host_path: std::path::PathBuf::from("/Users/user/disabled"),
+                guest_path: std::path::PathBuf::from("/disabled"),
+                folder_type: Some(crate::config::SyncedFolderType::Nfs),
                 disabled: true,
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {
-                host_path: "/Users/user/rsync".to_string(),
-                guest_path: "/rsync".to_string(),
-                folder_type: Some("rsync".to_string()),
+                host_path: std::path::PathBuf::from("/Users/user/rsync"),
+                guest_path: std::path::PathBuf::from("/rsync"),
+                folder_type: Some(crate::config::SyncedFolderType::Rsync),
                 disabled: false,
                 ..Default::default()
             },
@@ -501,12 +575,12 @@ mod tests {
 
         let exports = DarwinHost::generate_nfs_exports(&folders, "501", "20");
         assert!(exports.contains("# VAGRANT-BEGIN"));
-        assert!(exports.contains("\"/Users/user/project\" -alldirs -mapall=501:20 127.0.0.1"));
+        assert!(exports.contains(r#""/Users/user/project" -alldirs -mapall=501:20 127.0.0.1"#));
         assert!(!exports.contains("/Users/user/disabled"));
         assert!(!exports.contains("/Users/user/rsync"));
         assert!(exports.contains("# VAGRANT-END"));
 
         let smb_cmd = DarwinHost::generate_smb_sharing_command("/Users/user/project", "vagrant");
-        assert_eq!(smb_cmd, "sharing -a \"/Users/user/project\" -S \"vagrant\"");
+        assert_eq!(smb_cmd, r#"sharing -a "/Users/user/project" -S "vagrant""#);
     }
 }

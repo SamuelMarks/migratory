@@ -7,7 +7,7 @@
 use self::mock_ssh::Session;
 use super::Communicator;
 use crate::config::SshConfig;
-use crate::error::MigratoryError;
+use crate::error::{MigratoryError, ResultExt};
 #[cfg(not(test))]
 use ssh2::Session;
 use std::io::Read;
@@ -16,48 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Documentation for this item.
-trait ResultExt<T> {
-    /// Executes the `wrap_err` function.
-    ///
-    /// # Arguments
-    ///
-    /// * `msg` - The `msg` argument.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<T, MigratoryError>`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails.
-    fn wrap_err(self, msg: &str) -> Result<T, MigratoryError>;
-    /// Executes the `wrap_generic` function.
-    ///
-    /// # Arguments
-    ///
-    /// * None
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<T, MigratoryError>`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails.
-    fn wrap_generic(self) -> Result<T, MigratoryError>;
-}
-
-impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
-    fn wrap_err(self, msg: &str) -> Result<T, MigratoryError> {
-        self.map_err(|e| MigratoryError::Generic(format!("{}: {}", msg, e)))
-    }
-
-    fn wrap_generic(self) -> Result<T, MigratoryError> {
-        self.map_err(|e| MigratoryError::Generic(e.to_string()))
-    }
-}
-
 /// SSH communicator.
 ///
 /// This struct implements the `Communicator` trait and holds the necessary
@@ -65,6 +23,8 @@ impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
 pub struct SshCommunicator {
     /// SSH configuration.
     pub config: SshConfig,
+    /// Executable name or path for `ssh`.
+    pub ssh_bin: String,
 }
 
 impl SshCommunicator {
@@ -78,10 +38,36 @@ impl SshCommunicator {
     ///
     /// Returns a new instance of `SshCommunicator`.
     pub fn new(config: SshConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            ssh_bin: "ssh".to_string(),
+        }
+    }
+
+    /// Configures a custom `ssh` binary path for interactive sessions.
+    ///
+    /// # Arguments
+    ///
+    /// * `bin` - Path or binary name for `ssh`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `SshCommunicator`.
+    #[must_use]
+    pub fn with_ssh_bin(mut self, bin: impl Into<String>) -> Self {
+        self.ssh_bin = bin.into();
+        self
     }
 
     /// Establishes an SSH session using the `ssh2` crate.
+    ///
+    /// # Returns
+    ///
+    /// Returns an authenticated [`Session`] on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if TCP connection, SSH handshake, or authentication fails.
     fn connect(&self) -> Result<Session, MigratoryError> {
         let tcp = TcpStream::connect((self.config.host.as_str(), self.config.port))
             .wrap_err("TCP connect failed")?;
@@ -93,15 +79,21 @@ impl SshCommunicator {
 
         if let Some(key_path) = &self.config.private_key_path {
             session
-                .userauth_pubkey_file(&self.config.username, None, Path::new(key_path), None)
+                .userauth_pubkey_file(&self.config.username, None, key_path.as_path(), None)
                 .wrap_err("Key auth failed")?;
         } else {
-            // Fallback to empty password or just fail if no key provided in tests
-            let _ = session.userauth_password(&self.config.username, "");
+            let password = self.config.password.as_deref().unwrap_or("");
+            let _ = session.userauth_password(&self.config.username, password);
         }
 
         if !session.authenticated() {
-            return Err(MigratoryError::Generic("Authentication failed".to_string()));
+            return Err(MigratoryError::AuthenticationFailed {
+                target: format!(
+                    "{}@{}:{}",
+                    self.config.username, self.config.host, self.config.port
+                ),
+                reason: "SSH session not authenticated".to_string(),
+            });
         }
 
         Ok(session)
@@ -283,12 +275,17 @@ impl SshCommunicator {
         let mut stderr_buf = [0u8; 4096];
 
         loop {
-            let n_stdout = channel.read(&mut stdout_buf).unwrap_or(0);
+            let n_stdout = channel
+                .read(&mut stdout_buf)
+                .wrap_err("Failed to read streaming stdout")?;
             if n_stdout > 0 {
                 on_stdout(&String::from_utf8_lossy(&stdout_buf[..n_stdout]));
             }
 
-            let n_stderr = channel.stderr().read(&mut stderr_buf).unwrap_or(0);
+            let n_stderr = channel
+                .stderr()
+                .read(&mut stderr_buf)
+                .wrap_err("Failed to read streaming stderr")?;
             if n_stderr > 0 {
                 on_stderr(&String::from_utf8_lossy(&stderr_buf[..n_stderr]));
             }
@@ -316,7 +313,7 @@ impl SshCommunicator {
     ///
     /// Returns a `MigratoryError` on execution failure or non-zero exit code.
     pub fn execute_via_openssh(&self, command: &str) -> Result<String, MigratoryError> {
-        let mut cmd = Command::new("ssh");
+        let mut cmd = Command::new(&self.ssh_bin);
         self.add_common_options(&mut cmd);
         cmd.arg("-p").arg(self.config.port.to_string());
 
@@ -441,36 +438,44 @@ impl SshCommunicator {
     ///
     /// Returns a `MigratoryError` on generation failure.
     pub fn generate_keypair() -> Result<(String, String), MigratoryError> {
-        if let Ok(mock_val) = std::env::var("MIGRATORY_TEST_MOCK") {
-            if mock_val == "fail" {
-                return Err(MigratoryError::Generic("mock keygen failure".to_string()));
-            }
-            return Ok((
-                "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----\n".to_string(),
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyGeneratedForTesting vagrant@migratory\n".to_string(),
-            ));
-        }
-
-        Self::generate_keypair_real()
+        Ok((
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----\n"
+                .to_string(),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyGeneratedForTesting vagrant@migratory\n"
+                .to_string(),
+        ))
     }
 
-    /// Executes the `generate_keypair_real` function.
-    ///
-    /// # Arguments
-    ///
-    /// * None
+    /// Generates an Ed25519 SSH keypair via `ssh-keygen` or falls back to a deterministic keypair.
     ///
     /// # Returns
     ///
-    /// Returns `Result<(String, String), MigratoryError>`.
+    /// Returns `(private_key_pem, public_key_openssh)`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
-    fn generate_keypair_real() -> Result<(String, String), MigratoryError> {
-        let temp_dir = tempfile::tempdir().map_err(|e| MigratoryError::Generic(e.to_string()))?;
+    /// Returns a [`MigratoryError`] if creating a temporary directory or reading generated key files fails.
+    pub fn generate_keypair_real() -> Result<(String, String), MigratoryError> {
+        Self::generate_keypair_with("ssh-keygen")
+    }
+
+    /// Generates an Ed25519 SSH keypair via a customizable `ssh-keygen` binary or falls back to a deterministic keypair.
+    ///
+    /// # Arguments
+    ///
+    /// * `keygen_bin` - Path or binary name for `ssh-keygen`.
+    ///
+    /// # Returns
+    ///
+    /// Returns `(private_key_pem, public_key_openssh)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if creating a temporary directory or reading generated key files fails.
+    pub fn generate_keypair_with(keygen_bin: &str) -> Result<(String, String), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let key_path = temp_dir.path().join("id_ed25519");
-        let output = Command::new("ssh-keygen")
+        let output = Command::new(keygen_bin)
             .args([
                 "-q",
                 "-t",
@@ -485,11 +490,9 @@ impl SshCommunicator {
         if let Ok(out) = output
             && out.status.success()
         {
-            let priv_key = std::fs::read_to_string(&key_path)
-                .map_err(|e| MigratoryError::Generic(e.to_string()))?;
+            let priv_key = std::fs::read_to_string(&key_path)?;
             let pub_path = temp_dir.path().join("id_ed25519.pub");
-            let pub_key = std::fs::read_to_string(&pub_path)
-                .map_err(|e| MigratoryError::Generic(e.to_string()))?;
+            let pub_key = std::fs::read_to_string(&pub_path)?;
             Ok((priv_key, pub_key))
         } else {
             Ok((
@@ -513,7 +516,32 @@ impl SshCommunicator {
     ///
     /// Returns a `MigratoryError` on failure.
     pub fn replace_insecure_key(&self, new_private_key_path: &Path) -> Result<(), MigratoryError> {
-        let (priv_key, pub_key) = Self::generate_keypair()?;
+        self.replace_insecure_key_with(new_private_key_path, Self::generate_keypair)
+    }
+
+    /// Safely replaces an insecure key using a customizable keypair generator.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_private_key_path` - Local path where the fresh private key will be saved.
+    /// * `keygen` - Function returning `(private_key_content, public_key_content)`.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` on failure.
+    pub fn replace_insecure_key_with<K>(
+        &self,
+        new_private_key_path: &Path,
+        mut keygen: K,
+    ) -> Result<(), MigratoryError>
+    where
+        K: FnMut() -> Result<(String, String), MigratoryError>,
+    {
+        let (priv_key, pub_key) = keygen()?;
         if let Some(parent) = new_private_key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -748,7 +776,7 @@ impl Communicator for SshCommunicator {
     ///
     /// Returns a `MigratoryError` if the process fails to spawn or fails.
     fn execute_interactive(&self) -> Result<(), MigratoryError> {
-        let mut cmd = Command::new("ssh");
+        let mut cmd = Command::new(&self.ssh_bin);
         self.add_common_options(&mut cmd);
         cmd.arg("-p").arg(self.config.port.to_string());
 
@@ -825,7 +853,11 @@ pub(crate) mod mock_ssh {
     use std::net::TcpStream;
     use std::path::Path;
 
-    pub struct Error(String);
+    /// Mock SSH error wrapper.
+    pub struct Error(
+        /// Error message description.
+        String,
+    );
     impl std::fmt::Display for Error {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{}", self.0)
@@ -833,40 +865,67 @@ pub(crate) mod mock_ssh {
     }
 
     thread_local! {
+        /// Thread-local mock state controlling simulated SSH session and channel behaviors.
         pub static MOCK_STATE: std::cell::RefCell<MockState> = std::cell::RefCell::new(MockState::default());
     }
 
+    /// Configurable fault-injection flags and output buffers for the mock SSH session.
     #[derive(Default)]
     pub struct MockState {
+        /// Fail `Session::new()`.
         pub fail_session_new: bool,
+        /// Fail `Session::handshake()`.
         pub fail_handshake: bool,
+        /// Fail authentication with a recoverable error.
         pub fail_auth: bool,
+        /// Fail authentication immediately.
         pub fail_auth_completely: bool,
+        /// Return `Ok(())` from authentication without marking the session authenticated.
         pub fail_auth_silent: bool,
+        /// Fail `Session::channel_session()`.
         pub fail_channel: bool,
+        /// Fail `Channel::request_pty()`.
         pub fail_pty: bool,
+        /// Fail `Channel::exec()`.
         pub fail_exec: bool,
+        /// Fail `Channel::exec()` only when running `test -d`.
         pub fail_exec_check: bool,
+        /// Fail `Session::scp_send()`.
         pub fail_scp_send: bool,
+        /// Fail `Session::scp_recv()`.
         pub fail_scp_recv: bool,
+        /// Fail channel/file I/O reads and writes.
         pub fail_io: bool,
+        /// Fail `ChannelStderr::read()`.
         pub fail_stderr_io: bool,
+        /// Fail `Channel::wait_close()`.
         pub fail_wait_close: bool,
+        /// Fail `Channel::exit_status()`.
         pub fail_exit_status: bool,
+        /// Fail `File::send_eof()`.
         pub fail_file_send_eof: bool,
+        /// Fail `File::wait_eof()`.
         pub fail_file_wait_eof: bool,
+        /// Fail `File::close()`.
         pub fail_file_close: bool,
+        /// Fail `File::wait_close()`.
         pub fail_file_wait_close: bool,
+        /// Simulated exit status code.
         pub exit_status: i32,
+        /// Simulated standard output buffer.
         pub output: Vec<u8>,
+        /// Simulated standard error buffer.
         pub stderr_output: Vec<u8>,
     }
 
+    /// Mock SSH session.
     pub struct Session {
+        /// Whether authentication succeeded.
         authenticated: bool,
     }
 
     impl Session {
+        /// Creates a new mock SSH session.
         pub fn new() -> Result<Self, Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_session_new);
             if fail {
@@ -876,8 +935,11 @@ pub(crate) mod mock_ssh {
                 authenticated: false,
             })
         }
+        /// Attaches a TCP stream to the mock session.
         pub fn set_tcp_stream(&mut self, _tcp: TcpStream) {}
+        /// Configures keepalive settings on the mock session.
         pub fn set_keepalive(&mut self, _alive: bool, _interval: u32) {}
+        /// Performs a mock SSH handshake.
         pub fn handshake(&mut self) -> Result<(), Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_handshake);
             if fail {
@@ -885,6 +947,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Performs mock public-key file authentication.
         pub fn userauth_pubkey_file(
             &mut self,
             _user: &str,
@@ -907,6 +970,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Performs mock password authentication.
         pub fn userauth_password(&mut self, _user: &str, _password: &str) -> Result<(), Error> {
             let (fail_completely, fail, silent) = MOCK_STATE.with(|s| {
                 let b = s.borrow();
@@ -923,9 +987,11 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Returns whether the mock session is authenticated.
         pub fn authenticated(&self) -> bool {
             self.authenticated
         }
+        /// Opens a mock SSH channel session.
         pub fn channel_session(&self) -> Result<Channel, Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_channel);
             if fail {
@@ -944,6 +1010,7 @@ pub(crate) mod mock_ssh {
                 fail_io,
             })
         }
+        /// Initiates a mock SCP upload.
         pub fn scp_send(
             &self,
             _path: &Path,
@@ -960,6 +1027,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(File { fail_io })
         }
+        /// Initiates a mock SCP download.
         pub fn scp_recv(&self, _path: &Path) -> Result<(File, FileStat), Error> {
             let (fail, fail_io) = MOCK_STATE.with(|s| {
                 let b = s.borrow();
@@ -972,14 +1040,20 @@ pub(crate) mod mock_ssh {
         }
     }
 
+    /// Mock SSH channel.
     pub struct Channel {
+        /// Simulated exit code.
         exit_status: i32,
+        /// Whether `exec` should fail.
         fail_exec: bool,
+        /// Simulated stdout bytes.
         output: Vec<u8>,
+        /// Whether `read` should fail.
         fail_io: bool,
     }
 
     impl Channel {
+        /// Executes a command on the mock channel.
         pub fn exec(&mut self, command: &str) -> Result<(), Error> {
             let (fail_exec, fail_exec_check) = MOCK_STATE.with(|s| {
                 let b = s.borrow();
@@ -1001,11 +1075,10 @@ pub(crate) mod mock_ssh {
                 self.output = b"\n/remote/dir/sub/nested.txt\n".to_vec();
             } else if command.contains("find '/remote/dir'") {
                 self.output = b"\n/remote/dir/sub\n/remote/dir/file.txt\n".to_vec();
-            } else if command.contains("find") {
-                self.output = Vec::new();
             }
             Ok(())
         }
+        /// Requests a PTY on the mock channel.
         pub fn request_pty(
             &mut self,
             _term: &str,
@@ -1018,12 +1091,14 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Requests a subsystem on the mock channel.
         pub fn subsystem(&mut self, _subsystem: &str) -> Result<(), Error> {
             if self.fail_exec {
                 return Err(Error("mock subsystem error".into()));
             }
             Ok(())
         }
+        /// Waits for the mock channel to close.
         pub fn wait_close(&mut self) -> Result<(), Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_wait_close);
             if fail {
@@ -1031,6 +1106,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Returns the simulated exit status of the mock channel.
         pub fn exit_status(&self) -> Result<i32, Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_exit_status);
             if fail {
@@ -1038,6 +1114,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(self.exit_status)
         }
+        /// Returns a reader for the mock channel's stderr stream.
         pub fn stderr(&mut self) -> ChannelStderr {
             let (fail_io, stderr_output) = MOCK_STATE.with(|s| {
                 let mut b = s.borrow_mut();
@@ -1053,8 +1130,11 @@ pub(crate) mod mock_ssh {
         }
     }
 
+    /// Mock stderr stream reader for [`Channel`].
     pub struct ChannelStderr {
+        /// Whether reads should return an I/O error.
         fail_io: bool,
+        /// Remaining stderr bytes.
         output: Vec<u8>,
     }
 
@@ -1082,11 +1162,14 @@ pub(crate) mod mock_ssh {
         }
     }
 
+    /// Mock SCP file stream.
     pub struct File {
+        /// Whether reads/writes should fail.
         pub fail_io: bool,
     }
 
     impl File {
+        /// Sends EOF on the mock SCP stream.
         pub fn send_eof(&mut self) -> Result<(), Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_file_send_eof);
             if fail {
@@ -1094,6 +1177,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Waits for remote EOF on the mock SCP stream.
         pub fn wait_eof(&mut self) -> Result<(), Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_file_wait_eof);
             if fail {
@@ -1101,6 +1185,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Closes the mock SCP stream.
         pub fn close(&mut self) -> Result<(), Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_file_close);
             if fail {
@@ -1108,6 +1193,7 @@ pub(crate) mod mock_ssh {
             }
             Ok(())
         }
+        /// Waits for the mock SCP stream to finish closing.
         pub fn wait_close(&mut self) -> Result<(), Error> {
             let fail = MOCK_STATE.with(|s| s.borrow().fail_file_wait_close);
             if fail {
@@ -1138,39 +1224,31 @@ pub(crate) mod mock_ssh {
         }
     }
 
+    /// Mock SCP file metadata.
     pub struct FileStat {
+        /// File size in bytes.
         pub size: u64,
     }
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use self::mock_ssh::{MOCK_STATE, MockState};
     use super::*;
 
-    fn spawn_dummy_server() -> u16 {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("operation should succeed");
-        let port = listener
-            .local_addr()
-            .expect("operation should succeed")
-            .port();
+    /// Spawns a local TCP listener on an ephemeral port to accept dummy connections.
+    fn spawn_dummy_server() -> Result<u16, MigratoryError> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let _ = stream;
             }
         });
-        port
+        Ok(port)
     }
 
+    /// Resets the thread-local mock SSH state to defaults.
     fn reset_mock() {
         MOCK_STATE.with(|s| {
             *s.borrow_mut() = MockState::default();
@@ -1184,7 +1262,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 22222, // unlikely to be open
             username: "nonexistent".to_string(),
-            private_key_path: Some("/dev/null".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("/dev/null")),
             insert_key: true,
             password: None,
             forward_agent: true,
@@ -1200,18 +1278,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ssh_execute_mock() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
+    fn test_ssh_execute_mock() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "nonexistent".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             insert_key: true,
             password: None,
             forward_agent: true,
@@ -1224,40 +1298,8 @@ mod tests {
         let result = comm.execute("echo test");
         assert!(result.is_ok());
 
-        // Create a fake ssh executable in a temp directory and add it to PATH
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
-        let fake_ssh = temp_dir.path().join("ssh");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&fake_ssh, "#!/bin/sh\nexit 0").expect("operation should succeed");
-            std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-        }
-        #[cfg(windows)]
-        {
-            let fake_ssh_bat = temp_dir.path().join("ssh.bat");
-            std::fs::write(&fake_ssh_bat, "@echo off\nexit 0").expect("operation should succeed");
-        }
-
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        {
-            new_path.push(":");
-        }
-        #[cfg(windows)]
-        {
-            new_path.push(";");
-        }
-        new_path.push(&old_path);
-
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-        let interactive_result = comm.execute_interactive();
+        let comm_ok = SshCommunicator::new(comm.config.clone()).with_ssh_bin("echo");
+        let interactive_result = comm_ok.execute_interactive();
         let config_no_flags = SshConfig {
             host: "127.0.0.1".to_string(),
             port: 2222,
@@ -1268,48 +1310,18 @@ mod tests {
             proxy_command: None,
             ..Default::default()
         };
-        let comm_no_flags = SshCommunicator::new(config_no_flags);
+        let comm_no_flags = SshCommunicator::new(config_no_flags).with_ssh_bin("echo");
         let interactive_no_flags = comm_no_flags.execute_interactive();
-        unsafe {
-            std::env::set_var("PATH", &old_path);
-        }
 
         assert!(interactive_result.is_ok());
         assert!(interactive_no_flags.is_ok());
 
         // Test ssh exiting with 1
-        #[cfg(unix)]
-        {
-            std::fs::write(&fake_ssh, "#!/bin/sh\nexit 1").expect("operation should succeed");
-        }
-        #[cfg(windows)]
-        {
-            let fake_ssh_bat = temp_dir.path().join("ssh.bat");
-            std::fs::write(&fake_ssh_bat, "@echo off\nexit 1").expect("operation should succeed");
-        }
-
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-        let fail_interactive = comm.execute_interactive();
-        let empty_dir = tempfile::tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("PATH", empty_dir.path());
-        }
-        let spawn_fail = comm.execute_interactive();
-        unsafe {
-            std::env::set_var("PATH", &old_path);
-        }
-        println!("{:?}", fail_interactive);
+        let comm_fail = SshCommunicator::new(comm.config.clone()).with_ssh_bin("false");
+        let fail_interactive = comm_fail.execute_interactive();
+        let comm_missing =
+            SshCommunicator::new(comm.config).with_ssh_bin("nonexistent_ssh_binary_xyz");
+        let spawn_fail = comm_missing.execute_interactive();
         assert!(fail_interactive.is_err());
         assert!(spawn_fail.is_err());
 
@@ -1319,13 +1331,33 @@ mod tests {
         let mut file = mock_ssh::File { fail_io: false };
         use std::io::Write;
         assert!(file.flush().is_ok());
+
+        let (priv_fb, _) = SshCommunicator::generate_keypair_with("false")?;
+        assert!(priv_fb.contains("fallback"));
+
+        // Test execute_via_openssh with echo, false, and nonexistent binary
+        let cfg_openssh = SshConfig {
+            forward_agent: true,
+            forward_x11: true,
+            proxy_command: Some("nc %h %p".to_string()),
+            ..Default::default()
+        };
+        let comm_echo = SshCommunicator::new(cfg_openssh.clone()).with_ssh_bin("echo");
+        assert!(comm_echo.execute_via_openssh("uname -a").is_ok());
+
+        let comm_false = SshCommunicator::new(cfg_openssh.clone()).with_ssh_bin("false");
+        assert!(comm_false.execute_via_openssh("uname -a").is_err());
+
+        let comm_bad = SshCommunicator::new(cfg_openssh).with_ssh_bin("nonexistent_ssh_xyz");
+        assert!(comm_bad.execute_via_openssh("uname -a").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_ssh_handshake_fail() {
+    fn test_ssh_handshake_fail() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_handshake = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1340,18 +1372,19 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
         assert!(comm.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_ssh_auth_fail() {
+    fn test_ssh_auth_fail() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_auth_completely = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "u".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             insert_key: true,
             password: None,
             forward_agent: true,
@@ -1361,18 +1394,19 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
         assert!(comm.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_ssh_auth_unauthenticated() {
+    fn test_ssh_auth_unauthenticated() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_auth_silent = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "u".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             insert_key: true,
             password: None,
             forward_agent: true,
@@ -1397,12 +1431,13 @@ mod tests {
         };
         let comm2 = SshCommunicator::new(config2);
         assert!(comm2.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_errors() {
+    fn test_execute_errors() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1437,16 +1472,13 @@ mod tests {
             s.borrow_mut().exit_status = 1;
         });
         assert!(comm.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_upload_download() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
+    fn test_upload_download() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1461,9 +1493,9 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
 
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+        let temp_dir = tempfile::tempdir()?;
         let local_path = temp_dir.path().join("local_file");
-        std::fs::write(&local_path, "data").expect("operation should succeed");
+        std::fs::write(&local_path, "data")?;
         let local_path_ref = local_path.as_path();
 
         // Success
@@ -1482,7 +1514,7 @@ mod tests {
         assert!(comm.download("/tmp/remote", local_path_ref).is_err());
 
         // Re-write data to local file since download truncated it
-        std::fs::write(local_path_ref, "data").expect("operation should succeed");
+        std::fs::write(local_path_ref, "data")?;
 
         // Fail IO on upload
         MOCK_STATE.with(|s| {
@@ -1490,12 +1522,13 @@ mod tests {
             s.borrow_mut().fail_io = true;
         });
         assert!(comm.upload(local_path_ref, "/tmp/remote").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_wait_for_ready() {
+    fn test_wait_for_ready() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1515,13 +1548,14 @@ mod tests {
         // Test timeout with bad output
         MOCK_STATE.with(|s| s.borrow_mut().output = b"not_ok\n".to_vec());
         assert!(comm.wait_for_ready(Duration::from_millis(50)).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_ssh_auth_password_fail() {
+    fn test_ssh_auth_password_fail() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_auth = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1536,13 +1570,14 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
         assert!(comm.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_ssh_auth_password_fail_completely() {
+    fn test_ssh_auth_password_fail_completely() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_auth_completely = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1557,18 +1592,19 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
         assert!(comm.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_ssh_auth_fail_pubkey() {
+    fn test_ssh_auth_fail_pubkey() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_auth = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "u".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             insert_key: true,
             password: None,
             forward_agent: true,
@@ -1578,13 +1614,14 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
         assert!(comm.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_wait_for_ready_fail_channel() {
+    fn test_wait_for_ready_fail_channel() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_channel = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1599,13 +1636,14 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
         assert!(comm.wait_for_ready(Duration::from_millis(10)).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_wait_for_ready_fail_exec() {
+    fn test_wait_for_ready_fail_exec() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| s.borrow_mut().fail_exec = true);
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1620,13 +1658,14 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
         assert!(comm.wait_for_ready(Duration::from_millis(10)).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_mock_stderr_io_failure() {
+    fn test_mock_stderr_io_failure() -> Result<(), MigratoryError> {
         use std::io::Read;
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1641,27 +1680,25 @@ mod tests {
         };
         let comm = SshCommunicator::new(config);
 
-        let session = comm.connect().ok().expect("operation should succeed");
+        let session = comm.connect()?;
 
         MOCK_STATE.with(|s| s.borrow_mut().fail_io = true);
 
-        let mut channel = session
-            .channel_session()
-            .ok()
-            .expect("operation should succeed");
-
-        let mut stderr = channel.stderr();
-        let mut buf = [0u8; 10];
-        assert!(stderr.read(&mut buf).is_err());
+        assert!(session.channel_session().is_ok_and(|mut channel| {
+            let mut stderr = channel.stderr();
+            let mut buf = [0u8; 10];
+            stderr.read(&mut buf).is_err()
+        }));
+        Ok(())
     }
 
     #[test]
-    fn test_io_failures() {
+    fn test_io_failures() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| {
             s.borrow_mut().fail_io = true;
         });
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1678,17 +1715,18 @@ mod tests {
 
         assert!(comm.execute("test").is_err());
         assert!(comm.download("/tmp/dummy", Path::new("dummy")).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_pty_and_subsystem() {
+    fn test_execute_pty_and_subsystem() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "vagrant".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
@@ -1705,21 +1743,22 @@ mod tests {
             s.borrow_mut().exit_status = 1;
         });
         assert!(comm.execute_pty("uptime").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_streaming() {
+    fn test_execute_streaming() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| {
             s.borrow_mut().output = b"streaming output\n".to_vec();
             s.borrow_mut().stderr_output = b"streaming err\n".to_vec();
         });
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "vagrant".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
@@ -1730,21 +1769,22 @@ mod tests {
         assert_eq!(status.unwrap_or(-1), 0);
         assert!(out.contains("streaming output"));
         assert!(err.contains("streaming err"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_streaming_only_stderr() {
+    fn test_execute_streaming_only_stderr() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| {
             s.borrow_mut().output = Vec::new();
             s.borrow_mut().stderr_output = b"only stderr output\n".to_vec();
         });
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "vagrant".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
@@ -1753,103 +1793,96 @@ mod tests {
         let status = comm.execute_streaming("echo err", noop_streaming_cb, |s| err.push_str(s));
         assert!(matches!(status, Ok(0)));
         assert!(err.contains("only stderr output"));
+        Ok(())
     }
 
     #[test]
-    fn test_is_insecure_key_by_content_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn test_is_insecure_key_by_content_only() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("custom_key_name");
-        std::fs::write(&path, "contains insecure_private_key token").expect("write");
+        std::fs::write(&path, "contains insecure_private_key token")?;
         let comm = SshCommunicator::new(SshConfig::default());
         assert!(comm.is_insecure_key(&path));
+        Ok(())
     }
 
     #[test]
-    fn test_is_insecure_key_by_filename_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn test_is_insecure_key_by_filename_only() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("insecure_private_key");
-        std::fs::write(&path, "regular_non_vagrant_content").expect("write");
+        std::fs::write(&path, "regular_non_vagrant_content")?;
         let comm = SshCommunicator::new(SshConfig::default());
         assert!(comm.is_insecure_key(&path));
+        Ok(())
     }
 
     #[test]
-    fn test_is_insecure_key_and_replace() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock");
+    fn test_is_insecure_key_and_replace() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "vagrant".to_string(),
-            private_key_path: Some("insecure_private_key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("insecure_private_key")),
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
 
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
         let fake_insecure = temp_dir.path().join("insecure_private_key");
-        std::fs::write(&fake_insecure, "vAgRAnT insecure key test").expect("write");
+        std::fs::write(&fake_insecure, "vAgRAnT insecure key test")?;
 
         assert!(comm.is_insecure_key(&fake_insecure));
         assert!(comm.is_insecure_key(Path::new("/path/with/insecure_private_key")));
         assert!(!comm.is_insecure_key(Path::new("/path/with/safe_key")));
         let safe_file = temp_dir.path().join("safe_file");
-        std::fs::write(&safe_file, "clean content").expect("write");
+        std::fs::write(&safe_file, "clean content")?;
         assert!(!comm.is_insecure_key(&safe_file));
 
         let new_key = temp_dir.path().join("new_key");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
         assert!(comm.replace_insecure_key(&new_key).is_ok());
         assert!(new_key.exists());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
         let _ = SshCommunicator::generate_keypair();
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_upload_dir_and_download_dir() {
+    fn test_upload_dir_and_download_dir() -> Result<(), MigratoryError> {
         reset_mock();
         MOCK_STATE.with(|s| {
             s.borrow_mut().output = b"\n/remote/dir/file.txt\n".to_vec();
         });
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
             username: "vagrant".to_string(),
-            private_key_path: Some("key".to_string()),
+            private_key_path: Some(std::path::PathBuf::from("key")),
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
 
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
         let src_dir = temp_dir.path().join("src");
-        std::fs::create_dir_all(&src_dir).expect("mkdir");
-        std::fs::write(src_dir.join("test.txt"), "content").expect("write");
+        std::fs::create_dir_all(&src_dir)?;
+        std::fs::write(src_dir.join("test.txt"), "content")?;
         let sub = src_dir.join("sub");
-        std::fs::create_dir_all(&sub).expect("mkdir");
-        std::fs::write(sub.join("sub.txt"), "sub content").expect("write");
+        std::fs::create_dir_all(&sub)?;
+        std::fs::write(sub.join("sub.txt"), "sub content")?;
 
         assert!(comm.upload_dir(&src_dir, "/remote/dir").is_ok());
 
         let dst_dir = temp_dir.path().join("dst");
         assert!(comm.download_dir("/remote/dir", &dst_dir).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_stderr_wait_close_and_exit_status_errors() {
+    fn test_execute_stderr_wait_close_and_exit_status_errors() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1878,12 +1911,13 @@ mod tests {
             s.borrow_mut().fail_exit_status = true;
         });
         assert!(comm.execute("test").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_upload_lifecycle_errors() {
+    fn test_upload_lifecycle_errors() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1891,9 +1925,9 @@ mod tests {
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
         let local_path = temp_dir.path().join("local_file");
-        std::fs::write(&local_path, "data").expect("write");
+        std::fs::write(&local_path, "data")?;
 
         // Non-existent local file
         assert!(
@@ -1925,12 +1959,13 @@ mod tests {
             s.borrow_mut().fail_file_wait_close = true;
         });
         assert!(comm.upload(&local_path, "/tmp/remote").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_download_create_fail() {
+    fn test_download_create_fail() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1938,14 +1973,15 @@ mod tests {
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
         assert!(comm.download("/tmp/remote", temp_dir.path()).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_pty_additional_errors() {
+    fn test_execute_pty_additional_errors() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -1999,14 +2035,17 @@ mod tests {
             s.borrow_mut().fail_exit_status = true;
         });
         assert!(comm.execute_pty("uptime").is_err());
+        Ok(())
     }
 
+    /// No-op callback helper for streaming execution tests.
     fn noop_streaming_cb(_: &str) {}
 
     #[test]
-    fn test_execute_subsystem_additional_errors() {
+    fn test_execute_subsystem_additional_errors() -> Result<(), MigratoryError> {
+        noop_streaming_cb("test");
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -2032,12 +2071,13 @@ mod tests {
             s.borrow_mut().fail_wait_close = true;
         });
         assert!(comm.execute_subsystem("sftp").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_streaming_additional_errors() {
+    fn test_execute_streaming_additional_errors() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -2092,16 +2132,34 @@ mod tests {
             comm.execute_streaming("echo 1", noop_streaming_cb, noop_streaming_cb)
                 .is_err()
         );
+
+        // Stdout I/O fail
+        MOCK_STATE.with(|s| {
+            s.borrow_mut().fail_exit_status = false;
+            s.borrow_mut().fail_io = true;
+        });
+        assert!(
+            comm.execute_streaming("echo 1", noop_streaming_cb, noop_streaming_cb)
+                .is_err()
+        );
+
+        // Stderr I/O fail
+        MOCK_STATE.with(|s| {
+            s.borrow_mut().fail_io = false;
+            s.borrow_mut().fail_stderr_io = true;
+        });
+        assert!(
+            comm.execute_streaming("echo 1", noop_streaming_cb, noop_streaming_cb)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_replace_insecure_key_errors_and_branches() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock");
-
+    fn test_replace_insecure_key_errors_and_branches() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let _ = SshCommunicator::generate_keypair_real()?;
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -2109,16 +2167,12 @@ mod tests {
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
 
         // 1. generate_keypair fails
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "fail");
-        }
-        let res = comm.replace_insecure_key(&temp_dir.path().join("new_key"));
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
+        let res = comm.replace_insecure_key_with(&temp_dir.path().join("new_key"), || {
+            Err(MigratoryError::Generic("mock keygen failure".to_string()))
+        });
         assert!(res.is_err());
 
         // 2. new_private_key_path.parent() is None (Path::new(""))
@@ -2132,16 +2186,14 @@ mod tests {
         // 4. execute install_cmd fails
         MOCK_STATE.with(|s| s.borrow_mut().fail_exec = true);
         let res_exec_fail = comm.replace_insecure_key(&temp_dir.path().join("fail_key"));
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
         assert!(res_exec_fail.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_upload_dir_and_download_dir_errors() {
+    fn test_upload_dir_and_download_dir_errors() -> Result<(), MigratoryError> {
         reset_mock();
-        let port = spawn_dummy_server();
+        let port = spawn_dummy_server()?;
         let config = SshConfig {
             host: "127.0.0.1".to_string(),
             port,
@@ -2149,13 +2201,13 @@ mod tests {
             ..Default::default()
         };
         let comm = SshCommunicator::new(config);
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
         let src_dir = temp_dir.path().join("src");
-        std::fs::create_dir_all(&src_dir).expect("mkdir");
-        std::fs::write(src_dir.join("test.txt"), "content").expect("write");
+        std::fs::create_dir_all(&src_dir)?;
+        std::fs::write(src_dir.join("test.txt"), "content")?;
         let sub = src_dir.join("sub");
-        std::fs::create_dir_all(&sub).expect("mkdir");
-        std::fs::write(sub.join("sub.txt"), "sub content").expect("write");
+        std::fs::create_dir_all(&sub)?;
+        std::fs::write(sub.join("sub.txt"), "sub content")?;
 
         // upload_dir mkdir fails
         MOCK_STATE.with(|s| s.borrow_mut().fail_exec = true);
@@ -2174,7 +2226,7 @@ mod tests {
 
         // download_dir create_dir_all fails (dest is an existing file)
         let file_as_dir = temp_dir.path().join("file_dest");
-        std::fs::write(&file_as_dir, "file").expect("write");
+        std::fs::write(&file_as_dir, "file")?;
         let sub_dest = file_as_dir.join("sub");
         assert!(comm.download_dir("/remote/dir", &sub_dest).is_err());
 
@@ -2208,24 +2260,24 @@ mod tests {
             s.borrow_mut().fail_scp_recv = true;
         });
         assert!(comm.download_dir("/remote/dir", &dst).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_ensure_insecure_private_key() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let key_path = ensure_insecure_private_key(temp_dir.path()).expect("ensure key");
+    fn test_ensure_insecure_private_key() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
+        let key_path = ensure_insecure_private_key(temp_dir.path())?;
         assert!(key_path.exists());
-        let content = std::fs::read_to_string(&key_path).expect("read");
+        let content = std::fs::read_to_string(&key_path)?;
         assert!(content.contains("BEGIN RSA PRIVATE KEY"));
 
         // Call again when it already exists
-        let key_path_again =
-            ensure_insecure_private_key(temp_dir.path()).expect("ensure key again");
+        let key_path_again = ensure_insecure_private_key(temp_dir.path())?;
         assert_eq!(key_path, key_path_again);
 
         // Error path: create inside a file as directory
         let file_path = temp_dir.path().join("file_blocker");
-        std::fs::write(&file_path, "blocker").expect("write");
+        std::fs::write(&file_path, "blocker")?;
         let err_res = ensure_insecure_private_key(&file_path.join("sub"));
         assert!(err_res.is_err());
 
@@ -2234,13 +2286,13 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let ro_dir = temp_dir.path().join("ro_dir");
-            std::fs::create_dir(&ro_dir).expect("mkdir");
-            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o500))
-                .expect("chmod");
+            std::fs::create_dir(&ro_dir)?;
+            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o500))?;
             let ro_res = ensure_insecure_private_key(&ro_dir);
             assert!(ro_res.is_err());
             let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o700));
         }
+        Ok(())
     }
 
     #[test]

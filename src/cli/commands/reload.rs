@@ -31,27 +31,12 @@ pub fn execute(cwd: &Path, args: &ReloadArgs) -> Result<(), MigratoryError> {
             "Vagrant environment is locked by another process".to_string(),
         )
     })?;
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
-
     let ui = ConsoleUi;
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
+    let env_config = config::load_environment_config(cwd)?;
+    let state_mgr =
+        crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
 
-    let env_config = config::evaluate_vagrantfile(path_str).unwrap_or_default();
-    let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(cwd));
-
-    let machines = if env_config.machines.is_empty() {
-        let mut m = std::collections::HashMap::new();
-        m.insert(
-            "default".to_string(),
-            crate::config::MachineConfig::default(),
-        );
-        m
-    } else {
-        env_config.machines
-    };
+    let machines = env_config.machines;
 
     let target_names = config::resolve_target_machines(&machines, args.name.as_deref())?;
     let target_names = config::sort_machines_by_dependencies(&target_names, &machines, false)?;
@@ -77,7 +62,7 @@ pub fn execute(cwd: &Path, args: &ReloadArgs) -> Result<(), MigratoryError> {
             .vm
             .providers
             .first()
-            .map(|p| p.name.clone())
+            .map(|p| p.name.to_string())
             .unwrap_or_else(|| "virtualbox".to_string());
         let target_provider_name_str = target_provider_name.as_str();
 
@@ -94,18 +79,14 @@ pub fn execute(cwd: &Path, args: &ReloadArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-/// Executes the `try_halt_and_up` function.
+/// Attempts to halt and then boot the VM via the provider, emitting warnings on failure.
 ///
 /// # Arguments
 ///
-/// * `p` - The `p` argument.
-/// * `vm` - The `vm` argument.
-/// * `name` - The `name` argument.
-/// * `ui` - The `ui` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `p` - Provider instance for the target machine.
+/// * `vm` - Target VM configuration.
+/// * `name` - Target machine name for UI logging.
+/// * `ui` - Console UI instance for status and warning messages.
 fn try_halt_and_up(
     p: &dyn crate::provider::Provider,
     vm: &crate::config::VmConfig,
@@ -129,33 +110,26 @@ fn try_halt_and_up(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     #[cfg(unix)]
-    fn test_execute_invalid_utf8_path() {
+    fn test_execute_invalid_utf8_path() -> Result<(), MigratoryError> {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        let dir = tempfile::tempdir().expect("operation should succeed");
+        let dir = tempfile::tempdir()?;
         let mut path = dir.path().to_path_buf();
         let invalid_utf8 = vec![0xFF, 0xFF, 0xFF];
         path.push(OsString::from_vec(invalid_utf8));
 
-        let args = Default::default();
+        let args = ReloadArgs::default();
         let res = super::execute(&path, &args);
         assert!(res.is_err());
+        Ok(())
     }
-
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
     fn mock_args() -> ReloadArgs {
         ReloadArgs {
@@ -168,18 +142,19 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_reload_missing() {
-        let dir = tempdir().expect("failed");
+    fn test_execute_reload_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = mock_args();
 
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_reload_cyclic_dependency() {
-        let dir = tempdir().expect("failed");
+    fn test_execute_reload_cyclic_dependency() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vf = r#"
 Vagrant.configure("2") do |config|
@@ -191,15 +166,16 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vf).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vf)?;
         let args = mock_args();
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::Validation(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_reload_success() {
-        let dir = tempdir().expect("failed");
+    fn test_execute_reload_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = ReloadArgs {
             force: true,
@@ -219,16 +195,15 @@ Vagrant.configure("2") do |config|
   end
 end
 "#,
-        )
-        .expect("failed");
+        )?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&id_dir).expect("failed");
-        fs::write(id_dir.join("id"), "12345").expect("failed");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "12345")?;
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
@@ -250,28 +225,28 @@ end
             name: Some("nonexistent".to_string()),
         };
         assert!(execute(cwd, &args_missing).is_err());
+        Ok(())
     }
 
     /// Tests reload error when environment is locked.
     #[test]
-    fn test_execute_reload_locked_environment() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_reload_locked_environment() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
-        let mut lock_file = local_state
-            .create_lock_file()
-            .expect("operation should succeed");
-        let _guard = lock_file.write().expect("operation should succeed");
+        let mut lock_file = local_state.create_lock_file()?;
+        let _guard = lock_file.write()?;
 
         let args = mock_args();
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests reload error when a before trigger fails.
     #[test]
-    fn test_execute_reload_trigger_before_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_reload_trigger_before_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -280,17 +255,18 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = mock_args();
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests reload error when an after trigger fails.
     #[test]
-    fn test_execute_reload_trigger_after_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_reload_trigger_after_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -299,38 +275,39 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = mock_args();
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests reload error when reading machine id fails.
     #[test]
-    fn test_execute_reload_read_id_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_reload_read_id_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
-        // Make the machine id path a directory so read_to_string fails
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox")
             .join("id");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
+        fs::create_dir_all(&id_dir)?;
 
         let args = mock_args();
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests reload error when provider is unknown.
     #[test]
-    fn test_execute_reload_unknown_provider() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_reload_unknown_provider() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -339,19 +316,17 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = mock_args();
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_reload_no_provider() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("failed");
+    fn test_execute_reload_no_provider() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = mock_args();
 
@@ -362,39 +337,34 @@ Vagrant.configure("2") do |config|
   config.vm.box = "base"
 end
         "#,
-        )
-        .expect("failed");
+        )?;
 
         let state_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(&state_dir).expect("failed");
-        fs::write(state_dir.join("id"), "12345").expect("failed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "12345")?;
 
-        let _ = execute(cwd, &args);
+        assert!(execute(cwd, &args).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_reload_empty_config() {
-        let dir = tempdir().expect("failed");
+    fn test_execute_reload_empty_config() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = mock_args();
 
-        // Write an invalid ruby script to fail parsing and return default empty config
-        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax").expect("failed");
+        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")?;
+        assert!(execute(cwd, &args).is_err());
 
+        fs::write(cwd.join("Vagrantfile"), "# Empty Vagrantfile")?;
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_reload_non_virtualbox_provider() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        }
-
-        let dir = tempdir().expect("failed");
+    fn test_execute_reload_non_virtualbox_provider() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = mock_args();
 
@@ -405,19 +375,14 @@ Vagrant.configure("2") do |config|
   config.vm.provider "docker"
 end
         "#,
-        )
-        .expect("failed");
+        )?;
 
-        let state_mgr = provider::StateManager::new(cwd.join(".vagrant"));
-        state_mgr
-            .write_id("default", "docker", "docker-id-reload")
-            .expect("failed");
+        let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
+        state_mgr.write_id("default", "docker", "docker-id-reload")?;
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-        }
+        Ok(())
     }
 }

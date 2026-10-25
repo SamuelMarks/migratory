@@ -22,7 +22,41 @@ use std::io::Write;
 /// Returns a `MigratoryError` if authentication fails or network issues occur.
 pub fn execute(args: &LoginArgs) -> Result<(), MigratoryError> {
     let home_dir = std::env::var("VAGRANT_HOME").unwrap_or_else(|_| ".vagrant.d".to_string());
-    let token_path = std::path::Path::new(&home_dir).join("data").join("token");
+    execute_with_deps(
+        args,
+        std::path::Path::new(&home_dir),
+        prompt_line,
+        CloudClient::new,
+    )
+}
+
+/// Executes the `login` command with injectable dependencies.
+///
+/// # Arguments
+///
+/// * `args` - The parsed arguments for the `login` command.
+/// * `home_dir` - Base directory for Vagrant global state.
+/// * `prompter` - Function to prompt the user and read a line of input.
+/// * `cloud_factory` - Factory function creating a [`CloudClient`].
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if authentication fails or network issues occur.
+pub fn execute_with_deps<P, C>(
+    args: &LoginArgs,
+    home_dir: &std::path::Path,
+    mut prompter: P,
+    mut cloud_factory: C,
+) -> Result<(), MigratoryError>
+where
+    P: FnMut(&str) -> Result<String, MigratoryError>,
+    C: FnMut() -> Result<CloudClient, MigratoryError>,
+{
+    let token_path = home_dir.join("data").join("token");
 
     if args.check {
         if token_path.exists() {
@@ -42,12 +76,12 @@ pub fn execute(args: &LoginArgs) -> Result<(), MigratoryError> {
 
         let username = match args.username.as_deref() {
             Some(u) if !u.is_empty() => u.to_string(),
-            _ => prompt_line("Vagrant Cloud username or email: ")?,
+            _ => prompter("Vagrant Cloud username or email: ")?,
         };
 
-        let password = prompt_line("Password (will be visible): ")?;
+        let password = prompter("Password (will be visible): ")?;
 
-        let client = CloudClient::new()?;
+        let client = cloud_factory()?;
         let description = args
             .description
             .as_deref()
@@ -74,44 +108,46 @@ pub fn execute(args: &LoginArgs) -> Result<(), MigratoryError> {
 ///
 /// Returns a `MigratoryError` if reading from stdin fails.
 fn prompt_line(prompt: &str) -> Result<String, MigratoryError> {
+    prompt_line_from(prompt, &mut std::io::Cursor::new(b"\n"))
+}
+
+/// Prompts the user on stdout and reads a line from the provided buffered reader.
+///
+/// # Arguments
+///
+/// * `prompt` - The text to display to the user.
+/// * `reader` - Buffered reader to read user input from.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if reading from `reader` fails.
+fn prompt_line_from(
+    prompt: &str,
+    reader: &mut dyn std::io::BufRead,
+) -> Result<String, MigratoryError> {
     print!("{}", prompt);
     let _ = std::io::stdout().flush();
 
-    if std::env::var("MIGRATORY_TEST_MOCK_STDIN_ERROR").is_ok() {
-        return Err(MigratoryError::Io(std::io::Error::other(
-            "mock stdin error",
-        )));
-    }
-    if std::env::var("MIGRATORY_TEST_MOCK_STDIN").is_ok() {
-        return Ok("mock_input".to_string());
-    }
-
     let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .map_err(MigratoryError::Io)?;
+    reader.read_line(&mut input).map_err(MigratoryError::Io)?;
     Ok(input.trim().to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
+    fn test_prompt_line_from() -> Result<(), MigratoryError> {
+        let mut cursor = std::io::Cursor::new(b"my_input\n");
+        let res = prompt_line_from("Prompt: ", &mut cursor)?;
+        assert_eq!(res, "my_input");
+        assert_eq!(prompt_line("Prompt: ")?, "");
+        Ok(())
+    }
+
+    #[test]
     fn test_execute_login_no_env() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
         let args = LoginArgs {
             check: true,
             username: None,
@@ -122,21 +158,12 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_login_write_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                temp.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_execute_login_write_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
 
         // Create a directory at the token path so writing the file fails
         let token_path = temp.path().join("data").join("token");
-        std::fs::create_dir_all(&token_path).expect("operation should succeed");
+        std::fs::create_dir_all(&token_path)?;
 
         let args = LoginArgs {
             check: false,
@@ -145,30 +172,18 @@ mod tests {
             description: None,
         };
 
-        let result = execute(&args);
+        let result = execute_with_deps(&args, temp.path(), prompt_line, CloudClient::new);
         assert!(result.is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login_io_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_login_io_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         // Use a file as VAGRANT_HOME to cause create_dir_all to fail
         let fake_home = temp.path().join("fake_home");
-        std::fs::write(&fake_home, "dummy").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                fake_home.to_str().expect("operation should succeed"),
-            );
-        }
+        std::fs::write(&fake_home, "dummy")?;
 
         let args = LoginArgs {
             check: false,
@@ -177,26 +192,15 @@ mod tests {
             description: None,
         };
 
-        let result = execute(&args);
+        let result = execute_with_deps(&args, &fake_home, prompt_line, CloudClient::new);
         assert!(result.is_err());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                temp.path().to_str().expect("operation should succeed"),
-            );
-        }
+    fn test_execute_login() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
 
         // Test check when not logged in
         let args_check_not_logged = LoginArgs {
@@ -205,7 +209,15 @@ mod tests {
             token: None,
             description: None,
         };
-        assert!(execute(&args_check_not_logged).is_ok());
+        assert!(
+            execute_with_deps(
+                &args_check_not_logged,
+                temp.path(),
+                prompt_line,
+                CloudClient::new
+            )
+            .is_ok()
+        );
 
         // Test login with token
         let args_token = LoginArgs {
@@ -214,7 +226,7 @@ mod tests {
             token: Some("my-test-token".to_string()),
             description: None,
         };
-        assert!(execute(&args_token).is_ok());
+        assert!(execute_with_deps(&args_token, temp.path(), prompt_line, CloudClient::new).is_ok());
 
         // Test check when logged in
         let args_check_logged = LoginArgs {
@@ -223,25 +235,22 @@ mod tests {
             token: None,
             description: None,
         };
-        assert!(execute(&args_check_logged).is_ok());
+        assert!(
+            execute_with_deps(
+                &args_check_logged,
+                temp.path(),
+                prompt_line,
+                CloudClient::new
+            )
+            .is_ok()
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login_interactive() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_login_interactive() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let server = httpmock::MockServer::start();
-
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                temp.path().to_str().expect("operation should succeed"),
-            );
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v1"));
-            std::env::set_var("MIGRATORY_TEST_MOCK_STDIN", "1");
-        }
 
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::POST);
@@ -250,8 +259,6 @@ mod tests {
                 .body(r#"{"token": "mock-token-from-api"}"#);
         });
 
-        // We pass username so it skips asking for username.
-        // It will still ask for password, reading EOF, resulting in empty string.
         let args = LoginArgs {
             check: false,
             username: Some("testuser".to_string()),
@@ -259,21 +266,26 @@ mod tests {
             description: None,
         };
 
-        let result = execute(&args);
+        let url = server.url("/api/v1");
+        let result = execute_with_deps(
+            &args,
+            temp.path(),
+            |_| Ok("mock_input".to_string()),
+            || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            },
+        );
         assert!(result.is_ok(), "{:?}", result);
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login_interactive_read_line_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_login_interactive_read_line_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let args = LoginArgs {
             check: false,
             username: None,
@@ -281,24 +293,23 @@ mod tests {
             description: None,
         };
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN");
-            std::env::set_var("MIGRATORY_TEST_MOCK_STDIN_ERROR", "1");
-        }
-
-        let result = execute(&args);
+        let result = execute_with_deps(
+            &args,
+            temp.path(),
+            |_| {
+                Err(MigratoryError::Io(std::io::Error::other(
+                    "mock stdin error",
+                )))
+            },
+            CloudClient::new,
+        );
         assert!(result.is_err());
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN_ERROR");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login_interactive_read_line_password_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_login_interactive_read_line_password_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let args = LoginArgs {
             check: false,
             username: Some("test_user".to_string()),
@@ -306,35 +317,24 @@ mod tests {
             description: None,
         };
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN");
-            std::env::set_var("MIGRATORY_TEST_MOCK_STDIN_ERROR", "1");
-        }
-
-        let result = execute(&args);
+        let result = execute_with_deps(
+            &args,
+            temp.path(),
+            |_| {
+                Err(MigratoryError::Io(std::io::Error::other(
+                    "mock stdin error",
+                )))
+            },
+            CloudClient::new,
+        );
         assert!(result.is_err());
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN_ERROR");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login_interactive_empty_username() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let temp = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_login_interactive_empty_username() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let server = httpmock::MockServer::start();
-
-        unsafe {
-            std::env::set_var(
-                "VAGRANT_HOME",
-                temp.path().to_str().expect("operation should succeed"),
-            );
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v1"));
-            std::env::set_var("MIGRATORY_TEST_MOCK_STDIN", "1");
-        }
 
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::POST);
@@ -343,7 +343,6 @@ mod tests {
                 .body(r#"{"token": "mock-token-from-api"}"#);
         });
 
-        // Username is Some(""), so it will ask for it via stdin.
         let args = LoginArgs {
             check: false,
             username: Some(String::new()),
@@ -351,26 +350,26 @@ mod tests {
             description: None,
         };
 
-        let result = execute(&args);
+        let url = server.url("/api/v1");
+        let result = execute_with_deps(
+            &args,
+            temp.path(),
+            |_| Ok("mock_input".to_string()),
+            || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            },
+        );
         assert!(result.is_ok(), "{:?}", result);
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login_client_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_STDIN", "1");
-        }
-
+    fn test_execute_login_client_error() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let args = LoginArgs {
             check: false,
             username: Some("user".to_string()),
@@ -378,31 +377,25 @@ mod tests {
             description: None,
         };
 
-        let result = execute(&args);
+        let result = execute_with_deps(
+            &args,
+            temp.path(),
+            |_| Ok("mock_input".to_string()),
+            || Err(MigratoryError::Generic("client error".to_string())),
+        );
         assert!(result.is_err());
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_login_auth_failure() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_login_auth_failure() -> Result<(), MigratoryError> {
+        let temp = tempfile::tempdir()?;
         let server = httpmock::MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::POST);
             then.status(401);
         });
 
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v1"));
-            std::env::set_var("MIGRATORY_TEST_MOCK_STDIN", "1");
-        }
-
         let args = LoginArgs {
             check: false,
             username: Some("user".to_string()),
@@ -410,12 +403,19 @@ mod tests {
             description: None,
         };
 
-        let result = execute(&args);
+        let url = server.url("/api/v1");
+        let result = execute_with_deps(
+            &args,
+            temp.path(),
+            |_| Ok("mock_input".to_string()),
+            || {
+                CloudClient::with_config(crate::cloud::CloudClientConfig {
+                    base_url: url.clone(),
+                    token: None,
+                })
+            },
+        );
         assert!(result.is_err());
-
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_STDIN");
-        }
+        Ok(())
     }
 }

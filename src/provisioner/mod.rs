@@ -4,12 +4,19 @@ use crate::communicator::Communicator;
 use crate::error::MigratoryError;
 use std::collections::HashMap;
 
+/// Ansible provisioner implementation.
 pub mod ansible;
+/// Chef provisioner implementation.
 pub mod chef;
+/// Docker provisioner implementation.
 pub mod docker;
+/// File upload provisioner implementation.
 pub mod file;
+/// Puppet provisioner implementation.
 pub mod puppet;
+/// Salt provisioner implementation.
 pub mod salt;
+/// Shell script provisioner implementation.
 pub mod shell;
 
 /// Interface for machine provisioners.

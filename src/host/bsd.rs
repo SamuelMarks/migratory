@@ -5,8 +5,35 @@
 
 use super::Host;
 use crate::error::MigratoryError;
-#[cfg(not(test))]
 use std::process::Command;
+
+/// Executes a command and returns `(success, stdout)` or an IO error.
+///
+/// # Arguments
+///
+/// * `prog` - Program name.
+/// * `args` - Command-line arguments.
+///
+/// # Returns
+///
+/// Returns `Ok((status.success(), stdout))` on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError::Io`] if spawning fails.
+fn default_bsd_runner(prog: &str, args: &[&str]) -> Result<(bool, String), MigratoryError> {
+    if cfg!(test) && prog != "echo" {
+        return Ok((true, "0\n".to_string()));
+    }
+    let output = Command::new(prog)
+        .args(args)
+        .output()
+        .map_err(MigratoryError::Io)?;
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
 
 /// BSD host implementation.
 ///
@@ -30,17 +57,7 @@ impl Host for BsdHost {
     ///
     /// Returns `true` if `std::env::consts::OS` is `"freebsd"`, `"openbsd"`, or `"netbsd"`.
     fn is_match(&self) -> bool {
-        if let Ok(mock) = std::env::var("MOCK_OS") {
-            return mock == "bsd"
-                || mock == "freebsd"
-                || mock == "openbsd"
-                || mock == "netbsd"
-                || mock == "dragonfly";
-        }
-        std::env::consts::OS == "freebsd"
-            || std::env::consts::OS == "openbsd"
-            || std::env::consts::OS == "netbsd"
-            || std::env::consts::OS == "dragonfly"
+        self.is_match_os(std::env::consts::OS)
     }
 
     /// Configures NFS exports on the BSD host and reloads `mountd`.
@@ -54,41 +71,9 @@ impl Host for BsdHost {
     /// Returns a `MigratoryError` if restarting `mountd` fails.
     fn configure_nfs(
         &self,
-        _folders: &[crate::config::SyncedFolderConfig],
+        folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
-        #[cfg(not(test))]
-        {
-            let uid = std::process::Command::new("id")
-                .arg("-u")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "1000".to_string());
-            let gid = std::process::Command::new("id")
-                .arg("-g")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "1000".to_string());
-
-            let export_line = Self::generate_nfs_exports(_folders, &uid, &gid);
-            let cmd = format!(
-                "echo '{}' | sudo tee -a /etc/exports > /dev/null",
-                export_line
-            );
-            let _ = Command::new("sh").arg("-c").arg(cmd).status();
-
-            let status = Command::new("sudo")
-                .arg("/etc/rc.d/mountd")
-                .arg("reload")
-                .status()
-                .map_err(MigratoryError::Io)?;
-
-            if !status.success() {
-                return Err(MigratoryError::Generic(
-                    "Failed to reload mountd on BSD host".to_string(),
-                ));
-            }
-        }
-        Ok(())
+        self.configure_nfs_with(folders, default_bsd_runner)
     }
 
     /// Configures SMB sharing on the BSD host.
@@ -102,31 +87,9 @@ impl Host for BsdHost {
     /// Returns a `MigratoryError` if the configuration fails.
     fn configure_smb(
         &self,
-        _folders: &[crate::config::SyncedFolderConfig],
+        folders: &[crate::config::SyncedFolderConfig],
     ) -> Result<(), MigratoryError> {
-        #[cfg(not(test))]
-        {
-            let conf_block = Self::generate_smb_conf(_folders);
-            let cmd = format!(
-                "echo '{}' | sudo tee -a /usr/local/etc/smb4.conf > /dev/null",
-                conf_block
-            );
-            let _ = Command::new("sh").arg("-c").arg(cmd).status();
-
-            let status = Command::new("sudo")
-                .arg("service")
-                .arg("samba_server")
-                .arg("reload")
-                .status()
-                .map_err(MigratoryError::Io)?;
-
-            if !status.success() {
-                return Err(MigratoryError::Generic(
-                    "Failed to reload Samba server on BSD host".to_string(),
-                ));
-            }
-        }
-        Ok(())
+        self.configure_smb_with(folders, default_bsd_runner)
     }
 
     /// Checks if the current user has administrative (root) privileges on BSD.
@@ -139,17 +102,7 @@ impl Host for BsdHost {
     ///
     /// Returns a `MigratoryError` if the check fails.
     fn check_admin(&self) -> Result<bool, MigratoryError> {
-        #[cfg(not(test))]
-        {
-            let output = Command::new("id")
-                .arg("-u")
-                .output()
-                .map_err(MigratoryError::Io)?;
-            let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok(uid == "0")
-        }
-        #[cfg(test)]
-        Ok(true)
+        self.check_admin_with(default_bsd_runner)
     }
 
     /// Resolves the host IP for network bridging on BSD.
@@ -162,7 +115,7 @@ impl Host for BsdHost {
     ///
     /// Returns a `MigratoryError` if the IP cannot be resolved.
     fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
-        resolve_bsd_host_ip()
+        self.resolve_host_ip_with(default_bsd_runner)
     }
 
     fn service_manager(&self) -> &str {
@@ -178,61 +131,185 @@ impl Host for BsdHost {
     }
 }
 
-/// Resolves the primary local IPv4 address on BSD hosts.
-///
-/// # Returns
-///
-/// Returns the resolved IPv4 address as a `String`.
-///
-/// # Errors
-///
-/// Returns a `MigratoryError` if network configuration cannot be inspected.
-#[cfg(not(test))]
-fn resolve_bsd_host_ip() -> Result<String, MigratoryError> {
-    if let Ok(output) = std::process::Command::new("route")
-        .args(["-n", "get", "default"])
-        .output()
+impl BsdHost {
+    /// Checks whether the given `os` identifier matches a BSD operating system.
+    ///
+    /// # Arguments
+    ///
+    /// * `os` - Target OS name string.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if `os` is a BSD variant.
+    pub fn is_match_os(&self, os: &str) -> bool {
+        matches!(os, "bsd" | "freebsd" | "openbsd" | "netbsd" | "dragonfly")
+    }
+
+    /// Configures NFS exports on the BSD host using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if reloading `mountd` fails.
+    pub fn configure_nfs_with<F>(
+        &self,
+        folders: &[crate::config::SyncedFolderConfig],
+        mut runner: F,
+    ) -> Result<(), MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
+        let uid = runner("id", &["-u"])
+            .map(|(_, s)| s.trim().to_string())
+            .unwrap_or_else(|_| "1000".to_string());
+        let gid = runner("id", &["-g"])
+            .map(|(_, s)| s.trim().to_string())
+            .unwrap_or_else(|_| "1000".to_string());
+
+        let export_line = Self::generate_nfs_exports(folders, &uid, &gid);
+        let cmd = format!("echo '{export_line}' | sudo tee -a /etc/exports > /dev/null");
+        let _ = runner("sh", &["-c", &cmd]);
+
+        let (ok, _) = runner("sudo", &["/etc/rc.d/mountd", "reload"])?;
+        if !ok {
+            return Err(MigratoryError::Generic(
+                "Failed to reload mountd on BSD host".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Configures SMB sharing on the BSD host using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `folders` - Configured synced folders.
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if reloading `samba_server` fails.
+    pub fn configure_smb_with<F>(
+        &self,
+        folders: &[crate::config::SyncedFolderConfig],
+        mut runner: F,
+    ) -> Result<(), MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        let conf_block = Self::generate_smb_conf(folders);
+        let cmd = format!("echo '{conf_block}' | sudo tee -a /usr/local/etc/smb4.conf > /dev/null");
+        let _ = runner("sh", &["-c", &cmd]);
+
+        let (ok, _) = runner("sudo", &["service", "samba_server", "reload"])?;
+        if !ok {
+            return Err(MigratoryError::Generic(
+                "Failed to reload Samba server on BSD host".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks whether the current user is root (UID 0) using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if UID is `"0"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if the command fails.
+    pub fn check_admin_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        let (_, stdout) = runner("id", &["-u"])?;
+        Ok(stdout.trim() == "0")
+    }
+
+    /// Resolves the primary local IPv4 address on BSD hosts using a custom command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `runner` - Command execution callback.
+    ///
+    /// # Returns
+    ///
+    /// Returns the resolved IPv4 address string.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` on failure.
+    pub fn resolve_host_ip_with<F>(&self, mut runner: F) -> Result<String, MigratoryError>
+    where
+        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
+    {
+        if let Ok((_, stdout)) = runner("route", &["-n", "get", "default"]) {
+            return Ok(Self::parse_host_ip_from_route(&stdout));
+        }
+        Ok("192.168.1.1".to_string())
+    }
+
+    /// Parses the default gateway IP from `route -n get default` output, falling back to `192.168.1.1`.
+    ///
+    /// # Arguments
+    ///
+    /// * `route_output` - Raw stdout from `route -n get default`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the resolved IPv4 address string.
+    pub fn parse_host_ip_from_route(route_output: &str) -> String {
+        for line in route_output.lines() {
             let trimmed = line.trim();
             if let Some(gateway) = trimmed.strip_prefix("gateway:") {
                 let gw = gateway.trim().to_string();
                 if !gw.is_empty() {
-                    return Ok(gw);
+                    return gw;
                 }
             }
         }
+        "192.168.1.1".to_string()
     }
-    Ok("192.168.1.1".to_string())
-}
 
-/// Resolves the host IP for BSD in test mode, respecting mock overrides.
-///
-/// # Returns
-///
-/// Returns the resolved or mock IPv4 address as a `String`.
-///
-/// # Errors
-///
-/// Returns a `MigratoryError` on failure.
-#[cfg(test)]
-fn resolve_bsd_host_ip() -> Result<String, MigratoryError> {
-    if let Ok(mock_ip) = std::env::var("MIGRATORY_TEST_MOCK_HOST_IP") {
-        return Ok(mock_ip);
-    }
-    Ok("192.168.1.1".to_string())
-}
-
-impl BsdHost {
     /// Detects installed hypervisor capabilities on BSD.
     ///
     /// # Returns
     ///
     /// Returns a list of supported hypervisors detected on the BSD host (e.g. bhyve, virtualbox).
     pub fn capabilities(&self) -> Vec<String> {
+        self.capabilities_with("bhyve", "VBoxManage")
+    }
+
+    /// Detects installed hypervisor capabilities on BSD using custom binary paths.
+    ///
+    /// # Arguments
+    ///
+    /// * `bhyve_bin` - Path or binary name for `bhyve`.
+    /// * `vbox_bin` - Path or binary name for `VBoxManage`.
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of supported hypervisors detected on the BSD host.
+    pub fn capabilities_with(&self, bhyve_bin: &str, vbox_bin: &str) -> Vec<String> {
         let mut caps = Vec::new();
-        if std::process::Command::new("bhyve")
+        if std::process::Command::new(bhyve_bin)
             .arg("-h")
             .output()
             .map(|o| o.status.success() || !o.stderr.is_empty())
@@ -240,7 +317,7 @@ impl BsdHost {
         {
             caps.push("bhyve".to_string());
         }
-        if std::process::Command::new("VBoxManage")
+        if std::process::Command::new(vbox_bin)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -270,11 +347,14 @@ impl BsdHost {
         let mut lines = String::new();
         lines.push_str("# VAGRANT-BEGIN\n");
         for sf in folders {
-            if sf.folder_type.as_deref() == Some("nfs") && !sf.disabled {
+            if sf.folder_type == Some(crate::config::SyncedFolderType::Nfs) && !sf.disabled {
                 lines.push_str(&format!(
-                    "\"{}\" -alldirs -mapall={}:{} 127.0.0.1\n",
-                    sf.host_path, uid, gid
+                    r#""{}" -alldirs -mapall={}:{} 127.0.0.1"#,
+                    sf.host_path.display(),
+                    uid,
+                    gid
                 ));
+                lines.push('\n');
             }
         }
         lines.push_str("# VAGRANT-END\n");
@@ -292,11 +372,15 @@ impl BsdHost {
     /// Returns the Samba configuration block.
     pub fn generate_smb_conf(folders: &[crate::config::SyncedFolderConfig]) -> String {
         let mut conf = String::new();
-        conf.push_str("# VAGRANT-BEGIN-SMB\n");
+        conf.push_str(
+            "# VAGRANT-BEGIN-SMB
+",
+        );
         for sf in folders {
-            if sf.folder_type.as_deref() == Some("smb") && !sf.disabled {
+            if sf.folder_type == Some(crate::config::SyncedFolderType::Smb) && !sf.disabled {
                 let name = sf
                     .guest_path
+                    .to_string_lossy()
                     .replace('/', "_")
                     .trim_start_matches('_')
                     .to_string();
@@ -306,124 +390,133 @@ impl BsdHost {
                     name
                 };
                 conf.push_str(&format!(
-                    "[{}]\npath = {}\nread only = no\nguest ok = yes\n\n",
-                    share_name, sf.host_path
+                    "[{}]
+path = {}
+read only = no
+guest ok = yes
+
+",
+                    share_name,
+                    sf.host_path.display()
                 ));
             }
         }
-        conf.push_str("# VAGRANT-END-SMB\n");
+        conf.push_str(
+            "# VAGRANT-END-SMB
+",
+        );
         conf
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
-    fn test_bsd_host() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
+    fn test_bsd_host() -> Result<(), MigratoryError> {
         let host = BsdHost;
+        let _ = default_bsd_runner("echo", &["0"]);
         assert_eq!(host.name(), "bsd");
         assert!(host.configure_nfs(&[]).is_ok());
         assert!(host.configure_smb(&[]).is_ok());
-        assert!(host.check_admin().expect("admin check should succeed"));
+        assert!(host.check_admin()?);
+        assert_eq!(host.resolve_host_ip()?, "192.168.1.1");
         assert_eq!(
-            host.resolve_host_ip().expect("resolve ip should succeed"),
+            BsdHost::parse_host_ip_from_route(
+                "   gateway: 10.0.0.99
+"
+            ),
+            "10.0.0.99"
+        );
+        assert_eq!(
+            BsdHost::parse_host_ip_from_route(
+                "gateway:
+"
+            ),
             "192.168.1.1"
         );
 
-        unsafe { std::env::set_var("MIGRATORY_TEST_MOCK_HOST_IP", "10.0.0.99") };
-        assert_eq!(
-            host.resolve_host_ip().expect("resolve ip should succeed"),
-            "10.0.0.99"
+        // Test configure_nfs_with and configure_smb_with failure and fallback branches
+        assert!(
+            host.configure_nfs_with(&[], |prog, _| {
+                if prog == "id" {
+                    Err(MigratoryError::Generic("id err".to_string()))
+                } else {
+                    Ok((false, String::new()))
+                }
+            })
+            .is_err()
         );
-        unsafe { std::env::remove_var("MIGRATORY_TEST_MOCK_HOST_IP") };
+        assert!(
+            host.configure_smb_with(&[], |_, _| Ok((false, String::new())))
+                .is_err()
+        );
+        assert!(!host.check_admin_with(|_, _| Ok((true, "1000".to_string())))?);
+        assert_eq!(
+            host.resolve_host_ip_with(|_, _| Err(MigratoryError::Generic("err".to_string())))?,
+            "192.168.1.1"
+        );
 
         assert_eq!(host.service_manager(), "rc.d");
-        let ifaces = host.list_bridge_interfaces();
-        assert!(ifaces.is_ok());
+        let ifaces = host.list_bridge_interfaces()?;
         assert_eq!(
-            ifaces.expect("operation should succeed"),
+            ifaces,
             vec!["em0".to_string(), "re0".to_string(), "bridge0".to_string(),]
         );
 
-        unsafe { std::env::set_var("MOCK_OS", "freebsd") };
-        assert!(host.is_match());
+        assert_eq!(host.is_match(), host.is_match_os(std::env::consts::OS));
+        assert!(host.is_match_os("freebsd"));
+        assert!(host.is_match_os("openbsd"));
+        assert!(host.is_match_os("netbsd"));
+        assert!(host.is_match_os("dragonfly"));
+        assert!(host.is_match_os("bsd"));
+        assert!(!host.is_match_os("linux"));
 
-        unsafe { std::env::set_var("MOCK_OS", "openbsd") };
-        assert!(host.is_match());
-
-        unsafe { std::env::set_var("MOCK_OS", "netbsd") };
-        assert!(host.is_match());
-
-        unsafe { std::env::set_var("MOCK_OS", "dragonfly") };
-        assert!(host.is_match());
-
-        unsafe { std::env::set_var("MOCK_OS", "bsd") };
-        assert!(host.is_match());
-
-        unsafe { std::env::set_var("MOCK_OS", "linux") };
-        assert!(!host.is_match());
-
-        unsafe { std::env::remove_var("MOCK_OS") };
-
-        let caps = host.capabilities();
-        let _ = caps;
+        let _ = host.capabilities();
+        let caps = host.capabilities_with("echo", "echo");
+        assert!(caps.contains(&"bhyve".to_string()));
+        assert!(caps.contains(&"virtualbox".to_string()));
+        let missing = host.capabilities_with("nonexistent_bhyve_xyz", "nonexistent_vbox_xyz");
+        assert!(missing.is_empty());
+        Ok(())
     }
 
     #[test]
     fn test_bsd_nfs_and_smb_generation() {
         let folders = vec![
             crate::config::SyncedFolderConfig {
-                host_path: "/home/user/project".to_string(),
-                guest_path: "/vagrant".to_string(),
-                folder_type: Some("nfs".to_string()),
+                host_path: std::path::PathBuf::from("/home/user/project"),
+                guest_path: std::path::PathBuf::from("/vagrant"),
+                folder_type: Some(crate::config::SyncedFolderType::Nfs),
                 disabled: false,
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {
-                host_path: "/home/user/share".to_string(),
-                guest_path: "/shared".to_string(),
-                folder_type: Some("smb".to_string()),
+                host_path: std::path::PathBuf::from("/home/user/share"),
+                guest_path: std::path::PathBuf::from("/shared"),
+                folder_type: Some(crate::config::SyncedFolderType::Smb),
                 disabled: false,
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {
-                host_path: "/home/user/root_share".to_string(),
-                guest_path: "/".to_string(),
-                folder_type: Some("smb".to_string()),
+                host_path: std::path::PathBuf::from("/home/user/root_share"),
+                guest_path: std::path::PathBuf::from("/"),
+                folder_type: Some(crate::config::SyncedFolderType::Smb),
                 disabled: false,
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {
-                host_path: "/home/user/disabled".to_string(),
-                guest_path: "/disabled".to_string(),
-                folder_type: Some("nfs".to_string()),
+                host_path: std::path::PathBuf::from("/home/user/disabled"),
+                guest_path: std::path::PathBuf::from("/disabled"),
+                folder_type: Some(crate::config::SyncedFolderType::Nfs),
                 disabled: true,
                 ..Default::default()
             },
             crate::config::SyncedFolderConfig {
-                host_path: "/home/user/root_share".to_string(),
-                guest_path: "/".to_string(),
-                folder_type: Some("smb".to_string()),
-                disabled: false,
-                ..Default::default()
-            },
-            crate::config::SyncedFolderConfig {
-                host_path: "/home/user/disabled_smb".to_string(),
-                guest_path: "/disabled_smb".to_string(),
-                folder_type: Some("smb".to_string()),
+                host_path: std::path::PathBuf::from("/home/user/disabled_smb"),
+                guest_path: std::path::PathBuf::from("/disabled_smb"),
+                folder_type: Some(crate::config::SyncedFolderType::Smb),
                 disabled: true,
                 ..Default::default()
             },
@@ -431,7 +524,7 @@ mod tests {
 
         let exports = BsdHost::generate_nfs_exports(&folders, "1000", "1000");
         assert!(exports.contains("# VAGRANT-BEGIN"));
-        assert!(exports.contains("\"/home/user/project\" -alldirs -mapall=1000:1000 127.0.0.1"));
+        assert!(exports.contains(r#""/home/user/project" -alldirs -mapall=1000:1000 127.0.0.1"#));
         assert!(!exports.contains("/home/user/disabled"));
         assert!(exports.contains("# VAGRANT-END"));
 

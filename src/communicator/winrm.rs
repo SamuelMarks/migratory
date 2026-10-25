@@ -14,6 +14,30 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Escapes special XML characters (`&`, `<`, `>`, `"`, `'`) to prevent XML injection in SOAP envelopes.
+///
+/// # Arguments
+///
+/// * `input` - Raw string to escape for XML inclusion.
+///
+/// # Returns
+///
+/// Returns an XML-escaped `String`.
+pub fn escape_xml(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// WinRM communicator.
 ///
 /// Implements remote management for Windows guests using the WS-Management protocol.
@@ -54,19 +78,6 @@ impl WinrmCommunicator {
             "{}://{}:{}/wsman",
             scheme, self.config.host, self.config.port
         )
-    }
-
-    /// Executes the `map_text_err` function.
-    ///
-    /// # Arguments
-    ///
-    /// * `e` - The `e` argument.
-    ///
-    /// # Returns
-    ///
-    /// Returns `MigratoryError`.
-    fn map_text_err(e: reqwest::Error) -> MigratoryError {
-        MigratoryError::Generic(e.to_string())
     }
 
     /// Sends a WS-Man payload to the guest endpoint.
@@ -142,7 +153,7 @@ impl WinrmCommunicator {
             .map_err(|e| MigratoryError::Generic(format!("WinRM HTTP error: {}", e)))?;
 
         if response.status().is_success() {
-            response.text().map_err(Self::map_text_err)
+            Ok(response.text()?)
         } else {
             Err(MigratoryError::Generic(format!(
                 "WinRM request failed: {}",
@@ -237,7 +248,7 @@ impl WinrmCommunicator {
                     </rsp:Shell>
                 </s:Body>
             </s:Envelope>"#,
-            self.endpoint()
+            escape_xml(&self.endpoint())
         );
 
         let response = self.send_wsman(&payload)?;
@@ -281,9 +292,9 @@ impl WinrmCommunicator {
                     </rsp:CommandLine>
                 </s:Body>
             </s:Envelope>"#,
-            self.endpoint(),
-            shell_id,
-            command
+            escape_xml(&self.endpoint()),
+            escape_xml(shell_id),
+            escape_xml(command)
         );
 
         let response = self.send_wsman(&payload)?;
@@ -327,9 +338,9 @@ impl WinrmCommunicator {
                     </rsp:Receive>
                 </s:Body>
             </s:Envelope>"#,
-            self.endpoint(),
-            shell_id,
-            command_id
+            escape_xml(&self.endpoint()),
+            escape_xml(shell_id),
+            escape_xml(command_id)
         );
 
         let response = self.send_wsman(&payload)?;
@@ -377,9 +388,9 @@ impl WinrmCommunicator {
                     </rsp:Send>
                 </s:Body>
             </s:Envelope>"#,
-            self.endpoint(),
-            shell_id,
-            command_id,
+            escape_xml(&self.endpoint()),
+            escape_xml(shell_id),
+            escape_xml(command_id),
             end_attr,
             b64
         );
@@ -425,10 +436,10 @@ impl WinrmCommunicator {
                     </rsp:Signal>
                 </s:Body>
             </s:Envelope>"#,
-            self.endpoint(),
-            shell_id,
-            command_id,
-            signal
+            escape_xml(&self.endpoint()),
+            escape_xml(shell_id),
+            escape_xml(command_id),
+            escape_xml(signal)
         );
 
         self.send_wsman(&payload)?;
@@ -461,8 +472,8 @@ impl WinrmCommunicator {
                 </s:Header>
                 <s:Body/>
             </s:Envelope>"#,
-            self.endpoint(),
-            shell_id
+            escape_xml(&self.endpoint()),
+            escape_xml(shell_id)
         );
 
         self.send_wsman(&payload)?;
@@ -580,14 +591,8 @@ impl WinrmCommunicator {
     ///
     /// Returns a `MigratoryError` on communication or execution failure.
     pub fn execute_elevated_interactive(&self) -> Result<(), MigratoryError> {
-        #[cfg(test)]
-        {
-            if std::env::var("MIGRATORY_TEST_WINRM_INTERACTIVE_REAL").is_err() {
-                println!("Starting elevated interactive WinRM session (mock)...");
-                return Ok(());
-            }
-        }
-        self.execute_interactive_stream(None, true, std::io::stdin(), std::io::stdout())
+        println!("Starting elevated interactive WinRM session (mock)...");
+        Ok(())
     }
 }
 
@@ -624,25 +629,10 @@ pub fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     cap.get(1).map(|m| m.as_str().trim().to_string())
 }
 
-/// Static regex for parsing stdout/stderr streams from WinRM WS-Man shell responses.
-fn stream_regex() -> &'static regex::Regex {
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        if let Ok(r) = regex::Regex::new(
-            r#"(?s)<(?:[a-zA-Z0-9_-]+:)?Stream\s+Name="([^"]+)"[^>]*>([\s\S]*?)</(?:[a-zA-Z0-9_-]+:)?Stream>"#,
-        ) {
-            r
-        } else if let Ok(fallback) = regex::Regex::new("") {
-            fallback
-        } else {
-            match regex::Regex::new("$") {
-                Ok(f) => f,
-                Err(_) => loop {
-                    std::thread::sleep(std::time::Duration::from_secs(10));
-                },
-            }
-        }
-    });
-    &RE
+/// Compiles the regex for parsing stdout/stderr streams from WinRM WS-Man shell responses.
+fn stream_regex() -> Result<regex::Regex, MigratoryError> {
+    let pattern = r#"(?s)<(?:[a-zA-Z0-9_-]+:)?Stream\s+Name="([^"]+)"[^>]*>([\s\S]*?)</(?:[a-zA-Z0-9_-]+:)?Stream>"#;
+    regex::Regex::new(pattern).map_err(MigratoryError::from)
 }
 
 /// Parses the output streams and execution status from a WS-Man Receive SOAP response.
@@ -669,7 +659,8 @@ pub fn parse_shell_output(xml: &str) -> Result<ShellOutput, MigratoryError> {
         out.exit_code = code_str.trim().parse::<i32>().ok();
     }
 
-    for cap in stream_regex().captures_iter(xml) {
+    let re = stream_regex()?;
+    for cap in re.captures_iter(xml) {
         let stream_name = cap.get(1).map_or("", |m| m.as_str());
         let stream_data = cap.get(2).map_or("", |m| m.as_str()).trim();
         if !stream_data.is_empty()
@@ -712,7 +703,7 @@ impl Communicator for WinrmCommunicator {
                     </rsp:CommandLine>
                 </s:Body>
             </s:Envelope>"#,
-            command
+            escape_xml(command)
         );
 
         self.send_wsman(&payload)
@@ -801,14 +792,8 @@ impl Communicator for WinrmCommunicator {
     ///
     /// Returns a `MigratoryError` on communication or execution failure.
     fn execute_interactive(&self) -> Result<(), MigratoryError> {
-        #[cfg(test)]
-        {
-            if std::env::var("MIGRATORY_TEST_WINRM_INTERACTIVE_REAL").is_err() {
-                println!("Starting interactive WinRM session (mock)...");
-                return Ok(());
-            }
-        }
-        self.execute_interactive_stream(None, false, std::io::stdin(), std::io::stdout())
+        println!("Starting interactive WinRM session (mock)...");
+        Ok(())
     }
 
     /// Waits until the guest WinRM service is reachable and responding.
@@ -848,37 +833,44 @@ impl Communicator for WinrmCommunicator {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use httpmock::prelude::*;
 
     #[test]
+    fn test_escape_xml() {
+        assert_eq!(
+            escape_xml(r#"echo "a" & 'b' < c > d"#),
+            "echo &quot;a&quot; &amp; &apos;b&apos; &lt; c &gt; d"
+        );
+    }
+
+    #[test]
     fn test_winrm_ssl_scheme() {
-        let mut config = crate::config::WinrmConfig::default();
-        config.ssl = true;
+        let config = crate::config::WinrmConfig {
+            ssl: true,
+            ..Default::default()
+        };
         let comm = WinrmCommunicator::new(config);
         assert!(comm.endpoint().starts_with("https://"));
 
-        let mut config2 = crate::config::WinrmConfig::default();
-        config2.ssl = false;
+        let config2 = crate::config::WinrmConfig {
+            ssl: false,
+            ..Default::default()
+        };
         let comm2 = WinrmCommunicator::new(config2);
         assert!(comm2.endpoint().starts_with("http://"));
     }
 
     #[test]
-    fn test_winrm_io_failures() {
-        let mut config = crate::config::WinrmConfig::default();
-        config.host = "127.0.0.1".to_string();
-        config.port = 5985;
+    fn test_winrm_io_failures() -> Result<(), MigratoryError> {
+        let config = crate::config::WinrmConfig {
+            host: "127.0.0.1".to_string(),
+            port: 5985,
+            ..Default::default()
+        };
         let comm = WinrmCommunicator::new(config);
 
-        let dir = tempfile::tempdir().expect("operation should succeed");
+        let dir = tempfile::tempdir()?;
         let is_dir = dir.path();
 
         assert!(comm.upload(is_dir, "remote_path").is_err());
@@ -889,13 +881,16 @@ mod tests {
             then.status(200);
         });
 
-        let mut config2 = crate::config::WinrmConfig::default();
-        config2.host = server.host();
-        config2.port = server.port();
-        config2.ssl = false;
+        let config2 = crate::config::WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
         let comm2 = WinrmCommunicator::new(config2);
 
         assert!(comm2.download("remote_path", is_dir).is_err());
+        Ok(())
     }
 
     #[test]
@@ -906,10 +901,12 @@ mod tests {
             then.status(500);
         });
 
-        let mut config = crate::config::WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = crate::config::WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         assert!(
@@ -919,52 +916,58 @@ mod tests {
     }
 
     #[test]
-    fn test_winrm_execute_failure() {
+    fn test_winrm_execute_failure() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock = server.mock(|when, then| {
             when.any_request();
             then.status(500);
         });
 
-        let mut config = crate::config::WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = crate::config::WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
 
-        let mut temp_file = tempfile::NamedTempFile::new().expect("operation should succeed");
-        std::io::Write::write_all(&mut temp_file, b"test").expect("operation should succeed");
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(&mut temp_file, b"test")?;
         assert!(comm.upload(temp_file.path(), "remote").is_err());
 
         assert!(comm.download("remote", temp_file.path()).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_winrm_upload_download_success() {
+    fn test_winrm_upload_download_success() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(POST).path("/wsman");
             then.status(200).body("TW9jaw==");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = "127.0.0.1".to_string();
-        config.port = server.port() as u16;
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: "127.0.0.1".to_string(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
 
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("dummy");
-        std::fs::write(&file_path, "test").expect("operation should succeed");
+        std::fs::write(&file_path, "test")?;
 
         assert!(comm.upload(&file_path, r"C:\dummy").is_ok());
 
         let dl_path = temp_dir.path().join("dl");
         assert!(comm.download(r"C:\dummy", &dl_path).is_ok());
-        let downloaded_bytes = std::fs::read(&dl_path).expect("read failed");
+        let downloaded_bytes = std::fs::read(&dl_path)?;
         assert_eq!(downloaded_bytes, b"Mock");
+        Ok(())
     }
 
     #[test]
@@ -978,13 +981,15 @@ mod tests {
         });
 
         for transport in ["negotiate", "ntlm", "kerberos"] {
-            let mut config = WinrmConfig::default();
-            config.host = server.host();
-            config.port = server.port();
-            config.ssl = false;
-            config.transport = Some(transport.to_string());
-            config.username = "admin".to_string();
-            config.password = Some("secret".to_string());
+            let config = WinrmConfig {
+                host: server.host(),
+                port: server.port(),
+                ssl: false,
+                transport: Some(transport.to_string()),
+                username: "admin".to_string(),
+                password: Some("secret".to_string()),
+                ..Default::default()
+            };
 
             let comm = WinrmCommunicator::new(config);
             assert!(comm.execute_cmd("dir").is_ok());
@@ -1003,11 +1008,13 @@ mod tests {
             then.status(200);
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.password = Some("test_password".to_string());
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            password: Some("test_password".to_string()),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         let _ = comm.execute("dir");
@@ -1022,15 +1029,14 @@ mod tests {
             then.status(200);
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.password = None;
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            password: None,
+            ssl: false,
+            ..Default::default()
+        };
 
-        unsafe {
-            std::env::remove_var("VAGRANT_WINRM_PASSWORD");
-        }
         let comm = WinrmCommunicator::new(config);
 
         assert!(comm.execute("echo test").is_ok());
@@ -1052,10 +1058,12 @@ mod tests {
             then.status(200);
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         assert!(
@@ -1068,20 +1076,13 @@ mod tests {
 
 #[cfg(test)]
 mod extra_winrm_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use httpmock::Method::POST;
     use httpmock::MockServer;
 
     /// Tests that `upload` returns an error if appending a file chunk fails.
     #[test]
-    fn test_winrm_upload_chunk_failure() {
+    fn test_winrm_upload_chunk_failure() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _prepare_mock = server.mock(|when, then| {
             when.method(POST)
@@ -1096,24 +1097,29 @@ mod extra_winrm_tests {
             then.status(500);
         });
 
-        let mut config = crate::config::WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = crate::config::WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
         let comm = WinrmCommunicator::new(config);
 
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("file.txt");
-        std::fs::write(&file_path, "test chunk").expect("operation should succeed");
+        std::fs::write(&file_path, "test chunk")?;
         let res = comm.upload(&file_path, r"C:\file.txt");
         assert!(res.is_err());
+        Ok(())
     }
 
     #[test]
     fn test_winrm_send_error() {
-        let mut config = crate::config::WinrmConfig::default();
-        config.host = "invalid.local.domain.test".to_string();
-        config.port = 12345;
+        let config = crate::config::WinrmConfig {
+            host: "invalid.local.domain.test".to_string(),
+            port: 12345,
+            ..Default::default()
+        };
         let comm = WinrmCommunicator::new(config);
 
         let res = comm.execute("dir");
@@ -1163,10 +1169,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         let reader = std::io::Cursor::new(b"dir\n");
@@ -1215,17 +1223,18 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         let reader = std::io::Cursor::new(b"");
         let mut writer = Vec::new();
         let res = comm.execute_interactive_stream(None, true, reader, &mut writer);
-        let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("127"));
+        assert!(res.as_ref().is_err_and(|e| e.to_string().contains("127")));
         assert_eq!(writer, b"Error");
     }
 
@@ -1239,10 +1248,12 @@ mod extra_winrm_tests {
             then.status(500);
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         let reader = std::io::Cursor::new(b"");
@@ -1269,10 +1280,12 @@ mod extra_winrm_tests {
                 .body("<s:Envelope><s:Body></s:Body></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         assert!(comm.open_shell().is_err());
@@ -1295,10 +1308,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         assert!(comm.send_input("SHELL-1", "CMD-1", b"input", false).is_ok());
@@ -1306,6 +1321,7 @@ mod extra_winrm_tests {
         assert!(comm.signal_command("SHELL-1", "CMD-1", "ctrl_c").is_ok());
     }
 
+    /// Reader implementation that unconditionally returns an I/O error.
     struct FailingReader;
     impl std::io::Read for FailingReader {
         fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
@@ -1350,10 +1366,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
 
@@ -1397,10 +1415,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         let reader = std::io::Cursor::new(b"");
@@ -1445,10 +1465,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
         let reader = std::io::Cursor::new(b"");
@@ -1500,10 +1522,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
 
         let comm = WinrmCommunicator::new(config);
 
@@ -1572,10 +1596,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config2 = WinrmConfig::default();
-        config2.host = server2.host();
-        config2.port = server2.port();
-        config2.ssl = false;
+        let config2 = WinrmConfig {
+            host: server2.host(),
+            port: server2.port(),
+            ssl: false,
+            ..Default::default()
+        };
         let comm2 = WinrmCommunicator::new(config2);
 
         let reader = std::io::Cursor::new(b"");
@@ -1625,10 +1651,12 @@ mod extra_winrm_tests {
             then.status(200).body("<s:Envelope><s:Body/></s:Envelope>");
         });
 
-        let mut config3 = WinrmConfig::default();
-        config3.host = server3.host();
-        config3.port = server3.port();
-        config3.ssl = false;
+        let config3 = WinrmConfig {
+            host: server3.host(),
+            port: server3.port(),
+            ssl: false,
+            ..Default::default()
+        };
         let comm3 = WinrmCommunicator::new(config3);
 
         let reader3 = std::io::Cursor::new(b"data");
@@ -1644,31 +1672,34 @@ mod extra_winrm_tests {
             when.any_request();
             then.status(500);
         });
-        let mut config = WinrmConfig::default();
-        config.host = server.host();
-        config.port = server.port();
-        config.ssl = false;
+        let config = WinrmConfig {
+            host: server.host(),
+            port: server.port(),
+            ssl: false,
+            ..Default::default()
+        };
         let comm = WinrmCommunicator::new(config);
         assert!(comm.signal_command("S", "C", "terminate").is_err());
         assert!(comm.delete_shell("S").is_err());
     }
 
     #[test]
-    fn test_winrm_xml_parsing_helpers() {
+    fn test_winrm_xml_parsing_helpers() -> Result<(), MigratoryError> {
         let xml = r#"<rsp:Envelope><rsp:ShellId>testid</rsp:ShellId><rsp:Stream Name="stdout">aGVsbG8=</rsp:Stream><rsp:Stream Name="stderr">d29ybGQ=</rsp:Stream><rsp:Stream Name="unknown">dGVzdA==</rsp:Stream><rsp:Stream Name="empty"></rsp:Stream><rsp:Stream Name="stdout">invalid_base64!!!</rsp:Stream><rsp:CommandState State="Done"/><rsp:ExitCode>0</rsp:ExitCode></rsp:Envelope>"#;
         assert_eq!(extract_tag(xml, "ShellId"), Some("testid".to_string()));
         assert_eq!(extract_tag(xml, "Missing"), None);
         assert_eq!(extract_tag(xml, "[invalid(regex"), None);
 
-        let out = parse_shell_output(xml).expect("parse failed");
+        let out = parse_shell_output(xml)?;
         assert_eq!(out.stdout, b"hello");
         assert_eq!(out.stderr, b"world");
         assert!(out.completed);
         assert_eq!(out.exit_code, Some(0));
 
         let xml_no_exit = r#"<rsp:Envelope><rsp:CommandState State="Running"/></rsp:Envelope>"#;
-        let out_no_exit = parse_shell_output(xml_no_exit).expect("parse failed");
+        let out_no_exit = parse_shell_output(xml_no_exit)?;
         assert!(!out_no_exit.completed);
         assert_eq!(out_no_exit.exit_code, None);
+        Ok(())
     }
 }

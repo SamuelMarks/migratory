@@ -70,13 +70,6 @@ pub fn execute(cwd: &Path, args: &InitArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use tempfile::tempdir;
 
@@ -92,22 +85,22 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_init() {
+    fn test_execute_init() -> Result<(), MigratoryError> {
         // Test with box_version and box_name
-        let dir = tempfile::tempdir().expect("operation should succeed");
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("Vagrantfile");
         let args2 = crate::cli::InitArgs {
             box_name: Some("test/box".to_string()),
             box_version: Some("1.2.3".to_string()),
             force: false,
             minimal: false,
-            output: Some(path.to_str().expect("operation should succeed").to_string()),
+            output: Some(path.to_string_lossy().into_owned()),
             template: None,
         };
-        assert!(execute(&dir.path(), &args2).is_ok());
-        let content = std::fs::read_to_string(&path).expect("operation should succeed");
+        assert!(execute(dir.path(), &args2).is_ok());
+        let content = std::fs::read_to_string(&path)?;
         assert!(content.contains("config.vm.box_version = \"1.2.3\""));
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let cwd = dir.path();
         let mut args = mock_args();
 
@@ -116,8 +109,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(cwd.join("Vagrantfile").exists());
 
-        let content =
-            fs::read_to_string(cwd.join("Vagrantfile")).expect("operation should succeed");
+        let content = fs::read_to_string(cwd.join("Vagrantfile"))?;
         assert_eq!(content, VAGRANTFILE_TEMPLATE);
 
         // Second init should fail with AlreadyExists
@@ -128,32 +120,28 @@ mod tests {
         args.force = true;
         let result3 = execute(cwd, &args);
         assert!(result3.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_init_io_error() {
-        let dir = tempdir().expect("operation should succeed");
-
-        // Create a directory named `Vagrantfile` to simulate an IO error when attempting to write to it.
-        // On Unix, writing to a directory as a file throws an error.
-        // Oh wait, `path.exists()` would return true and we'll get an `AlreadyExists` error instead.
-        // Let's create a file and use it as `cwd`. Then cwd.join("Vagrantfile") will be something like `file/Vagrantfile`.
-        // That will throw an IO Error because `file` is not a directory.
+    fn test_execute_init_io_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
 
         let file_path = dir.path().join("fake_dir");
-        fs::write(&file_path, "dummy").expect("operation should succeed");
+        fs::write(&file_path, "dummy")?;
 
         let args = mock_args();
         let result = execute(&file_path, &args);
         assert!(matches!(result, Err(MigratoryError::Io(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_init_template() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_init_template() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let tmpl_path = cwd.join("custom.template");
-        fs::write(&tmpl_path, "# Custom: {{box_name}}").expect("write failed");
+        fs::write(&tmpl_path, "# Custom: {{box_name}}")?;
 
         let args = InitArgs {
             box_name: Some("mybox".to_string()),
@@ -161,12 +149,12 @@ mod tests {
             box_version: None,
             force: false,
             minimal: false,
-            template: Some(tmpl_path.to_str().expect("to_str").to_string()),
+            template: Some(tmpl_path.to_string_lossy().into_owned()),
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
 
-        let content = fs::read_to_string(cwd.join("Vagrantfile")).expect("read failed");
+        let content = fs::read_to_string(cwd.join("Vagrantfile"))?;
         assert_eq!(content, "# Custom: mybox");
 
         // Non-existent template
@@ -180,14 +168,15 @@ mod tests {
         };
         let result_missing = execute(cwd, &args_missing);
         assert!(matches!(result_missing, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_init_template_dir_io_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_init_template_dir_io_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let tmpl_dir = cwd.join("tmpl_dir");
-        fs::create_dir(&tmpl_dir).expect("create_dir failed");
+        fs::create_dir(&tmpl_dir)?;
 
         let args = InitArgs {
             box_name: None,
@@ -195,9 +184,10 @@ mod tests {
             box_version: None,
             force: true,
             minimal: false,
-            template: Some(tmpl_dir.to_str().expect("to_str").to_string()),
+            template: Some(tmpl_dir.to_string_lossy().into_owned()),
         };
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::Io(_))));
+        Ok(())
     }
 }

@@ -8,10 +8,15 @@ use crate::communicator::Communicator;
 use crate::error::MigratoryError;
 use std::path::Path;
 
+/// BSD guest OS capabilities.
 pub mod bsd;
+/// Darwin (macOS) guest OS capabilities.
 pub mod darwin;
+/// Linux guest OS capabilities.
 pub mod linux;
+/// Solaris and illumos guest OS capabilities.
 pub mod solaris;
+/// Windows guest OS capabilities.
 pub mod windows;
 
 /// Core interface for interacting with the VM's OS.
@@ -32,7 +37,9 @@ pub trait Guest {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if detection encounters a fatal failure.
-    fn detect(&self, comm: &dyn Communicator) -> Result<bool, MigratoryError>;
+    fn detect(&self, _comm: &dyn Communicator) -> Result<bool, MigratoryError> {
+        Ok(false)
+    }
 
     /// Changes the hostname of the guest.
     ///
@@ -50,9 +57,11 @@ pub trait Guest {
     /// Returns a `MigratoryError` if the operation fails.
     fn change_hostname(
         &self,
-        comm: &dyn Communicator,
-        hostname: &str,
-    ) -> Result<(), MigratoryError>;
+        _comm: &dyn Communicator,
+        _hostname: &str,
+    ) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Configures network interfaces on the guest.
     ///
@@ -70,9 +79,11 @@ pub trait Guest {
     /// Returns a `MigratoryError` if network configuration fails.
     fn configure_networks(
         &self,
-        comm: &dyn Communicator,
-        networks: &[crate::config::NetworkConfig],
-    ) -> Result<(), MigratoryError>;
+        _comm: &dyn Communicator,
+        _networks: &[crate::config::NetworkConfig],
+    ) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Mounts a shared folder on the guest.
     ///
@@ -91,10 +102,12 @@ pub trait Guest {
     /// Returns a `MigratoryError` if the mount command fails.
     fn mount_shared_folder(
         &self,
-        comm: &dyn Communicator,
-        name: &str,
-        guest_path: &Path,
-    ) -> Result<(), MigratoryError>;
+        _comm: &dyn Communicator,
+        _name: &str,
+        _guest_path: &Path,
+    ) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Gracefully halts the guest OS.
     ///
@@ -109,7 +122,9 @@ pub trait Guest {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the shutdown command fails.
-    fn halt(&self, comm: &dyn Communicator) -> Result<(), MigratoryError>;
+    fn halt(&self, _comm: &dyn Communicator) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Detects and optionally updates guest additions (VirtualBox/VMware).
     ///
@@ -127,10 +142,12 @@ pub trait Guest {
     /// Returns a `MigratoryError` on failure.
     fn update_guest_additions(
         &self,
-        comm: &dyn Communicator,
-        provider_name: &str,
-        machine_id: Option<&str>,
-    ) -> Result<(), MigratoryError>;
+        _comm: &dyn Communicator,
+        _provider_name: &str,
+        _machine_id: Option<&str>,
+    ) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Reboots the guest operating system.
     ///
@@ -487,19 +504,15 @@ pub fn resolve_guest(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::time::Duration;
 
+    /// Mock communicator returning OS-specific `uname -s` / `ver` outputs.
     struct MockComm {
+        /// Target OS identifier string.
         os: String,
+        /// Whether `execute` should always return an error.
         error_on_detect: bool,
     }
 
@@ -648,88 +661,40 @@ mod tests {
         assert!(resolve_guest(&comm_linux, None).is_ok());
     }
 
+    /// Dummy guest implementation used to exercise default trait methods on [`Guest`].
     struct DummyGuest;
-    impl Guest for DummyGuest {
-        fn detect(&self, _comm: &dyn Communicator) -> Result<bool, MigratoryError> {
-            Ok(true)
-        }
-        fn change_hostname(
-            &self,
-            _comm: &dyn Communicator,
-            _hostname: &str,
-        ) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn configure_networks(
-            &self,
-            _comm: &dyn Communicator,
-            _networks: &[crate::config::NetworkConfig],
-        ) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn mount_shared_folder(
-            &self,
-            _comm: &dyn Communicator,
-            _name: &str,
-            _guest_path: &Path,
-        ) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn halt(&self, _comm: &dyn Communicator) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn update_guest_additions(
-            &self,
-            _comm: &dyn Communicator,
-            _provider_name: &str,
-            _machine_id: Option<&str>,
-        ) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-    }
+    impl Guest for DummyGuest {}
 
     #[test]
     fn test_guest_default_capabilities() {
+        /// Communicator stub that always succeeds with `"ok\n"`.
         struct AlwaysOkComm;
         impl Communicator for AlwaysOkComm {
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 Ok("ok\n".to_string())
             }
-            fn upload(&self, _l: &Path, _r: &str) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn download(&self, _r: &str, _l: &Path) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn wait_for_ready(&self, _t: Duration) -> Result<(), MigratoryError> {
-                Ok(())
-            }
         }
 
+        /// Communicator stub that always fails `execute`.
         struct FailingComm;
         impl Communicator for FailingComm {
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 Err(MigratoryError::Generic("err".to_string()))
             }
-            fn upload(&self, _l: &Path, _r: &str) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn download(&self, _r: &str, _l: &Path) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn wait_for_ready(&self, _t: Duration) -> Result<(), MigratoryError> {
-                Ok(())
-            }
         }
 
         let comm = AlwaysOkComm;
         let guest = DummyGuest;
+        assert_eq!(guest.detect(&comm).ok(), Some(false));
+        assert!(guest.change_hostname(&comm, "h").is_ok());
+        assert!(guest.configure_networks(&comm, &[]).is_ok());
+        assert!(
+            guest
+                .mount_shared_folder(&comm, "n", Path::new("/g"))
+                .is_ok()
+        );
+        assert!(guest.halt(&comm).is_ok());
+        assert!(guest.update_guest_additions(&comm, "vbox", None).is_ok());
         assert!(guest.reboot(&comm).is_ok());
         assert!(guest.insert_public_key(&comm, "ssh-key").is_ok());
         assert!(guest.remove_public_key(&comm, "ssh-key").is_ok());

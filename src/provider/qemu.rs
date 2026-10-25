@@ -15,12 +15,76 @@ use std::process::Command;
 pub struct QemuProvider {
     /// Internal machine ID (libvirt domain name or UUID)
     machine_id: Option<String>,
+    /// Executable name or path for `virsh`.
+    virsh_bin: String,
+    /// Executable name or path for `qemu-img`.
+    qemu_img_bin: String,
+    /// Executable name or path for `virt-install`.
+    virt_install_bin: String,
+    /// Executable name or path for `virt-clone`.
+    virt_clone_bin: String,
+    /// Whether linked clone mode is forced.
+    linked_clone: bool,
 }
 
 impl QemuProvider {
     /// Creates a new QemuProvider instance.
     pub fn new(machine_id: Option<String>) -> Self {
-        Self { machine_id }
+        Self {
+            machine_id,
+            virsh_bin: "virsh".to_string(),
+            qemu_img_bin: "qemu-img".to_string(),
+            virt_install_bin: "virt-install".to_string(),
+            virt_clone_bin: "virt-clone".to_string(),
+            linked_clone: false,
+        }
+    }
+
+    /// Configures custom binary paths for `virsh`, `qemu-img`, `virt-install`, and `virt-clone`.
+    ///
+    /// # Arguments
+    ///
+    /// * `virsh` - Path or binary name for `virsh`.
+    /// * `qemu_img` - Path or binary name for `qemu-img`.
+    /// * `virt_install` - Path or binary name for `virt-install`.
+    /// * `virt_clone` - Path or binary name for `virt-clone`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `QemuProvider`.
+    #[must_use]
+    pub fn with_bins(
+        mut self,
+        virsh: impl Into<String>,
+        qemu_img: impl Into<String>,
+        virt_install: impl Into<String>,
+        virt_clone: impl Into<String>,
+    ) -> Self {
+        self.virsh_bin = virsh.into();
+        self.qemu_img_bin = qemu_img.into();
+        self.virt_install_bin = virt_install.into();
+        self.virt_clone_bin = virt_clone.into();
+        self
+    }
+
+    /// Enables or disables linked clone creation during `clone_machine`.
+    ///
+    /// # Arguments
+    ///
+    /// * `linked` - `true` to use QCOW2 backing files for linked clones.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `QemuProvider`.
+    #[must_use]
+    pub const fn with_linked_clone(mut self, linked: bool) -> Self {
+        self.linked_clone = linked;
+        self
+    }
+
+    /// Runs `virsh` using the configured `virsh_bin`.
+    fn run_virsh(&self, args: &[&str]) -> Result<String, MigratoryError> {
+        execute_virsh_inner(&self.virsh_bin, args)
     }
 
     /// Helper to get the ID, returning an error if not present.
@@ -35,21 +99,18 @@ impl QemuProvider {
     /// # Returns
     ///
     /// Returns the resolved gateway IP address, or `"192.168.122.1"` as fallback.
-
     pub fn resolve_gateway(&self) -> String {
-        if let Ok(xml) = execute_virsh(&["net-dumpxml", "default"]) {
+        if let Ok(xml) = self.run_virsh(&["net-dumpxml", "default"]) {
             for line in xml.lines() {
                 let trimmed = line.trim();
-                if let Some(pos) = trimmed.find("<ip address='") {
-                    let rest = &trimmed[pos + 13..];
-                    if let Some(end) = rest.find('\'') {
-                        return rest[..end].to_string();
-                    }
-                } else if let Some(pos) = trimmed.find("<ip address=\"") {
-                    let rest = &trimmed[pos + 13..];
-                    if let Some(end) = rest.find('"') {
-                        return rest[..end].to_string();
-                    }
+                if let Some(pos) = trimmed.find("<ip address='")
+                    && let Some(end) = trimmed[pos + 13..].find('\'')
+                {
+                    return trimmed[pos + 13..pos + 13 + end].to_string();
+                } else if let Some(pos) = trimmed.find("<ip address=\"")
+                    && let Some(end) = trimmed[pos + 13..].find('"')
+                {
+                    return trimmed[pos + 13..pos + 13 + end].to_string();
                 }
             }
         }
@@ -103,7 +164,7 @@ impl QemuProvider {
                 }
                 NetworkConfig::PrivateNetwork { ip: Some(ip), .. } => {
                     let ip_arg = format!("--ip={}", ip);
-                    let _ = execute_virsh(&[
+                    let _ = self.run_virsh(&[
                         "attach-interface",
                         id,
                         "--type",
@@ -118,7 +179,7 @@ impl QemuProvider {
                     bridge: Some(bridge),
                     ..
                 } => {
-                    let _ = execute_virsh(&[
+                    let _ = self.run_virsh(&[
                         "attach-interface",
                         id,
                         "--type",
@@ -158,7 +219,6 @@ impl Provider for QemuProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if device attachment fails.
-
     fn setup_synced_folders(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
 
@@ -169,6 +229,7 @@ impl Provider for QemuProvider {
 
             let mount_tag = sf
                 .guest_path
+                .to_string_lossy()
                 .replace('/', "_")
                 .trim_start_matches('_')
                 .to_string();
@@ -180,14 +241,15 @@ impl Provider for QemuProvider {
 
             let xml = format!(
                 "<filesystem type='mount' accessmode='passthrough'><driver type='virtiofs'/><source dir='{}'/><target dir='{}'/></filesystem>",
-                sf.host_path, mount_tag
+                sf.host_path.display(),
+                mount_tag
             );
 
             let tmp = tempfile::NamedTempFile::new().map_err(MigratoryError::Io)?;
             std::fs::write(tmp.path(), xml).map_err(MigratoryError::Io)?;
             let tmp_path = tmp.path().to_string_lossy();
 
-            let _ = execute_virsh(&["attach-device", id, &tmp_path, "--config"]);
+            let _ = self.run_virsh(&["attach-device", id, &tmp_path, "--config"]);
         }
         Ok(())
     }
@@ -205,14 +267,13 @@ impl Provider for QemuProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the process fails.
-
     fn up(&self, config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
 
         self.configure_networks(config)?;
         self.setup_synced_folders(config)?;
 
-        execute_virsh(&["start", id])?;
+        self.run_virsh(&["start", id])?;
         Ok(())
     }
 
@@ -227,7 +288,7 @@ impl Provider for QemuProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn halt(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_virsh(&["shutdown", id])?;
+        self.run_virsh(&["shutdown", id])?;
         Ok(())
     }
 
@@ -242,23 +303,22 @@ impl Provider for QemuProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn destroy(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        let _ = execute_virsh(&["destroy", id]); // Ensure it's off, ignore if already off
-        execute_virsh(&["undefine", id, "--remove-all-storage"])?;
+        let _ = self.run_virsh(&["destroy", id]); // Ensure it's off, ignore if already off
+        self.run_virsh(&["undefine", id, "--remove-all-storage"])?;
         Ok(())
     }
 
     fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
-        let mut source_qcow = None;
-        if let Ok(entries) = std::fs::read_dir(box_dir) {
-            for entry in entries.flatten() {
-                if let Some(ext) = entry.path().extension()
-                    && (ext == "img" || ext == "qcow2")
-                {
-                    source_qcow = Some(entry.path());
-                    break;
-                }
-            }
-        }
+        let source_qcow = std::fs::read_dir(box_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.extension().and_then(|x| x.to_str()) == Some("img")
+                    || p.extension().and_then(|x| x.to_str()) == Some("qcow2")
+            });
 
         if let Some(src) = source_qcow {
             // virt-install binds the qcow2 file to the domain
@@ -279,7 +339,7 @@ impl Provider for QemuProvider {
                 "default",
                 "--noautoconsole",
             ];
-            execute_virsh_inner("virt-install", &args)?;
+            execute_virsh_inner(&self.virt_install_bin, &args)?;
         } else {
             return Err(MigratoryError::NotFound(
                 "QCOW2 or IMG file not found in box directory".into(),
@@ -302,8 +362,8 @@ impl Provider for QemuProvider {
             "--auto-clone".to_string(),
         ];
 
-        let linked_clone =
-            std::env::var("VAGRANT_LIBVIRT_LINKED_CLONE").unwrap_or_default() == "true";
+        let linked_clone = self.linked_clone
+            || std::env::var("VAGRANT_LIBVIRT_LINKED_CLONE").unwrap_or_default() == "true";
         let qemu_img_cmd = linked_clone.then(|| {
             // Create a qcow2 backing file first for the clone
             let backing_file = format!("/var/lib/libvirt/images/{}.qcow2", base_machine_id);
@@ -322,11 +382,11 @@ impl Provider for QemuProvider {
 
         if let Some(cmd) = qemu_img_cmd {
             let cmd_refs: Vec<&str> = cmd.iter().map(|s| s.as_str()).collect();
-            execute_virsh_inner("qemu-img", &cmd_refs)?;
+            execute_virsh_inner(&self.qemu_img_bin, &cmd_refs)?;
         }
 
         let clone_args_refs: Vec<&str> = clone_args.iter().map(|s| s.as_str()).collect();
-        execute_virsh_inner("virt-clone", &clone_args_refs)?;
+        execute_virsh_inner(&self.virt_clone_bin, &clone_args_refs)?;
         Ok(vm_name.to_string())
     }
 
@@ -339,16 +399,18 @@ impl Provider for QemuProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the status cannot be retrieved.
-    fn status(&self) -> Result<String, MigratoryError> {
+    fn status(&self) -> Result<crate::provider::MachineState, MigratoryError> {
         let id = match &self.machine_id {
             Some(id) => id,
-            None => return Ok("not created".to_string()),
+            None => return Ok(crate::provider::MachineState::NotCreated),
         };
-        let out = execute_virsh(&["domstate", id]).unwrap_or_default();
+        let out = self.run_virsh(&["domstate", id]).unwrap_or_default();
         if out.trim().is_empty() {
-            Ok("unknown".to_string())
+            Ok(crate::provider::MachineState::Unknown(
+                "unknown".to_string(),
+            ))
         } else {
-            Ok(out.trim().to_string())
+            Ok(crate::provider::MachineState::from_raw(out.trim()))
         }
     }
 
@@ -363,7 +425,7 @@ impl Provider for QemuProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn suspend(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_virsh(&["suspend", id])?;
+        self.run_virsh(&["suspend", id])?;
         Ok(())
     }
 
@@ -378,25 +440,25 @@ impl Provider for QemuProvider {
     /// Returns a `MigratoryError` if the process fails.
     fn resume(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_virsh(&["resume", id])?;
+        self.run_virsh(&["resume", id])?;
         Ok(())
     }
 
     fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_virsh(&["snapshot-create-as", id, name, "migratory snapshot"])?;
+        self.run_virsh(&["snapshot-create-as", id, name, "migratory snapshot"])?;
         Ok(())
     }
 
     fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_virsh(&["snapshot-revert", id, name])?;
+        self.run_virsh(&["snapshot-revert", id, name])?;
         Ok(())
     }
 
     fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
         let id = self.require_id()?;
-        let out = execute_virsh(&["snapshot-list", id, "--name"])?;
+        let out = self.run_virsh(&["snapshot-list", id, "--name"])?;
         let snaps: Vec<String> = out
             .lines()
             .map(|l| l.trim())
@@ -408,7 +470,7 @@ impl Provider for QemuProvider {
 
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_virsh(&["snapshot-delete", id, name])?;
+        self.run_virsh(&["snapshot-delete", id, name])?;
         Ok(())
     }
 
@@ -425,17 +487,16 @@ impl Provider for QemuProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if dumping XML, converting the disk, or I/O fails.
-
     fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        if std::env::var("MIGRATORY_TEST_MOCK_QEMU_ERROR").is_ok() {
-            return Err(MigratoryError::Generic("Mock QEMU error".to_string()));
-        }
-        let xml = execute_virsh(&["dumpxml", id])?;
+        let xml = self.run_virsh(&["dumpxml", id])?;
         std::fs::write(output_dir.join("box.xml"), xml).map_err(MigratoryError::Io)?;
         let disk_path = output_dir.join("box.img");
         let disk_str = disk_path.to_string_lossy();
-        let _ = execute_virsh_inner("qemu-img", &["convert", "-O", "qcow2", id, &disk_str]);
+        let _ = execute_virsh_inner(
+            &self.qemu_img_bin,
+            &["convert", "-O", "qcow2", id, &disk_str],
+        );
         Ok(())
     }
 }
@@ -544,7 +605,7 @@ impl QemuProvider {
     ///
     /// Returns a `MigratoryError` if the operation fails.
     pub fn pool_create(&self, pool_name: &str, pool_path: &str) -> Result<(), MigratoryError> {
-        execute_virsh(&["pool-create-as", pool_name, "dir", "--target", pool_path])?;
+        self.run_virsh(&["pool-create-as", pool_name, "dir", "--target", pool_path])?;
         Ok(())
     }
 
@@ -562,7 +623,7 @@ impl QemuProvider {
     ///
     /// Returns a `MigratoryError` if the operation fails.
     pub fn pool_refresh(&self, pool_name: &str) -> Result<(), MigratoryError> {
-        execute_virsh(&["pool-refresh", pool_name])?;
+        self.run_virsh(&["pool-refresh", pool_name])?;
         Ok(())
     }
 
@@ -589,7 +650,7 @@ impl QemuProvider {
         capacity: &str,
         format: &str,
     ) -> Result<(), MigratoryError> {
-        execute_virsh(&[
+        self.run_virsh(&[
             "vol-create-as",
             pool_name,
             vol_name,
@@ -621,7 +682,7 @@ impl QemuProvider {
         vol_name: &str,
         new_capacity: &str,
     ) -> Result<(), MigratoryError> {
-        execute_virsh(&["vol-resize", vol_name, new_capacity, "--pool", pool_name])?;
+        self.run_virsh(&["vol-resize", vol_name, new_capacity, "--pool", pool_name])?;
         Ok(())
     }
 
@@ -640,7 +701,30 @@ impl QemuProvider {
     ///
     /// Returns a `MigratoryError` if resize fails.
     pub fn resize_qcow2_disk(disk_path: &str, new_capacity: &str) -> Result<(), MigratoryError> {
-        execute_virsh_inner("qemu-img", &["resize", disk_path, new_capacity])?;
+        Self::resize_qcow2_disk_with("qemu-img", disk_path, new_capacity)
+    }
+
+    /// Resizes a QCOW2 disk image using a custom `qemu-img` binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `qemu_img_bin` - Path or binary name for `qemu-img`.
+    /// * `disk_path` - Path to the `.qcow2` disk file.
+    /// * `new_capacity` - Target size string (e.g. `"50G"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if resize fails.
+    pub fn resize_qcow2_disk_with(
+        qemu_img_bin: &str,
+        disk_path: &str,
+        new_capacity: &str,
+    ) -> Result<(), MigratoryError> {
+        execute_virsh_inner(qemu_img_bin, &["resize", disk_path, new_capacity])?;
         Ok(())
     }
 
@@ -655,12 +739,13 @@ impl QemuProvider {
     /// Returns a `MigratoryError` if machine ID is missing.
     pub fn get_guest_ip_from_agent(&self) -> Result<Option<String>, MigratoryError> {
         let id = self.require_id()?;
-        let out = execute_virsh(&[
-            "qemu-agent-command",
-            id,
-            "{\"execute\":\"guest-network-get-interfaces\"}",
-        ])
-        .unwrap_or_default();
+        let out = self
+            .run_virsh(&[
+                "qemu-agent-command",
+                id,
+                "{\"execute\":\"guest-network-get-interfaces\"}",
+            ])
+            .unwrap_or_default();
         if let Some(ip_idx) = out.find("\"ip-address\":\"") {
             let after = &out[ip_idx + 14..];
             if let Some(end_idx) = after.find('"') {
@@ -686,7 +771,9 @@ impl QemuProvider {
         &self,
         network: &str,
     ) -> Result<Option<String>, MigratoryError> {
-        let out = execute_virsh(&["net-dhcp-leases", network]).unwrap_or_default();
+        let out = self
+            .run_virsh(&["net-dhcp-leases", network])
+            .unwrap_or_default();
         for line in out.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             // Typical line format: Expiry Time MAC address Protocol IP address Hostname Client ID
@@ -705,7 +792,7 @@ impl QemuProvider {
     /// Returns a `MigratoryError` if querying fails.
     pub fn get_display_port(&self) -> Result<Option<u16>, MigratoryError> {
         let id = self.require_id()?;
-        let out = execute_virsh(&["domdisplay", id]).unwrap_or_default();
+        let out = self.run_virsh(&["domdisplay", id]).unwrap_or_default();
         if let Some(pos) = out.rfind(':') {
             let port_str = out[pos + 1..].trim();
             if let Ok(port_num) = port_str.parse::<u16>() {
@@ -738,20 +825,20 @@ pub fn execute_virsh(args: &[&str]) -> Result<String, MigratoryError> {
     execute_virsh_inner("virsh", args)
 }
 
-/// Executes the `execute_virsh_inner` function.
+/// Spawns the `virsh` CLI binary with the given arguments.
 ///
 /// # Arguments
 ///
-/// * `cmd` - The `cmd` argument.
-/// * `args` - The `args` argument.
+/// * `cmd` - Executable name or path (`"virsh"`).
+/// * `args` - Arguments passed to `virsh`.
 ///
 /// # Returns
 ///
-/// Returns `Result<String, MigratoryError>`.
+/// Returns the captured standard output string on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if the command cannot be spawned or exits non-zero.
 fn execute_virsh_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryError> {
     let output = Command::new(cmd).args(args).output();
 
@@ -771,14 +858,11 @@ fn execute_virsh_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryErro
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
-    fn test_qemu_coverage_additions() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_qemu_coverage_additions() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let virsh_bin = temp_dir.path().join("virsh");
         let qemu_img_bin = temp_dir.path().join("qemu-img");
         let virt_install_bin = temp_dir.path().join("virt-install");
@@ -810,60 +894,51 @@ if echo "$cmd" | grep -q "dumpxml"; then
 fi
 exit 0
 "#;
-            std::fs::write(&virsh_bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&virsh_bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&virsh_bin, mock_script)?;
+            std::fs::set_permissions(&virsh_bin, std::fs::Permissions::from_mode(0o755))?;
 
-            std::fs::write(&qemu_img_bin, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&qemu_img_bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-            std::fs::write(&virt_install_bin, "#!/bin/sh\nexit 0\n")
-                .expect("operation should succeed");
-            std::fs::set_permissions(&virt_install_bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should clone");
-            std::fs::write(&virt_clone_bin, "#!/bin/sh\nexit 0\n")
-                .expect("operation should succeed");
-            std::fs::set_permissions(&virt_clone_bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should clone");
+            std::fs::write(&qemu_img_bin, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(&qemu_img_bin, std::fs::Permissions::from_mode(0o755))?;
+            std::fs::write(&virt_install_bin, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(&virt_install_bin, std::fs::Permissions::from_mode(0o755))?;
+            std::fs::write(&virt_clone_bin, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(&virt_clone_bin, std::fs::Permissions::from_mode(0o755))?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        new_path.push(&old_path);
+        let virsh_str = virsh_bin.to_string_lossy().to_string();
+        let qemu_img_str = qemu_img_bin.to_string_lossy().to_string();
+        let virt_install_str = virt_install_bin.to_string_lossy().to_string();
+        let virt_clone_str = virt_clone_bin.to_string_lossy().to_string();
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = QemuProvider::new(Some("test-id".to_string()));
+        let provider = QemuProvider::new(Some("test-id".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            &virt_install_str,
+            &virt_clone_str,
+        );
         let mut config = VmConfig::default();
         config
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: "/host".to_string(),
-                guest_path: "/".to_string(),
+                host_path: std::path::PathBuf::from("/host"),
+                guest_path: std::path::PathBuf::from("/"),
                 disabled: false,
                 ..Default::default()
             });
         config
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: "/host2".to_string(),
-                guest_path: "/2".to_string(),
+                host_path: std::path::PathBuf::from("/host2"),
+                guest_path: std::path::PathBuf::from("/2"),
                 disabled: true,
                 ..Default::default()
             });
 
-        let _ = provider.setup_synced_folders(&config);
+        provider.setup_synced_folders(&config)?;
 
-        // Test resolve_gateway parsing by executing command directly to trigger specific args
         let _ = execute_virsh(&["net-dumpxml", "single-quote"]);
-        let _ = execute_virsh(&["net-dumpxml", "double-quote"]);
-        // But actually resolve_gateway doesn't take arguments, so we write new mock script!
+        let _ = execute_virsh_inner(&virsh_str, &["net-dumpxml", "single-quote"]);
+        let _ = execute_virsh_inner(&virsh_str, &["net-dumpxml", "double-quote"]);
 
         #[cfg(unix)]
         {
@@ -871,14 +946,14 @@ exit 0
 echo "<ip address='192.168.1.1'/>"
 exit 0
 "#;
-            std::fs::write(&virsh_bin, mock_script_single).expect("operation should succeed");
+            std::fs::write(&virsh_bin, mock_script_single)?;
             assert_eq!(provider.resolve_gateway(), "192.168.1.1");
 
             let mock_script_double = r#"#!/bin/sh
 echo "<ip address=\"192.168.1.2\"/>"
 exit 0
 "#;
-            std::fs::write(&virsh_bin, mock_script_double).expect("operation should succeed");
+            std::fs::write(&virsh_bin, mock_script_double)?;
             assert_eq!(provider.resolve_gateway(), "192.168.1.2");
 
             let mock_script_orig = r#"#!/bin/sh
@@ -894,120 +969,66 @@ if echo "$cmd" | grep -q "dumpxml"; then
 fi
 exit 0
 "#;
-            std::fs::write(&virsh_bin, mock_script_orig).expect("operation should succeed");
+            std::fs::write(&virsh_bin, mock_script_orig)?;
         }
 
-        let _ = provider.snapshot_save("snap1");
-        let _ = provider.snapshot_restore("snap1");
-        let _ = provider.snapshot_list();
-        let _ = provider.snapshot_delete("snap1");
+        provider.snapshot_save("snap1")?;
+        provider.snapshot_restore("snap1")?;
+        let snaps = provider.snapshot_list()?;
+        assert_eq!(snaps, vec!["snap1".to_string(), "snap2".to_string()]);
+        provider.snapshot_delete("snap1")?;
 
-        let _ = provider.export(temp_dir.path());
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_QEMU_ERROR", "1");
-        }
-        assert!(provider.export(temp_dir.path()).is_err());
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_QEMU_ERROR");
-        }
+        provider.export(temp_dir.path())?;
+        let fail_provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins("false", "false", "false", "false");
+        assert!(fail_provider.export(temp_dir.path()).is_err());
 
         let box_path = temp_dir.path().join("dummy");
-        std::fs::create_dir_all(&box_path).expect("operation should succeed");
-        std::fs::write(box_path.join("dummy.img"), "").expect("operation should succeed");
-        let _ = provider.import(&box_path, "vm-1");
+        std::fs::create_dir_all(&box_path)?;
+        std::fs::write(box_path.join("dummy.img"), "")?;
+        provider.import(&box_path, "vm-1")?;
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("VAGRANT_LIBVIRT_LINKED_CLONE", "true");
-        }
-        let _ = provider.clone_machine("base-id", "vm-2");
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("VAGRANT_LIBVIRT_LINKED_CLONE");
-        }
+        let linked_provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins(
+                &virsh_str,
+                &qemu_img_str,
+                &virt_install_str,
+                &virt_clone_str,
+            )
+            .with_linked_clone(true);
+        linked_provider.clone_machine("base-id", "vm-2")?;
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
-    use super::*;
-
     #[test]
-    fn test_qemu_provider_methods() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
-        let bin = temp_dir.path().join("qemu-system-x86_64");
-        let _inspect_bin = temp_dir.path().join("vboxmanage_or_similar"); // optional
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mock_script = "#!/bin/sh
-            exit 0
-            ";
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-        }
-        #[cfg(windows)]
-        {
-            let bat = temp_dir.path().join("qemu-system-x86_64.bat");
-            std::fs::write(
-                &bat,
-                "@echo off
-exit 0",
-            )
-            .expect("operation should succeed");
-        }
-
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = QemuProvider::new(Some("test-id".to_string()));
+    fn test_qemu_provider_methods() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
+        let provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins("echo", "echo", "echo", "echo");
 
         let config = crate::config::VmConfig::default();
-        let _ = provider.up(&config);
-        let _ = provider.halt();
-        let _ = provider.suspend();
-        let _ = provider.resume();
-        let _ = provider.destroy();
+        provider.up(&config)?;
+        provider.halt()?;
+        provider.suspend()?;
+        provider.resume()?;
+        provider.destroy()?;
 
         let box_path = temp_dir.path().join("dummy");
-        std::fs::create_dir_all(&box_path).expect("operation should succeed");
-        std::fs::write(box_path.join("dummy.qcow2"), "").expect("operation should succeed");
+        std::fs::create_dir_all(&box_path)?;
+        std::fs::write(box_path.join("dummy.qcow2"), "")?;
 
-        let _ = provider.import(&box_path, "vm-1");
-        let _ = provider.clone_machine("base-id", "vm-2");
+        provider.import(&box_path, "vm-1")?;
+        provider.clone_machine("base-id", "vm-2")?;
 
-        let _ = provider.status();
-        let _ = provider.export(temp_dir.path());
+        let _ = provider.status()?;
+        provider.export(temp_dir.path())?;
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_qemu_provider() {
+    fn test_qemu_provider() -> Result<(), MigratoryError> {
         let provider = QemuProvider::new(Some("test-id".to_string()));
         assert_eq!(provider.name(), "qemu");
         assert!(provider.status().is_ok());
@@ -1023,15 +1044,14 @@ exit 0",
                 .export(std::path::Path::new("/dummy"))
                 .is_err()
         );
-        assert_eq!(
-            provider_no_id.status().expect("operation should succeed"),
-            "not created"
-        );
+        assert_eq!(provider_no_id.status()?, "not created");
+        Ok(())
     }
 
     #[test]
     fn test_qemu_provider_networks() {
-        let provider = QemuProvider::new(Some("test-id".to_string()));
+        let provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins("echo", "echo", "echo", "echo");
         let mut config = VmConfig::default();
         config.networks.push(NetworkConfig::ForwardedPort {
             guest: 80,
@@ -1068,10 +1088,6 @@ exit 0",
 
     #[test]
     fn test_execute_virsh_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
         let result = execute_virsh_inner("echo", &["test"]);
         assert!(result.is_ok());
     }
@@ -1083,67 +1099,45 @@ exit 0",
     }
 
     #[test]
-    fn test_qemu_status_running() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_qemu_status_running() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let bin = temp_dir.path().join("virsh");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mock_script = "#!/bin/sh\necho running\nexit 0\n";
-            std::fs::write(&bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&bin, mock_script)?;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
         }
         #[cfg(windows)]
         {
             let bat = temp_dir.path().join("virsh.bat");
-            std::fs::write(&bat, "@echo off\necho running\nexit 0")
-                .expect("operation should succeed");
+            std::fs::write(&bat, "@echo off\necho running\nexit 0")?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = QemuProvider::new(Some("test-id".to_string()));
+        let bin_str = bin.to_string_lossy().to_string();
+        let provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins(&bin_str, &bin_str, &bin_str, &bin_str);
         let config = crate::config::VmConfig::default();
         assert!(provider.up(&config).is_ok());
         assert!(provider.halt().is_ok(), "halt failed");
         assert!(provider.destroy().is_ok());
         assert!(provider.suspend().is_ok());
         assert!(provider.resume().is_ok());
-        assert_eq!(
-            provider.status().expect("operation should succeed"),
-            "running"
-        );
+        assert_eq!(provider.status()?, "running");
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_qemu_import_no_image() {
+    fn test_qemu_import_no_image() -> Result<(), MigratoryError> {
         let provider = QemuProvider::new(Some("test-id".to_string()));
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+        let temp_dir = tempfile::tempdir()?;
 
         let result = provider.import(temp_dir.path(), "test");
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -1173,12 +1167,8 @@ exit 0",
     }
 
     #[test]
-    fn test_qemu_advanced_features_mocked() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_qemu_advanced_features_mocked() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let virsh_bin = temp_dir.path().join("virsh");
         let qemu_img_bin = temp_dir.path().join("qemu-img");
 
@@ -1236,37 +1226,29 @@ fi
 
 exit 0
 "#;
-            std::fs::write(&virsh_bin, mock_script).expect("operation should succeed");
-            std::fs::set_permissions(&virsh_bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&virsh_bin, mock_script)?;
+            std::fs::set_permissions(&virsh_bin, std::fs::Permissions::from_mode(0o755))?;
 
-            std::fs::write(&qemu_img_bin, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&qemu_img_bin, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
+            std::fs::write(&qemu_img_bin, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(&qemu_img_bin, std::fs::Permissions::from_mode(0o755))?;
         }
         #[cfg(windows)]
         {
             let bat = temp_dir.path().join("virsh.bat");
-            std::fs::write(&bat, "@echo off\nexit 0").expect("operation should succeed");
+            std::fs::write(&bat, "@echo off\nexit 0")?;
             let img_bat = temp_dir.path().join("qemu-img.bat");
-            std::fs::write(&img_bat, "@echo off\nexit 0").expect("operation should succeed");
+            std::fs::write(&img_bat, "@echo off\nexit 0")?;
         }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(temp_dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
+        let virsh_str = virsh_bin.to_string_lossy().to_string();
+        let qemu_img_str = qemu_img_bin.to_string_lossy().to_string();
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let provider = QemuProvider::new(Some("test-id".to_string()));
+        let provider = QemuProvider::new(Some("test-id".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
+        );
         assert!(provider.pool_create("default", "/var/lib/images").is_ok());
         assert!(provider.pool_refresh("default").is_ok());
         assert!(
@@ -1275,135 +1257,115 @@ exit 0
                 .is_ok()
         );
         assert!(provider.volume_resize("default", "vol1", "30G").is_ok());
-        assert!(QemuProvider::resize_qcow2_disk("/var/lib/images/disk.qcow2", "40G").is_ok());
+        let _ = QemuProvider::resize_qcow2_disk("/var/lib/images/disk.qcow2", "40G");
+        assert!(
+            execute_virsh_inner(
+                &qemu_img_str,
+                &["resize", "/var/lib/images/disk.qcow2", "40G"]
+            )
+            .is_ok()
+        );
 
         // Agent IPs
-        let ip_normal = provider.get_guest_ip_from_agent();
-        assert_eq!(
-            ip_normal.expect("operation should succeed"),
-            Some("192.168.122.50".to_string())
-        );
+        let ip_normal = provider.get_guest_ip_from_agent()?;
+        assert_eq!(ip_normal, Some("192.168.122.50".to_string()));
 
-        let prov_loopback = QemuProvider::new(Some("loopback-vm".to_string()));
-        assert_eq!(
-            prov_loopback
-                .get_guest_ip_from_agent()
-                .expect("operation should succeed"),
-            None
+        let prov_loopback = QemuProvider::new(Some("loopback-vm".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_loopback.get_guest_ip_from_agent()?, None);
 
-        let prov_fe80 = QemuProvider::new(Some("fe80-vm".to_string()));
-        assert_eq!(
-            prov_fe80
-                .get_guest_ip_from_agent()
-                .expect("operation should succeed"),
-            None
+        let prov_fe80 = QemuProvider::new(Some("fe80-vm".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_fe80.get_guest_ip_from_agent()?, None);
 
-        let prov_colon = QemuProvider::new(Some("colon-vm".to_string()));
-        assert_eq!(
-            prov_colon
-                .get_guest_ip_from_agent()
-                .expect("operation should succeed"),
-            None
+        let prov_colon = QemuProvider::new(Some("colon-vm".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_colon.get_guest_ip_from_agent()?, None);
 
-        let prov_malformed = QemuProvider::new(Some("malformed-vm".to_string()));
-        assert_eq!(
-            prov_malformed
-                .get_guest_ip_from_agent()
-                .expect("operation should succeed"),
-            None
+        let prov_malformed = QemuProvider::new(Some("malformed-vm".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_malformed.get_guest_ip_from_agent()?, None);
 
-        let prov_no_ip = QemuProvider::new(Some("no-ip-vm".to_string()));
-        assert_eq!(
-            prov_no_ip
-                .get_guest_ip_from_agent()
-                .expect("operation should succeed"),
-            None
+        let prov_no_ip = QemuProvider::new(Some("no-ip-vm".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_no_ip.get_guest_ip_from_agent()?, None);
 
         // DHCP leases IP
-        let ip_dhcp = provider.get_guest_ip_from_leases("default");
-        assert_eq!(
-            ip_dhcp.expect("operation should succeed"),
-            Some("192.168.122.75".to_string())
-        );
+        let ip_dhcp = provider.get_guest_ip_from_leases("default")?;
+        assert_eq!(ip_dhcp, Some("192.168.122.75".to_string()));
 
-        let ip_no_leases = provider.get_guest_ip_from_leases("no-leases");
-        assert_eq!(ip_no_leases.expect("operation should succeed"), None);
+        let ip_no_leases = provider.get_guest_ip_from_leases("no-leases")?;
+        assert_eq!(ip_no_leases, None);
 
         // Display ports
-        assert_eq!(
-            provider
-                .get_display_port()
-                .expect("operation should succeed"),
-            Some(5901)
-        );
+        assert_eq!(provider.get_display_port()?, Some(5901));
 
-        let prov_high = QemuProvider::new(Some("high-port".to_string()));
-        assert_eq!(
-            prov_high
-                .get_display_port()
-                .expect("operation should succeed"),
-            Some(5902)
+        let prov_high = QemuProvider::new(Some("high-port".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_high.get_display_port()?, Some(5902));
 
-        let prov_bad = QemuProvider::new(Some("bad-port".to_string()));
-        assert_eq!(
-            prov_bad
-                .get_display_port()
-                .expect("operation should succeed"),
-            None
+        let prov_bad = QemuProvider::new(Some("bad-port".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_bad.get_display_port()?, None);
 
-        let prov_no_colon = QemuProvider::new(Some("no-colon".to_string()));
-        assert_eq!(
-            prov_no_colon
-                .get_display_port()
-                .expect("operation should succeed"),
-            None
+        let prov_no_colon = QemuProvider::new(Some("no-colon".to_string())).with_bins(
+            &virsh_str,
+            &qemu_img_str,
+            "echo",
+            "echo",
         );
+        assert_eq!(prov_no_colon.get_display_port()?, None);
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_qemu_import_success() {
-        let provider = QemuProvider::new(Some("test-id".to_string()));
-        let temp_dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_qemu_import_success() -> Result<(), MigratoryError> {
+        let provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins("echo", "echo", "echo", "echo");
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("image.qcow2");
-        std::fs::write(&file_path, "dummy content").expect("operation should succeed");
+        std::fs::write(&file_path, "dummy content")?;
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VIRSH", "1");
-        }
         let result = provider.import(temp_dir.path(), "test");
-        let _ = result;
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VIRSH");
-        }
+        assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
     fn test_qemu_clone_machine() {
-        let provider = QemuProvider::new(Some("test-id".to_string()));
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VIRSH", "1");
-        }
+        let provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins("echo", "echo", "echo", "echo");
         let result = provider.clone_machine("base-id", "test");
-        let _ = result;
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VIRSH");
-        }
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1419,7 +1381,8 @@ exit 0
         assert!(xml.contains("<vcpu placement='static'>2</vcpu>"));
         assert!(xml.contains("/var/lib/libvirt/images/test.qcow2"));
 
-        let provider = QemuProvider::new(Some("test-id".to_string()));
+        let provider = QemuProvider::new(Some("test-id".to_string()))
+            .with_bins("echo", "echo", "echo", "echo");
         let _ = provider.get_display_port();
 
         let no_id = QemuProvider::new(None);
@@ -1462,10 +1425,26 @@ exit 0
         assert!(simple_xml.contains("memballoon model='none'"));
 
         // Test pool and volume operations
-        let _ = provider.pool_create("default", "/var/lib/libvirt/images");
-        let _ = provider.pool_refresh("default");
-        let _ = provider.volume_create_as("default", "vol1", "20G", "qcow2");
-        let _ = provider.volume_resize("default", "vol1", "30G");
+        assert!(
+            provider
+                .pool_create("default", "/var/lib/libvirt/images")
+                .is_ok()
+        );
+        assert!(provider.pool_refresh("default").is_ok());
+        assert!(
+            provider
+                .volume_create_as("default", "vol1", "20G", "qcow2")
+                .is_ok()
+        );
+        assert!(provider.volume_resize("default", "vol1", "30G").is_ok());
+        assert!(
+            QemuProvider::resize_qcow2_disk_with(
+                "echo",
+                "/var/lib/libvirt/images/disk.qcow2",
+                "50G"
+            )
+            .is_ok()
+        );
         let _ = QemuProvider::resize_qcow2_disk("/var/lib/libvirt/images/disk.qcow2", "50G");
         let _ = provider.get_guest_ip_from_agent();
         let _ = provider.get_guest_ip_from_leases("default");
@@ -1473,11 +1452,8 @@ exit 0
 
     #[test]
     fn test_qemu_resolve_gateway_and_synced_folders() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
-        let provider = QemuProvider::new(Some("domain-123".to_string()));
+        let provider = QemuProvider::new(Some("domain-123".to_string()))
+            .with_bins("echo", "echo", "echo", "echo");
         let gw = provider.resolve_gateway();
         assert!(!gw.is_empty());
 
@@ -1485,19 +1461,11 @@ exit 0
         config
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: "/host/path".to_string(),
-                guest_path: "/vagrant".to_string(),
+                host_path: std::path::PathBuf::from("/host/path"),
+                guest_path: std::path::PathBuf::from("/vagrant"),
                 ..Default::default()
             });
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VIRSH", "1");
-        }
         assert!(provider.setup_synced_folders(&config).is_ok());
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VIRSH");
-        }
     }
 }

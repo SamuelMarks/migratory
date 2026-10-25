@@ -2,6 +2,8 @@
 //!
 //! Verifies end-to-end command execution and lifecycle flows.
 
+#![allow(clippy::multiple_crate_versions)]
+
 use migratory::communicator::{Communicator, ssh::SshCommunicator};
 use migratory::config::SshConfig;
 use migratory::config::evaluate_vagrantfile;
@@ -10,6 +12,7 @@ use migratory::provider::virtualbox::VirtualBoxProvider;
 
 use assert_cmd::prelude::*;
 
+/// Verifies that `migratory login` reads credentials from stdin and exercises CLI flags.
 #[test]
 fn test_login_stdin_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = std::process::Command::cargo_bin("migratory")?;
@@ -30,38 +33,63 @@ fn test_login_stdin_coverage() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let _ = child.wait()?;
+
+    // Exercise --timestamp, --debug, and error exit path in main.rs
+    let mut cmd_ts = std::process::Command::cargo_bin("migratory")?;
+    cmd_ts.args(["--timestamp", "--debug", "version"]);
+    assert!(cmd_ts.status()?.success());
+
+    let mut cmd_err = std::process::Command::cargo_bin("migratory")?;
+    cmd_err
+        .current_dir(dir.path())
+        .args(["status", "nonexistent_vm_xyz"]);
+    assert!(!cmd_err.status()?.success());
     Ok(())
 }
 
+/// Verifies end-to-end Vagrantfile parsing, provider status, and SSH connection error handling.
 #[test]
 fn test_end_to_end_lifecycle() -> Result<(), migratory::error::MigratoryError> {
-    // 1. Parse Vagrantfile
+    // 1. Parse Vagrantfile and verify parsed configuration
     let env_config = evaluate_vagrantfile("tests/fixtures/vagrantfiles/Vagrantfile.simple")?;
-    let _machine_config = env_config
+    let machine_config = env_config
         .machines
         .get("default")
         .ok_or_else(|| migratory::error::MigratoryError::Generic("default missing".to_string()))?;
+    assert_eq!(
+        machine_config.vm.box_name.as_deref(),
+        Some("ubuntu/jammy64")
+    );
 
-    // 2. Up
-    let provider = VirtualBoxProvider::new(Some("test-id".to_string()));
-    // We cannot realistically execute `up` without VirtualBox installed in CI/tests
-    let status_result = provider.status();
-    assert!(status_result.is_ok() || status_result.is_err());
+    // 2. Verify uncreated provider status is deterministically MachineState::NotCreated
+    let uncreated_provider = VirtualBoxProvider::new(None);
+    assert_eq!(
+        uncreated_provider.status()?,
+        migratory::provider::MachineState::NotCreated
+    );
 
-    // 3. SSH
-    let ssh_config = SshConfig::default();
+    // 3. Verify SSH communicator against an unused ephemeral localhost port fails deterministically
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(migratory::error::MigratoryError::Io)?;
+    let closed_port = listener
+        .local_addr()
+        .map_err(migratory::error::MigratoryError::Io)?
+        .port();
+    drop(listener);
+
+    let ssh_config = SshConfig {
+        host: "127.0.0.1".to_string(),
+        port: closed_port,
+        ..SshConfig::default()
+    };
     let comm = SshCommunicator::new(ssh_config);
-    // Execute mock command
     let ssh_result = comm.execute("echo 'hello'");
-    // Since we mock shelling out to real SSH and the port is likely closed on localhost,
-    // it will error. We just assert the command generation mechanism was invoked and returned a result.
-    assert!(ssh_result.is_ok() || ssh_result.is_err());
+    assert!(ssh_result.is_err());
 
-    // 4. Destroy
-    // Skip real destroy command
     Ok(())
 }
 
+/// Evaluates representative Bento Packer `Vagrantfile` templates across guest OS families.
 #[test]
 fn test_evaluate_bento_templates() -> Result<(), migratory::error::MigratoryError> {
     let bento_dir = std::path::Path::new("../bento/packer_templates");
@@ -86,6 +114,7 @@ fn test_evaluate_bento_templates() -> Result<(), migratory::error::MigratoryErro
     Ok(())
 }
 
+/// Evaluates a Test Kitchen style `Vagrantfile` with conditional plugins and heredoc provisioners.
 #[test]
 fn test_kitchen_vagrantfile_evaluation() -> Result<(), migratory::error::MigratoryError> {
     let dir = tempfile::tempdir().map_err(migratory::error::MigratoryError::Io)?;
@@ -131,7 +160,7 @@ end
             .vm
             .synced_folders
             .iter()
-            .any(|s| s.disabled && s.guest_path == "/vagrant")
+            .any(|s| s.disabled && s.guest_path == std::path::Path::new("/vagrant"))
     );
     assert_eq!(machine.vm.provisioners.len(), 2);
     assert_eq!(machine.vm.provisioners[1].run.as_deref(), Some("once"));
@@ -139,6 +168,7 @@ end
     Ok(())
 }
 
+/// Verifies Test Kitchen CLI command flows (`status`, `winrm-config`, `ssh-config`).
 #[test]
 fn test_kitchen_lifecycle_flow() -> Result<(), migratory::error::MigratoryError> {
     let dir = tempfile::tempdir().map_err(migratory::error::MigratoryError::Io)?;
@@ -195,6 +225,7 @@ fn test_kitchen_lifecycle_flow() -> Result<(), migratory::error::MigratoryError>
     Ok(())
 }
 
+/// Verifies in-process evaluation of Bento macOS, Windows, and Solaris UTM Vagrantfile templates.
 #[test]
 fn test_bento_templates_evaluation() -> Result<(), migratory::error::MigratoryError> {
     // 1. Bento macOS UTM template

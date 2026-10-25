@@ -27,13 +27,6 @@ pub type ProviderInstaller<'a> = &'a mut dyn FnMut(&str, &[&str]) -> Result<bool
 ///
 /// Returns a list of usable provider names.
 pub fn detect_usable_providers_with(runner: ProviderRunner<'_>) -> Vec<String> {
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_USABLE_PROVIDERS") {
-        if mock.trim().is_empty() {
-            return Vec::new();
-        }
-        return mock.split(',').map(|s| s.trim().to_string()).collect();
-    }
-
     let mut usable = Vec::new();
 
     // VirtualBox
@@ -92,7 +85,7 @@ pub fn detect_usable_providers() -> Vec<String> {
 /// # Arguments
 ///
 /// * `provider_name` - The name of the provider to install.
-/// * `brew_cmd` - The executable command name or path for Homebrew.
+/// * `pkg_cmd` - The executable command name or path for the host package manager (`brew`, `sudo`, or `winget`).
 /// * `installer` - A runner function that executes the package manager command.
 ///
 /// # Returns
@@ -104,17 +97,10 @@ pub fn detect_usable_providers() -> Vec<String> {
 /// Returns a `MigratoryError` if the package manager command fails.
 pub fn install_provider_with(
     provider_name: &str,
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] brew_cmd: &str,
+    pkg_cmd: &str,
     installer: ProviderInstaller<'_>,
 ) -> Result<(), MigratoryError> {
     println!("Ensuring provider '{}' is installed...", provider_name);
-
-    if std::env::var("MIGRATORY_TEST_MOCK_INSTALL_ERROR").is_ok() {
-        return Err(MigratoryError::Generic(format!(
-            "Failed to install provider '{}'",
-            provider_name
-        )));
-    }
 
     #[cfg(target_os = "macos")]
     {
@@ -126,7 +112,7 @@ pub fn install_provider_with(
             _ => None,
         };
         if let Some(pkg) = cask_pkg {
-            let success = installer(brew_cmd, &["install", "--cask", pkg])
+            let success = installer(pkg_cmd, &["install", "--cask", pkg])
                 .map_err(|e| MigratoryError::Generic(format!("Brew execution failed: {}", e)))?;
             if !success {
                 return Err(MigratoryError::Generic(format!(
@@ -146,9 +132,7 @@ pub fn install_provider_with(
             _ => None,
         };
         if let Some(pkg) = pkg {
-            let cmd = std::env::var("MIGRATORY_TEST_LINUX_INSTALL_CMD")
-                .unwrap_or_else(|_| "sudo".to_string());
-            let success = installer(&cmd, &["apt-get", "install", "-y", pkg])
+            let success = installer(pkg_cmd, &["apt-get", "install", "-y", pkg])
                 .map_err(|e| MigratoryError::Generic(format!("Apt execution failed: {}", e)))?;
             if !success {
                 return Err(MigratoryError::Generic(format!(
@@ -167,9 +151,7 @@ pub fn install_provider_with(
             _ => None,
         };
         if let Some(pkg) = pkg {
-            let cmd = std::env::var("MIGRATORY_TEST_WINDOWS_INSTALL_CMD")
-                .unwrap_or_else(|_| "winget".to_string());
-            let success = installer(&cmd, &["install", "-e", "--id", pkg])
+            let success = installer(pkg_cmd, &["install", "-e", "--id", pkg])
                 .map_err(|e| MigratoryError::Generic(format!("Winget execution failed: {}", e)))?;
             if !success {
                 return Err(MigratoryError::Generic(format!(
@@ -181,6 +163,27 @@ pub fn install_provider_with(
     }
 
     Ok(())
+}
+
+/// Attempts or reports provider installation via host package managers using a custom package manager binary.
+///
+/// # Arguments
+///
+/// * `provider_name` - The name of the provider to install.
+/// * `pkg_cmd` - Executable command name or path for the package manager.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the package manager command fails.
+pub fn install_provider_with_cmd(provider_name: &str, pkg_cmd: &str) -> Result<(), MigratoryError> {
+    install_provider_with(provider_name, pkg_cmd, &mut |cmd, args| {
+        let status = std::process::Command::new(cmd).args(args).status()?;
+        Ok(status.success())
+    })
 }
 
 /// Attempts or reports provider installation via host package managers.
@@ -197,14 +200,16 @@ pub fn install_provider_with(
 ///
 /// Returns a `MigratoryError` if the package manager command fails.
 pub fn install_provider(provider_name: &str) -> Result<(), MigratoryError> {
-    if std::env::var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS").is_ok() {
-        return Ok(());
-    }
-    let brew_cmd = std::env::var("MIGRATORY_TEST_BREW_CMD").unwrap_or_else(|_| "brew".to_string());
-    install_provider_with(provider_name, &brew_cmd, &mut |cmd, args| {
-        let status = std::process::Command::new(cmd).args(args).status()?;
-        Ok(status.success())
-    })
+    #[cfg(target_os = "macos")]
+    let default_cmd = "brew";
+    #[cfg(target_os = "linux")]
+    let default_cmd = "sudo";
+    #[cfg(target_os = "windows")]
+    let default_cmd = "winget";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let default_cmd = "true";
+
+    install_provider_with_cmd(provider_name, default_cmd)
 }
 
 /// Executes the `provider` command.
@@ -222,16 +227,39 @@ pub fn install_provider(provider_name: &str) -> Result<(), MigratoryError> {
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or if provider installation fails.
 pub fn execute(cwd: &Path, args: &ProviderArgs) -> Result<(), MigratoryError> {
-    let path = cwd.join("Vagrantfile");
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    execute_with(cwd, args, detect_usable_providers, install_provider)
+}
 
-    let path_str = path.to_string_lossy();
-    let env_config = crate::config::evaluate_vagrantfile(&path_str).unwrap_or_default();
+/// Executes the `provider` command with injectable provider detection and installation functions.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `provider` command.
+/// * `detect_fn` - Function returning usable provider names on the host.
+/// * `install_fn` - Function installing a named provider on the host.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or if provider installation fails.
+pub fn execute_with<D, I>(
+    cwd: &Path,
+    args: &ProviderArgs,
+    mut detect_fn: D,
+    mut install_fn: I,
+) -> Result<(), MigratoryError>
+where
+    D: FnMut() -> Vec<String>,
+    I: FnMut(&str) -> Result<(), MigratoryError>,
+{
+    let env_config = crate::config::load_environment_config(cwd)?;
 
     if args.usable {
-        let usable = detect_usable_providers();
+        let usable = detect_fn();
         if usable.is_empty() {
             println!("No usable providers detected on this host.");
         } else {
@@ -244,7 +272,7 @@ pub fn execute(cwd: &Path, args: &ProviderArgs) -> Result<(), MigratoryError> {
                 .vm
                 .providers
                 .first()
-                .map(|p| p.name.clone())
+                .map(|p| p.name.to_string())
                 .unwrap_or_else(|| "virtualbox".to_string());
             println!("  Machine: {} -> {}", machine_name, p_name);
         }
@@ -256,9 +284,9 @@ pub fn execute(cwd: &Path, args: &ProviderArgs) -> Result<(), MigratoryError> {
                 .vm
                 .providers
                 .first()
-                .map(|p| p.name.clone())
+                .map(|p| p.name.to_string())
                 .unwrap_or_else(|| "virtualbox".to_string());
-            install_provider(&p_name)?;
+            install_fn(&p_name)?;
         }
     }
 
@@ -267,20 +295,13 @@ pub fn execute(cwd: &Path, args: &ProviderArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_provider_missing() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_provider_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = ProviderArgs {
             usable: false,
@@ -289,14 +310,12 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_provider_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_provider_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let valid_config = r#"
@@ -306,18 +325,18 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), valid_config).expect("write failed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_USABLE_PROVIDERS", "docker, virtualbox");
-            std::env::set_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS", "1");
-        }
+        fs::write(cwd.join("Vagrantfile"), valid_config)?;
 
         let args = ProviderArgs {
             usable: true,
             install: true,
         };
-        let result = execute(cwd, &args);
+        let result = execute_with(
+            cwd,
+            &args,
+            || vec!["docker".to_string(), "virtualbox".to_string()],
+            |_| Ok(()),
+        );
         assert!(result.is_ok());
 
         let args2 = ProviderArgs {
@@ -332,87 +351,55 @@ Vagrant.configure("2") do |config|
   config.vm.box = "base"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), valid_config_no_provider).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), valid_config_no_provider)?;
 
         let result3 = execute(cwd, &args2);
         assert!(result3.is_ok());
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_USABLE_PROVIDERS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_provider_empty_usable() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_provider_empty_usable() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_USABLE_PROVIDERS", "");
-        }
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = ProviderArgs {
             usable: true,
             install: false,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_USABLE_PROVIDERS");
-        }
+        let noop_install = |_: &str| Ok(());
+        assert!(noop_install("virtualbox").is_ok());
+        let result = execute_with(cwd, &args, Vec::new, noop_install);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_provider_install_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_provider_install_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_INSTALL_ERROR", "1");
-        }
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = ProviderArgs {
             usable: false,
             install: true,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_INSTALL_ERROR");
-        }
+        let result = execute_with(cwd, &args, Vec::new, |_| {
+            Err(MigratoryError::Generic("install failed".to_string()))
+        });
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
     fn test_detect_usable_providers_real() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_USABLE_PROVIDERS");
-        }
         let providers = detect_usable_providers();
         let _ = providers;
     }
 
     #[test]
     fn test_detect_usable_providers_mock_binaries() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_USABLE_PROVIDERS");
-        }
-
         // 1. None found
         let usable = detect_usable_providers_with(&mut |_, _| false);
         assert!(usable.is_empty());
@@ -431,165 +418,35 @@ end
             detect_usable_providers_with(&mut |cmd, _| matches!(cmd, "vmware" | "qemu-img"));
         assert!(usable.contains(&"vmware".to_string()));
         assert!(usable.contains(&"qemu".to_string()));
-
-        // Real detection execution test
-        let _ = detect_usable_providers();
     }
 
     #[test]
     fn test_install_provider_coverage() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
         // Provider with no mapping
         assert!(install_provider("unknown_provider_xyz").is_ok());
 
-        #[cfg(target_os = "macos")]
-        {
-            // Runner returns io error
-            let err_io = install_provider_with("virtualbox", "brew", &mut |_, _| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "brew missing",
-                ))
-            });
-            assert!(err_io.is_err());
+        // Runner returns io error
+        let err_io = install_provider_with("virtualbox", "brew", &mut |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "pkg manager missing",
+            ))
+        });
+        assert!(err_io.is_err());
 
-            // Runner returns false (brew command failed)
-            let err_fail = install_provider_with("virtualbox", "brew", &mut |_, _| Ok(false));
-            assert!(err_fail.is_err());
+        // Runner returns false (command failed)
+        let err_fail = install_provider_with("virtualbox", "brew", &mut |_, _| Ok(false));
+        assert!(err_fail.is_err());
 
-            // Runner returns true for all mapped providers
-            assert!(install_provider_with("virtualbox", "brew", &mut |_, _| Ok(true)).is_ok());
-            assert!(install_provider_with("vmware", "brew", &mut |_, _| Ok(true)).is_ok());
-            assert!(install_provider_with("docker", "brew", &mut |_, _| Ok(true)).is_ok());
-            assert!(install_provider_with("qemu", "brew", &mut |_, _| Ok(true)).is_ok());
+        // Runner returns true for all mapped providers
+        assert!(install_provider_with("virtualbox", "brew", &mut |_, _| Ok(true)).is_ok());
+        assert!(install_provider_with("vmware", "brew", &mut |_, _| Ok(true)).is_ok());
+        assert!(install_provider_with("docker", "brew", &mut |_, _| Ok(true)).is_ok());
+        assert!(install_provider_with("qemu", "brew", &mut |_, _| Ok(true)).is_ok());
+        assert!(install_provider_with("unknown_xyz", "brew", &mut |_, _| Ok(true)).is_ok());
 
-            // Real install_provider with mock success env var
-            unsafe {
-                std::env::set_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS", "1");
-            }
-            assert!(install_provider("virtualbox").is_ok());
-            unsafe {
-                std::env::remove_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS");
-            }
-
-            // Real install_provider with custom brew command "true" (tests closure execution)
-            unsafe {
-                std::env::set_var("MIGRATORY_TEST_BREW_CMD", "true");
-            }
-            assert!(install_provider("virtualbox").is_ok());
-
-            // Real install_provider with nonexistent binary (tests ? operator on status())
-            unsafe {
-                std::env::set_var("MIGRATORY_TEST_BREW_CMD", "nonexistent_binary_12345");
-            }
-            assert!(install_provider("virtualbox").is_err());
-            unsafe {
-                std::env::remove_var("MIGRATORY_TEST_BREW_CMD");
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Runner returns io error
-            let err_io = install_provider_with("virtualbox", "", &mut |_, _| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "sudo missing",
-                ))
-            });
-            assert!(err_io.is_err());
-
-            // Runner returns false (apt command failed)
-            let err_fail = install_provider_with("virtualbox", "", &mut |_, _| Ok(false));
-            assert!(err_fail.is_err());
-
-            // Runner returns true for all mapped providers
-            assert!(install_provider_with("virtualbox", "", &mut |_, _| Ok(true)).is_ok());
-            assert!(install_provider_with("docker", "", &mut |_, _| Ok(true)).is_ok());
-            assert!(install_provider_with("qemu", "", &mut |_, _| Ok(true)).is_ok());
-
-            // Runner returns true for unmapped provider
-            assert!(install_provider_with("unknown_xyz", "", &mut |_, _| Ok(true)).is_ok());
-
-            // Real install_provider with mock success env var
-            unsafe {
-                std::env::set_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS", "1");
-            }
-            assert!(install_provider("virtualbox").is_ok());
-            unsafe {
-                std::env::remove_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS");
-            }
-
-            // Real install_provider with custom linux command "true" (tests closure execution)
-            unsafe {
-                std::env::set_var("MIGRATORY_TEST_LINUX_INSTALL_CMD", "true");
-            }
-            assert!(install_provider("virtualbox").is_ok());
-
-            // Real install_provider with nonexistent binary (tests ? operator on status())
-            unsafe {
-                std::env::set_var(
-                    "MIGRATORY_TEST_LINUX_INSTALL_CMD",
-                    "nonexistent_binary_12345",
-                );
-            }
-            assert!(install_provider("virtualbox").is_err());
-            unsafe {
-                std::env::remove_var("MIGRATORY_TEST_LINUX_INSTALL_CMD");
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            // Runner returns io error
-            let err_io = install_provider_with("virtualbox", "", &mut |_, _| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "winget missing",
-                ))
-            });
-            assert!(err_io.is_err());
-
-            // Runner returns false (winget command failed)
-            let err_fail = install_provider_with("virtualbox", "", &mut |_, _| Ok(false));
-            assert!(err_fail.is_err());
-
-            // Runner returns true for all mapped providers
-            assert!(install_provider_with("virtualbox", "", &mut |_, _| Ok(true)).is_ok());
-            assert!(install_provider_with("docker", "", &mut |_, _| Ok(true)).is_ok());
-
-            // Runner returns true for unmapped provider
-            assert!(install_provider_with("unknown_xyz", "", &mut |_, _| Ok(true)).is_ok());
-
-            // Real install_provider with mock success env var
-            unsafe {
-                std::env::set_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS", "1");
-            }
-            assert!(install_provider("virtualbox").is_ok());
-            unsafe {
-                std::env::remove_var("MIGRATORY_TEST_MOCK_INSTALL_SUCCESS");
-            }
-
-            // Real install_provider with custom command
-            unsafe {
-                std::env::set_var("MIGRATORY_TEST_WINDOWS_INSTALL_CMD", "cmd.exe");
-            }
-            let _ = install_provider("virtualbox");
-
-            // Real install_provider with nonexistent binary
-            unsafe {
-                std::env::set_var(
-                    "MIGRATORY_TEST_WINDOWS_INSTALL_CMD",
-                    "nonexistent_binary_12345",
-                );
-            }
-            assert!(install_provider("virtualbox").is_err());
-            unsafe {
-                std::env::remove_var("MIGRATORY_TEST_WINDOWS_INSTALL_CMD");
-            }
-        }
+        // install_provider_with_cmd with "echo" and nonexistent binary
+        assert!(install_provider_with_cmd("virtualbox", "echo").is_ok());
+        assert!(install_provider_with_cmd("virtualbox", "nonexistent_binary_12345").is_err());
     }
 }

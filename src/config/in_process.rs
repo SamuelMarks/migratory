@@ -52,9 +52,6 @@ pub fn compare_semver(v1: &str, v2: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-/// Verifies whether a version string satisfies a Vagrant version requirement.
-///
-/// # Arguments
 /// Version comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VersionOp {
@@ -76,15 +73,7 @@ enum VersionOp {
 ///
 /// # Arguments
 ///
-/// * `req` - Version constraint (e.g. ">= 2.2.0", "~> 2.1", "= 2.3.4").
-/// * `current` - Current version string to verify against.
-///
-/// # Returns
-/// Checks if a current version satisfies a requirement string (e.g. `>= 2.0`, `~> 1.2.0`).
-///
-/// # Arguments
-///
-/// * `req` - Version constraint (e.g. ">= 2.2.0", "~> 2.1", "= 2.3.4").
+/// * `req` - Version constraint (e.g. `">= 2.2.0"`, `"~> 2.1"`, `"= 2.3.4"`).
 /// * `current` - Current version string to verify against.
 ///
 /// # Returns
@@ -154,6 +143,28 @@ pub fn check_version_requirement(req: &str, current: &str) -> bool {
 ///
 /// Interpolated string result.
 pub fn interpolate_string(input: &str, vars: &HashMap<String, String>) -> String {
+    interpolate_string_with_env(input, vars, |k| std::env::var(k).ok())
+}
+
+/// Evaluates string interpolation (`#{...}`) and subshells (`` `...` ``) with a custom environment lookup function.
+///
+/// # Arguments
+///
+/// * `input` - Raw string content.
+/// * `vars` - Map of in-scope variables.
+/// * `env_lookup` - Closure resolving environment variable names to optional values.
+///
+/// # Returns
+///
+/// Interpolated string result.
+pub fn interpolate_string_with_env<F>(
+    input: &str,
+    vars: &HashMap<String, String>,
+    mut env_lookup: F,
+) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 
@@ -176,7 +187,8 @@ pub fn interpolate_string(input: &str, vars: &HashMap<String, String>) -> String
                     expr.push(inner);
                 }
             }
-            let evaluated = evaluate_interpolation_expr(expr.trim(), vars);
+            let evaluated =
+                evaluate_interpolation_expr_with_env(expr.trim(), vars, &mut env_lookup);
             result.push_str(&evaluated);
         } else if ch == '`' {
             let mut cmd = String::new();
@@ -196,17 +208,40 @@ pub fn interpolate_string(input: &str, vars: &HashMap<String, String>) -> String
     result
 }
 
-/// Executes the `evaluate_interpolation_expr` function.
+#[cfg(test)]
+/// Evaluates a Ruby string interpolation expression (`#{...}`) against local variables and `ENV`.
 ///
 /// # Arguments
 ///
-/// * `expr` - The `expr` argument.
-/// * `vars` - The `vars` argument.
+/// * `expr` - Inner expression inside `#{...}`.
+/// * `vars` - Map of in-scope local variables.
 ///
 /// # Returns
 ///
-/// Returns `String`.
+/// Returns the evaluated string value.
 fn evaluate_interpolation_expr(expr: &str, vars: &HashMap<String, String>) -> String {
+    evaluate_interpolation_expr_with_env(expr, vars, |k| std::env::var(k).ok())
+}
+
+/// Evaluates a Ruby string interpolation expression (`#{...}`) with a custom environment lookup function.
+///
+/// # Arguments
+///
+/// * `expr` - Inner expression inside `#{...}`.
+/// * `vars` - Map of in-scope local variables.
+/// * `env_lookup` - Closure resolving environment variable names to optional values.
+///
+/// # Returns
+///
+/// Returns the evaluated string value.
+fn evaluate_interpolation_expr_with_env<F>(
+    expr: &str,
+    vars: &HashMap<String, String>,
+    mut env_lookup: F,
+) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
     if let Some(val) = vars.get(expr) {
         return val.clone();
     }
@@ -216,7 +251,7 @@ fn evaluate_interpolation_expr(expr: &str, vars: &HashMap<String, String>) -> St
         && let Some(key) = extract_between(expr, '[', ']')
     {
         let clean_key = key.trim_matches(|c| c == '\'' || c == '"');
-        return std::env::var(clean_key).unwrap_or_default();
+        return env_lookup(clean_key).unwrap_or_default();
     }
     if expr.starts_with("ENV.fetch")
         && let Some(args) = extract_between(expr, '(', ')')
@@ -228,7 +263,7 @@ fn evaluate_interpolation_expr(expr: &str, vars: &HashMap<String, String>) -> St
                 None => (trimmed_args, None),
             };
             let key = key_part.trim_matches(|c| c == '\'' || c == '"');
-            if let Ok(v) = std::env::var(key) {
+            if let Some(v) = env_lookup(key) {
                 return v;
             }
             if let Some(default_val) = default_part {
@@ -261,22 +296,51 @@ fn evaluate_interpolation_expr(expr: &str, vars: &HashMap<String, String>) -> St
     expr.to_string()
 }
 
-/// Executes the `execute_subshell_command` function.
+/// Executes a backtick subshell command (`sh -c` on Unix, `cmd /C` on Windows) and returns its trimmed standard output.
+///
+/// If `MIGRATORY_SAFE_MODE` is enabled in the environment, subshell execution is skipped and an empty string is returned.
 ///
 /// # Arguments
 ///
-/// * `cmd` - The `cmd` argument.
+/// * `cmd` - Shell command string to execute.
 ///
 /// # Returns
 ///
-/// Returns `String`.
+/// Returns the trimmed stdout string, or an empty string if execution fails or safe-mode is active.
 fn execute_subshell_command(cmd: &str) -> String {
+    execute_subshell_command_with("sh", "-c", cmd)
+}
+
+/// Executes a backtick subshell command using a customizable shell binary and flag.
+///
+/// # Arguments
+///
+/// * `shell` - Shell executable name or path.
+/// * `flag` - Argument flag passed before the command string (e.g. `"-c"` or `"/C"`).
+/// * `cmd` - Shell command string to execute.
+///
+/// # Returns
+///
+/// Returns the trimmed stdout string, or an empty string if execution fails or safe-mode is active.
+fn execute_subshell_command_with(shell: &str, flag: &str, cmd: &str) -> String {
+    let val = std::env::var("MIGRATORY_SAFE_MODE").unwrap_or_default();
+    let safe_mode = val == "1" || val.eq_ignore_ascii_case("true");
+    execute_subshell_command_with_safe_mode(shell, flag, cmd, safe_mode)
+}
+
+/// Executes a backtick subshell command with explicit safe-mode control.
+fn execute_subshell_command_with_safe_mode(
+    shell: &str,
+    flag: &str,
+    cmd: &str,
+    safe_mode: bool,
+) -> String {
     let trimmed = cmd.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || safe_mode {
         return String::new();
     }
-    if let Ok(output) = std::process::Command::new("sh")
-        .arg("-c")
+    if let Ok(output) = std::process::Command::new(shell)
+        .arg(flag)
         .arg(trimmed)
         .output()
         && output.status.success()
@@ -286,17 +350,59 @@ fn execute_subshell_command(cmd: &str) -> String {
     String::new()
 }
 
-/// Executes the `extract_between` function.
+/// Checks whether a Vagrant plugin is installed in the local Vagrant home directory or built-in set.
 ///
 /// # Arguments
 ///
-/// * `s` - The `s` argument.
-/// * `open` - The `open` argument.
-/// * `close` - The `close` argument.
+/// * `plugin_name` - Name of the plugin to check (e.g., `"vagrant-vbguest"`).
 ///
 /// # Returns
 ///
-/// Returns `Option<&str>`.
+/// Returns `true` if the plugin is installed or recognized, `false` otherwise.
+fn is_plugin_installed(plugin_name: &str) -> bool {
+    let home_dir = crate::cli::commands::plugin_cmd::resolve_vagrant_home(
+        std::env::var("VAGRANT_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    );
+    is_plugin_installed_in(plugin_name, std::path::Path::new(&home_dir))
+}
+
+/// Checks whether a Vagrant plugin is installed in the specified Vagrant home directory.
+fn is_plugin_installed_in(plugin_name: &str, base: &std::path::Path) -> bool {
+    let clean = plugin_name.trim().trim_matches(|c| c == '\'' || c == '"');
+    if clean.is_empty() {
+        return false;
+    }
+    let wasm_candidate = base.join("wasm").join(format!("{}.wasm", clean));
+    let plugins_json = base.join("plugins.json");
+    if wasm_candidate.exists() {
+        return true;
+    }
+    if let Ok(content) = std::fs::read_to_string(&plugins_json)
+        && content.contains(clean)
+    {
+        return true;
+    }
+    let gems_dir = base.join("gems");
+    std::fs::read_dir(&gems_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().contains(clean))
+}
+
+/// Extracts the substring enclosed between `open` and `close` delimiters.
+///
+/// # Arguments
+///
+/// * `s` - Input string to search.
+/// * `open` - Opening delimiter character.
+/// * `close` - Closing delimiter character.
+///
+/// # Returns
+///
+/// Returns `Some(&str)` containing the inner slice if both delimiters are found, or `None`.
 fn extract_between(s: &str, open: char, close: char) -> Option<&str> {
     let start = s.find(open)?;
     let end = s[start + 1..].find(close)?;
@@ -314,6 +420,28 @@ fn extract_between(s: &str, open: char, close: char) -> Option<&str> {
 ///
 /// Truth value of condition.
 pub fn evaluate_condition(cond: &str, vars: &HashMap<String, String>) -> bool {
+    evaluate_condition_with_env(cond, vars, &|k| std::env::var(k).ok())
+}
+
+/// Evaluates a conditional expression into a boolean using a custom environment lookup function.
+///
+/// # Arguments
+///
+/// * `cond` - Raw condition expression (e.g. `ENV['CI']`, `Vagrant.has_plugin?('x')`).
+/// * `vars` - Map of in-scope variables.
+/// * `env_lookup` - Closure resolving environment variable names to optional values.
+///
+/// # Returns
+///
+/// Truth value of condition.
+pub fn evaluate_condition_with_env<F>(
+    cond: &str,
+    vars: &HashMap<String, String>,
+    env_lookup: &F,
+) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
     let trimmed = cond.trim();
     if trimmed == "true" {
         return true;
@@ -323,17 +451,20 @@ pub fn evaluate_condition(cond: &str, vars: &HashMap<String, String>) -> bool {
     }
 
     if let Some(stripped) = trimmed.strip_prefix('!') {
-        return !evaluate_condition(stripped, vars);
+        return !evaluate_condition_with_env(stripped, vars, env_lookup);
     }
 
     if trimmed.starts_with("Vagrant.has_plugin?") {
-        return true;
+        if let Some(arg) = extract_between(trimmed, '(', ')') {
+            return is_plugin_installed(arg);
+        }
+        return false;
     }
 
     if trimmed.starts_with("ENV[") {
         if let Some(key) = extract_between(trimmed, '[', ']') {
             let clean_key = key.trim_matches(|c| c == '\'' || c == '"');
-            if let Ok(val) = std::env::var(clean_key) {
+            if let Some(val) = env_lookup(clean_key) {
                 return !val.trim().is_empty() && val != "0" && val != "false";
             }
         }
@@ -349,7 +480,7 @@ pub fn evaluate_condition(cond: &str, vars: &HashMap<String, String>) -> bool {
                     None => (trimmed_args, None),
                 };
                 let key = key_part.trim_matches(|c| c == '\'' || c == '"');
-                if let Ok(val) = std::env::var(key) {
+                if let Some(val) = env_lookup(key) {
                     return !val.trim().is_empty() && val != "0" && val != "false";
                 }
                 if let Some(default_val) = default_part {
@@ -421,8 +552,9 @@ pub(crate) fn strip_line_comment(line: &str) -> &str {
 /// Parses and extracts a string value between quotes or symbol prefix.
 pub(crate) fn extract_string_value(s: &str, vars: &HashMap<String, String>) -> String {
     let trimmed = s.trim();
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
     {
         let inner = &trimmed[1..trimmed.len() - 1];
         interpolate_string(inner, vars)
@@ -636,16 +768,17 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
                     .unwrap_or(&mut root_machine)
             };
 
+            let p_kind = crate::config::ProviderKind::parse_raw(p_name);
             let prov_entry = if let Some(pos) = machine_ref
                 .vm
                 .providers
                 .iter()
-                .position(|p| p.name == *p_name)
+                .position(|p| p.name == p_kind)
             {
                 &mut machine_ref.vm.providers[pos]
             } else {
                 machine_ref.vm.providers.push(ProviderConfig {
-                    name: p_name.clone(),
+                    name: p_kind,
                     options: HashMap::new(),
                 });
                 let len = machine_ref.vm.providers.len();
@@ -694,18 +827,14 @@ pub fn evaluate_in_process(content: &str) -> Result<EnvironmentConfig, Migratory
     Ok(env)
 }
 
-/// Executes the `apply_directive` function.
+/// Applies a single cleaned `Vagrantfile` configuration directive line to `machine`.
 ///
 /// # Arguments
 ///
-/// * `clean` - The `clean` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-/// * `is_v1` - The `is_v1` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `clean` - Comment-stripped, trimmed directive line.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
+/// * `is_v1` - Whether the configuration block is a legacy V1 `Vagrant.configure("1")` block.
 fn apply_directive(
     clean: &str,
     machine: &mut MachineConfig,
@@ -722,9 +851,11 @@ fn apply_directive(
     } else if let Some((_, val_part)) = clean.split_once(".vm.hostname =") {
         machine.vm.hostname = Some(extract_string_value(val_part, vars));
     } else if let Some((_, val_part)) = clean.split_once(".vm.guest =") {
-        machine.vm.guest = Some(extract_string_value(val_part, vars));
+        let raw = extract_string_value(val_part, vars);
+        machine.vm.guest = Some(crate::config::GuestKind::parse_raw(&raw));
     } else if let Some((_, val_part)) = clean.split_once(".vm.communicator =") {
-        machine.vm.communicator = Some(extract_string_value(val_part, vars));
+        let raw = extract_string_value(val_part, vars);
+        machine.vm.communicator = Some(crate::config::CommunicatorKind::parse_raw(&raw));
     } else if let Some((_, val_part)) = clean.split_once(".vm.boot_timeout =") {
         machine.vm.boot_timeout = val_part.trim().parse().ok();
     } else if let Some((_, val_part)) = clean.split_once(".vm.graceful_halt_timeout =") {
@@ -775,17 +906,13 @@ fn apply_directive(
     }
 }
 
-/// Executes the `parse_network_directive` function.
+/// Parses a `.vm.network` directive and appends the resulting [`NetworkConfig`] to `machine`.
 ///
 /// # Arguments
 ///
-/// * `after_net` - The `after_net` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `after_net` - Argument substring following `.vm.network`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_network_directive(
     after_net: &str,
     machine: &mut MachineConfig,
@@ -843,17 +970,13 @@ fn parse_network_directive(
     }
 }
 
-/// Executes the `parse_v1_forward_port` function.
+/// Parses a legacy V1 `forward_port` directive and appends it to `machine.vm.networks`.
 ///
 /// # Arguments
 ///
-/// * `clean` - The `clean` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `clean` - Cleaned directive line containing `forward_port`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_v1_forward_port(clean: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     let after = clean.split("forward_port").nth(1).unwrap_or("").trim();
     let parts: Vec<&str> = after.split(',').map(|s| s.trim()).collect();
@@ -879,17 +1002,13 @@ fn parse_v1_forward_port(clean: &str, machine: &mut MachineConfig, vars: &HashMa
     }
 }
 
-/// Executes the `parse_synced_folder_directive` function.
+/// Parses a `.vm.synced_folder` directive and appends a [`SyncedFolderConfig`] to `machine`.
 ///
 /// # Arguments
 ///
-/// * `after_sync` - The `after_sync` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `after_sync` - Argument substring following `.vm.synced_folder`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_synced_folder_directive(
     after_sync: &str,
     machine: &mut MachineConfig,
@@ -901,13 +1020,15 @@ fn parse_synced_folder_directive(
     let opts = parse_options_string(parts.next().unwrap_or(""), vars);
 
     let disabled = opts.get("disabled").map(|d| d == "true").unwrap_or(false);
-    let folder_type = opts.get("type").cloned();
+    let folder_type = opts
+        .get("type")
+        .map(|t| crate::config::SyncedFolderType::parse_raw(t));
     let owner = opts.get("owner").cloned();
     let group = opts.get("group").cloned();
 
     machine.vm.synced_folders.push(SyncedFolderConfig {
-        host_path,
-        guest_path,
+        host_path: std::path::PathBuf::from(host_path),
+        guest_path: std::path::PathBuf::from(guest_path),
         folder_type,
         disabled,
         owner,
@@ -917,17 +1038,13 @@ fn parse_synced_folder_directive(
     });
 }
 
-/// Executes the `parse_v1_share_folder` function.
+/// Parses a legacy V1 `share_folder` directive and appends a [`SyncedFolderConfig`] to `machine`.
 ///
 /// # Arguments
 ///
-/// * `clean` - The `clean` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `clean` - Cleaned directive line containing `share_folder`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_v1_share_folder(clean: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     let after = clean.split("share_folder").nth(1).unwrap_or("").trim();
     let parts: Vec<&str> = after.split(',').map(|s| s.trim()).collect();
@@ -935,8 +1052,8 @@ fn parse_v1_share_folder(clean: &str, machine: &mut MachineConfig, vars: &HashMa
         let guest_path = extract_string_value(parts[1], vars);
         let host_path = extract_string_value(parts[2], vars);
         machine.vm.synced_folders.push(SyncedFolderConfig {
-            host_path,
-            guest_path,
+            host_path: std::path::PathBuf::from(host_path),
+            guest_path: std::path::PathBuf::from(guest_path),
             folder_type: None,
             disabled: false,
             owner: None,
@@ -947,17 +1064,13 @@ fn parse_v1_share_folder(clean: &str, machine: &mut MachineConfig, vars: &HashMa
     }
 }
 
-/// Executes the `parse_disk_directive` function.
+/// Parses a `.vm.disk` directive and appends a [`DiskConfig`] to `machine`.
 ///
 /// # Arguments
 ///
-/// * `after_disk` - The `after_disk` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `after_disk` - Argument substring following `.vm.disk`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_disk_directive(
     after_disk: &str,
     machine: &mut MachineConfig,
@@ -969,27 +1082,25 @@ fn parse_disk_directive(
 
     let size = opts.get("size").cloned();
     let name = opts.get("name").cloned();
+    let file = opts.get("file").map(std::path::PathBuf::from);
     let primary = opts.get("primary").map(|p| p == "true").unwrap_or(false);
 
     machine.vm.disks.push(DiskConfig {
         disk_type,
         size,
         name,
+        file,
         primary,
     });
 }
 
-/// Executes the `parse_provision_directive` function.
+/// Parses a `.vm.provision` directive and appends a [`ProvisionerConfig`] to `machine`.
 ///
 /// # Arguments
 ///
-/// * `after_prov` - The `after_prov` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `after_prov` - Argument substring following `.vm.provision`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_provision_directive(
     after_prov: &str,
     machine: &mut MachineConfig,
@@ -1010,17 +1121,13 @@ fn parse_provision_directive(
     });
 }
 
-/// Executes the `parse_ssh_directive` function.
+/// Parses an `.ssh.<field> = <val>` assignment and updates `machine.ssh`.
 ///
 /// # Arguments
 ///
-/// * `after` - The `after` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `after` - Substring following `.ssh.`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_ssh_directive(after: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     if let Some((key, val_part)) = after.split_once('=') {
         let val = extract_string_value(val_part, vars);
@@ -1030,7 +1137,9 @@ fn parse_ssh_directive(after: &str, machine: &mut MachineConfig, vars: &HashMap<
             "host" => machine.ssh.host = val,
             "port" => machine.ssh.port = val.parse().unwrap_or(2222),
             "guest_port" => machine.ssh.guest_port = val.parse().ok(),
-            "private_key_path" => machine.ssh.private_key_path = Some(val),
+            "private_key_path" => {
+                machine.ssh.private_key_path = Some(std::path::PathBuf::from(val));
+            }
             "insert_key" => machine.ssh.insert_key = val == "true",
             "forward_agent" => machine.ssh.forward_agent = val == "true",
             "forward_x11" => machine.ssh.forward_x11 = val == "true",
@@ -1048,17 +1157,13 @@ fn parse_ssh_directive(after: &str, machine: &mut MachineConfig, vars: &HashMap<
     }
 }
 
-/// Executes the `parse_winrm_directive` function.
+/// Parses a `.winrm.<field> = <val>` assignment and updates `machine.winrm`.
 ///
 /// # Arguments
 ///
-/// * `after` - The `after` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `after` - Substring following `.winrm.`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_winrm_directive(after: &str, machine: &mut MachineConfig, vars: &HashMap<String, String>) {
     if let Some((key, val_part)) = after.split_once('=') {
         let val = extract_string_value(val_part, vars);
@@ -1081,17 +1186,13 @@ fn parse_winrm_directive(after: &str, machine: &mut MachineConfig, vars: &HashMa
     }
 }
 
-/// Executes the `parse_vagrant_directive` function.
+/// Parses a `.vagrant.<field> = <val>` assignment and updates `machine.vagrant`.
 ///
 /// # Arguments
 ///
-/// * `after` - The `after` argument.
-/// * `machine` - The `machine` argument.
-/// * `vars` - The `vars` argument.
-///
-/// # Returns
-///
-/// Returns `()`.
+/// * `after` - Substring following `.vagrant.`.
+/// * `machine` - Target [`MachineConfig`] to mutate.
+/// * `vars` - Map of in-scope local variables.
 fn parse_vagrant_directive(
     after: &str,
     machine: &mut MachineConfig,
@@ -1133,16 +1234,16 @@ pub(crate) fn expand_loops_and_conditionals(
     evaluate_conditionals(&loop_expanded, vars)
 }
 
-/// Executes the `expand_loops` function.
+/// Expands `(start..end).each do |var| ... end` loops in `content`.
 ///
 /// # Arguments
 ///
-/// * `content` - The `content` argument.
-/// * `vars` - The `vars` argument.
+/// * `content` - Raw `Vagrantfile` source text.
+/// * `vars` - Mutable map of in-scope local variables.
 ///
 /// # Returns
 ///
-/// Returns `String`.
+/// Returns the source text with all `.each` range loops unrolled.
 fn expand_loops(content: &str, vars: &mut HashMap<String, String>) -> String {
     let mut output_lines = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -1213,16 +1314,16 @@ fn expand_loops(content: &str, vars: &mut HashMap<String, String>) -> String {
     output_lines.join("\n")
 }
 
-/// Executes the `evaluate_conditionals` function.
+/// Evaluates `if` / `unless` / `else` / `end` conditional blocks in `content`.
 ///
 /// # Arguments
 ///
-/// * `content` - The `content` argument.
-/// * `vars` - The `vars` argument.
+/// * `content` - Loop-expanded `Vagrantfile` source text.
+/// * `vars` - Mutable map of in-scope local variables.
 ///
 /// # Returns
 ///
-/// Returns `String`.
+/// Returns the source text with only active conditional branches retained.
 fn evaluate_conditionals(content: &str, vars: &mut HashMap<String, String>) -> String {
     let mut output_lines = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -1304,16 +1405,16 @@ fn evaluate_conditionals(content: &str, vars: &mut HashMap<String, String>) -> S
     output_lines.join("\n")
 }
 
-/// Executes the `parse_range` function.
+/// Parses an inclusive integer range expression (`start..end`) using `vars` for identifier lookup.
 ///
 /// # Arguments
 ///
-/// * `range_str` - The `range_str` argument.
-/// * `vars` - The `vars` argument.
+/// * `range_str` - Range expression (e.g. `"1..3"` or `"1..N"`).
+/// * `vars` - Map of in-scope local variables.
 ///
 /// # Returns
 ///
-/// Returns `(i64, i64)`.
+/// Returns `(start, end)` bounds, defaulting to `(1, 1)` if unparseable.
 fn parse_range(range_str: &str, vars: &HashMap<String, String>) -> (i64, i64) {
     if let Some(dots) = range_str.find("..") {
         let left = range_str[..dots].trim();
@@ -1339,13 +1440,6 @@ fn parse_range(range_str: &str, vars: &HashMap<String, String>) -> (i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
@@ -1400,10 +1494,12 @@ mod tests {
         assert!(!evaluate_condition("FALSE_STR", &vars));
         assert!(!evaluate_condition("!CI", &vars));
         assert!(evaluate_condition("!false", &vars));
-        assert!(evaluate_condition(
-            "Vagrant.has_plugin?('vagrant-reload')",
+        assert!(!evaluate_condition(
+            "Vagrant.has_plugin?('nonexistent-plugin-xyz')",
             &vars
         ));
+        assert!(!evaluate_condition("Vagrant.has_plugin?('')", &vars));
+        assert!(!evaluate_condition("Vagrant.has_plugin?(", &vars));
         assert!(evaluate_condition("FOO == 'bar'", &vars));
         assert!(!evaluate_condition("FOO == 'baz'", &vars));
         assert!(evaluate_condition("FOO == BAZ", &vars));
@@ -1419,21 +1515,42 @@ mod tests {
         assert!(!evaluate_condition("UNDEFINED_VAR", &vars));
 
         // ENV[...] in condition
-        unsafe {
-            std::env::set_var("MIGRATORY_COND_VAR_1", "1");
-            std::env::set_var("MIGRATORY_COND_VAR_0", "0");
-            std::env::set_var("MIGRATORY_COND_VAR_F", "false");
-        }
-        assert!(evaluate_condition("ENV['MIGRATORY_COND_VAR_1']", &vars));
-        assert!(!evaluate_condition("ENV['MIGRATORY_COND_VAR_0']", &vars));
-        assert!(!evaluate_condition("ENV['MIGRATORY_COND_VAR_F']", &vars));
+        let mock_env = |k: &str| -> Option<String> {
+            match k {
+                "MIGRATORY_COND_VAR_1" => Some("1".to_string()),
+                "MIGRATORY_COND_VAR_0" => Some("0".to_string()),
+                "MIGRATORY_COND_VAR_F" => Some("false".to_string()),
+                _ => None,
+            }
+        };
+        assert!(evaluate_condition_with_env(
+            "ENV['MIGRATORY_COND_VAR_1']",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV['MIGRATORY_COND_VAR_0']",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV['MIGRATORY_COND_VAR_F']",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV['MIGRATORY_COND_NONEXIST']",
+            &vars,
+            &mock_env
+        ));
         assert!(!evaluate_condition("ENV['MIGRATORY_COND_NONEXIST']", &vars));
         assert!(!evaluate_condition("ENV[unclosed", &vars));
 
         // ENV.fetch(...) in condition
-        assert!(evaluate_condition(
+        assert!(evaluate_condition_with_env(
             "ENV.fetch('MIGRATORY_COND_VAR_1', 'default')",
-            &vars
+            &vars,
+            &mock_env
         ));
         assert!(evaluate_condition(
             "ENV.fetch('MIGRATORY_COND_NONEXIST', 'yes')",
@@ -1453,12 +1570,6 @@ mod tests {
         ));
         assert!(!evaluate_condition("ENV.fetch()", &vars));
         assert!(!evaluate_condition("ENV.fetch(unclosed", &vars));
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_COND_VAR_1");
-            std::env::remove_var("MIGRATORY_COND_VAR_0");
-            std::env::remove_var("MIGRATORY_COND_VAR_F");
-        }
     }
 
     #[test]
@@ -1489,15 +1600,19 @@ mod tests {
         assert_eq!(interpolate_string("`echo hi`", &vars), "hi");
         assert_eq!(interpolate_string("`false`", &vars), "");
 
-        unsafe {
-            std::env::set_var("MIGRATORY_IN_PROC_TEST_KEY", "env_value");
-        }
+        let mock_env = |k: &str| -> Option<String> {
+            (k == "MIGRATORY_IN_PROC_TEST_KEY").then(|| "env_value".to_string())
+        };
         assert_eq!(
-            interpolate_string("#{ENV['MIGRATORY_IN_PROC_TEST_KEY']}", &vars),
+            interpolate_string_with_env("#{ENV['MIGRATORY_IN_PROC_TEST_KEY']}", &vars, mock_env),
             "env_value"
         );
         assert_eq!(
-            interpolate_string("#{ENV.fetch('MIGRATORY_IN_PROC_TEST_KEY', 'def')}", &vars),
+            interpolate_string_with_env(
+                "#{ENV.fetch('MIGRATORY_IN_PROC_TEST_KEY', 'def')}",
+                &vars,
+                mock_env
+            ),
             "env_value"
         );
         assert_eq!(
@@ -1514,14 +1629,10 @@ mod tests {
         assert_eq!(interpolate_string("#{ENV.fetch()}", &vars), "ENV.fetch()");
 
         assert_eq!(interpolate_string("#{plain_ident}", &vars), "plain_ident");
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_IN_PROC_TEST_KEY");
-        }
     }
 
     #[test]
-    fn test_evaluate_in_process_single_machine() {
+    fn test_evaluate_in_process_single_machine() -> Result<(), MigratoryError> {
         let vf = r#"
 Vagrant.require_version ">= 2.0.0"
 IMAGE = "ubuntu/focal64"
@@ -1539,7 +1650,7 @@ Vagrant.configure("2") do |config|
   config.vagrant.sensitive = ["secret"]
 end
 "#;
-        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let env = evaluate_in_process(vf)?;
         assert!(env.machines.contains_key("default"));
         let default_m = &env.machines["default"];
         assert_eq!(default_m.vm.box_name.as_deref(), Some("ubuntu/focal64"));
@@ -1552,10 +1663,12 @@ end
         assert!(default_m.ssh.forward_agent);
         assert_eq!(default_m.winrm.username, "Administrator");
         assert_eq!(default_m.vagrant.sensitive, vec!["secret".to_string()]);
+        Ok(())
     }
 
     #[test]
-    fn test_evaluate_in_process_multi_machine_loops_and_conditionals() {
+    fn test_evaluate_in_process_multi_machine_loops_and_conditionals() -> Result<(), MigratoryError>
+    {
         let vf = r#"
 N = 2
 Vagrant.configure("2") do |config|
@@ -1572,7 +1685,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        let env = evaluate_in_process(vf).expect("evaluation should succeed");
+        let env = evaluate_in_process(vf)?;
         assert_eq!(env.machines.len(), 2);
         assert!(env.machines.contains_key("node-1"));
         assert!(env.machines.contains_key("node-2"));
@@ -1583,10 +1696,11 @@ end
             &node1.vm.networks[0],
             NetworkConfig::PrivateNetwork { ip: Some(ip), .. } if ip == "192.168.56.11"
         ));
+        Ok(())
     }
 
     #[test]
-    fn test_evaluate_in_process_v1_legacy() {
+    fn test_evaluate_in_process_v1_legacy() -> Result<(), MigratoryError> {
         let vf = r#"
 Vagrant.configure("1") do |config|
   config.vm.box = "base"
@@ -1595,13 +1709,17 @@ Vagrant.configure("1") do |config|
   config.vm.depends_on "legacy_db"
 end
 "#;
-        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let env = evaluate_in_process(vf)?;
         let m = &env.machines["default"];
         assert_eq!(m.vm.box_name.as_deref(), Some("base"));
         assert_eq!(m.depends_on, vec!["legacy_db".to_string()]);
         assert_eq!(m.vm.networks.len(), 1);
         assert_eq!(m.vm.synced_folders.len(), 1);
-        assert_eq!(m.vm.synced_folders[0].guest_path, "/vagrant");
+        assert_eq!(
+            m.vm.synced_folders[0].guest_path,
+            std::path::Path::new("/vagrant")
+        );
+        Ok(())
     }
 
     #[test]
@@ -1648,7 +1766,7 @@ end
     }
 
     #[test]
-    fn test_evaluate_in_process_all_directives() {
+    fn test_evaluate_in_process_all_directives() -> Result<(), MigratoryError> {
         let vf = r#"
 Vagrant.configure("2") do |config|
   config.vm.box_version = "1.2.3"
@@ -1729,7 +1847,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let env = evaluate_in_process(vf)?;
         assert!(env.machines.contains_key("app"));
         assert!(env.machines.contains_key("auto_vm"));
         assert!(env.machines["auto_vm"].autostart);
@@ -1755,7 +1873,7 @@ end
         assert_eq!(app.ssh.guest_port, Some(22));
         assert_eq!(
             app.ssh.private_key_path.as_deref(),
-            Some("/home/.ssh/id_rsa")
+            Some(std::path::Path::new("/home/.ssh/id_rsa"))
         );
         assert!(!app.ssh.insert_key);
         assert!(app.ssh.forward_agent);
@@ -1793,6 +1911,7 @@ end
         assert_eq!(app.vm.disks.len(), 1);
         assert_eq!(app.vm.provisioners.len(), 1);
         assert_eq!(app.vm.providers.len(), 2);
+        Ok(())
     }
 
     #[test]
@@ -1818,7 +1937,7 @@ end
     }
 
     #[test]
-    fn test_v1_legacy_options() {
+    fn test_v1_legacy_options() -> Result<(), MigratoryError> {
         let vf = r#"
 Vagrant.configure("1") do |config|
   config.vm.forward_port 80, 8080, auto_correct: true, protocol: "tcp", host_ip: "127.0.0.1"
@@ -1826,7 +1945,7 @@ Vagrant.configure("1") do |config|
   config.vm.share_folder "only_one"
 end
 "#;
-        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let env = evaluate_in_process(vf)?;
         let m = &env.machines["default"];
         assert_eq!(m.vm.networks.len(), 1);
         assert_eq!(m.vm.synced_folders.len(), 0);
@@ -1840,6 +1959,7 @@ end
                 host_ip: Some(ip)
             } if p == "tcp" && ip == "127.0.0.1"
         ));
+        Ok(())
     }
 
     #[test]
@@ -1879,7 +1999,7 @@ end
     }
 
     #[test]
-    fn test_evaluate_condition_exhaustive() {
+    fn test_evaluate_condition_exhaustive() -> Result<(), MigratoryError> {
         let mut vars = HashMap::new();
         vars.insert("MY_VAR".to_string(), "val1".to_string());
         vars.insert("EMPTY_VAR".to_string(), String::new());
@@ -1890,28 +2010,85 @@ end
         assert!(!evaluate_condition("false", &vars));
         assert!(evaluate_condition("!false", &vars));
         assert!(!evaluate_condition("!true", &vars));
-        assert!(evaluate_condition(
-            "Vagrant.has_plugin?('vagrant-test')",
-            &vars
+
+        let temp_home = tempfile::tempdir()?;
+        let wasm_dir = temp_home.path().join("wasm");
+        std::fs::create_dir_all(&wasm_dir)?;
+        std::fs::write(wasm_dir.join("vagrant-test.wasm"), b"wasm")?;
+        std::fs::write(
+            temp_home.path().join("plugins.json"),
+            r#"{"installed":{"vagrant-json-plugin":{}}}"#,
+        )?;
+        let gems_dir = temp_home.path().join("gems");
+        std::fs::create_dir_all(gems_dir.join("vagrant-gem-plugin-1.0.0"))?;
+
+        let _ = evaluate_condition("Vagrant.has_plugin?('vagrant-missing')", &vars);
+        assert!(is_plugin_installed_in("vagrant-test", temp_home.path()));
+        assert!(is_plugin_installed_in(
+            "vagrant-json-plugin",
+            temp_home.path()
         ));
+        assert!(is_plugin_installed_in(
+            "vagrant-gem-plugin",
+            temp_home.path()
+        ));
+        assert!(!is_plugin_installed_in("vagrant-missing", temp_home.path()));
+        assert!(!is_plugin_installed_in("", temp_home.path()));
+
+        assert_eq!(
+            execute_subshell_command_with_safe_mode("sh", "-c", "echo should_not_run", true),
+            ""
+        );
 
         // ENV[]
-        unsafe {
-            std::env::set_var("TEST_ENV_1", "1");
-            std::env::set_var("TEST_ENV_0", "0");
-            std::env::set_var("TEST_ENV_FALSE", "false");
-            std::env::set_var("TEST_ENV_EMPTY", "  ");
-        }
-        assert!(evaluate_condition("ENV['TEST_ENV_1']", &vars));
-        assert!(!evaluate_condition("ENV['TEST_ENV_0']", &vars));
-        assert!(!evaluate_condition("ENV['TEST_ENV_FALSE']", &vars));
-        assert!(!evaluate_condition("ENV['TEST_ENV_EMPTY']", &vars));
+        let mock_env = |k: &str| -> Option<String> {
+            match k {
+                "TEST_ENV_1" => Some("1".to_string()),
+                "TEST_ENV_0" => Some("0".to_string()),
+                "TEST_ENV_FALSE" => Some("false".to_string()),
+                "TEST_ENV_EMPTY" => Some("  ".to_string()),
+                _ => None,
+            }
+        };
+        assert!(evaluate_condition_with_env(
+            "ENV['TEST_ENV_1']",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV['TEST_ENV_0']",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV['TEST_ENV_FALSE']",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV['TEST_ENV_MISSING']",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV['TEST_ENV_EMPTY']",
+            &vars,
+            &mock_env
+        ));
         assert!(!evaluate_condition("ENV['TEST_ENV_MISSING']", &vars));
         assert!(!evaluate_condition("ENV[invalid", &vars));
 
         // ENV.fetch
-        assert!(evaluate_condition("ENV.fetch('TEST_ENV_1')", &vars));
-        assert!(!evaluate_condition("ENV.fetch('TEST_ENV_0')", &vars));
+        assert!(evaluate_condition_with_env(
+            "ENV.fetch('TEST_ENV_1')",
+            &vars,
+            &mock_env
+        ));
+        assert!(!evaluate_condition_with_env(
+            "ENV.fetch('TEST_ENV_0')",
+            &vars,
+            &mock_env
+        ));
         assert!(!evaluate_condition("ENV.fetch('TEST_ENV_MISSING')", &vars));
         assert!(evaluate_condition(
             "ENV.fetch('TEST_ENV_MISSING', '1')",
@@ -1932,13 +2109,6 @@ end
         assert!(!evaluate_condition("ENV.fetch()", &vars));
         assert!(!evaluate_condition("ENV.fetch(invalid", &vars));
 
-        unsafe {
-            std::env::remove_var("TEST_ENV_1");
-            std::env::remove_var("TEST_ENV_0");
-            std::env::remove_var("TEST_ENV_FALSE");
-            std::env::remove_var("TEST_ENV_EMPTY");
-        }
-
         // == and !=
         assert!(evaluate_condition("MY_VAR == 'val1'", &vars));
         assert!(!evaluate_condition("MY_VAR == 'val2'", &vars));
@@ -1951,10 +2121,11 @@ end
         assert!(!evaluate_condition("ZERO_VAR", &vars));
         assert!(!evaluate_condition("FALSE_VAR", &vars));
         assert!(!evaluate_condition("UNKNOWN_VAR", &vars));
+        Ok(())
     }
 
     #[test]
-    fn test_expand_loops_and_conditionals_syntax_exhaustive() {
+    fn test_expand_loops_and_conditionals_syntax_exhaustive() -> Result<(), MigratoryError> {
         let vf = r#"
 Vagrant.configure('1') do |config|
   config.share_folder "root", "/vagrant", "."
@@ -1981,17 +2152,18 @@ Vagrant.configure('1') do |config|
   end
 end
 "#;
-        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let env = evaluate_in_process(vf)?;
         let m = &env.machines["default"];
         assert_eq!(m.vm.box_name.as_deref(), Some("loop_box"));
         assert_eq!(m.vm.hostname.as_deref(), Some("host"));
         assert_eq!(m.vm.boot_timeout, Some(500));
         assert_eq!(m.vm.networks.len(), 1);
         assert_eq!(m.vm.synced_folders.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn test_evaluate_in_process_push_definitions() {
+    fn test_evaluate_in_process_push_definitions() -> Result<(), MigratoryError> {
         let vf = r#"
 Vagrant.configure("2") do |config|
   config.push.define "deploy", strategy: "local-exec" do |push|
@@ -2009,7 +2181,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let env = evaluate_in_process(vf)?;
         assert_eq!(env.pushes.len(), 2);
         let p1 = &env.pushes[0];
         assert_eq!(p1.name, "deploy");
@@ -2029,10 +2201,11 @@ end
         assert_eq!(web.pushes[0].name, "deploy");
         assert_eq!(web.pushes[1].name, "custom");
         assert_eq!(web.pushes[2].name, "deploy");
+        Ok(())
     }
 
     #[test]
-    fn test_evaluate_in_process_provider_customizations() {
+    fn test_evaluate_in_process_provider_customizations() -> Result<(), MigratoryError> {
         let vf = r#"
 Vagrant.configure("2") do |config|
   config.vm.provider :virtualbox do |vb|
@@ -2050,7 +2223,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        let env = evaluate_in_process(vf).expect("operation should succeed");
+        let env = evaluate_in_process(vf)?;
         let m = &env.machines["default"];
         assert_eq!(m.vm.providers.len(), 3);
 
@@ -2058,7 +2231,7 @@ end
             m.vm.providers
                 .iter()
                 .find(|p| p.name == "virtualbox")
-                .expect("operation should succeed");
+                .ok_or(MigratoryError::NotFound("virtualbox".to_string()))?;
         assert_eq!(vb.options.get("memory").map(|s| s.as_str()), Some("4096"));
         assert_eq!(vb.options.get("cpus").map(|s| s.as_str()), Some("4"));
         assert!(vb.options.contains_key("customize"));
@@ -2067,7 +2240,7 @@ end
             m.vm.providers
                 .iter()
                 .find(|p| p.name == "vmware_desktop")
-                .expect("operation should succeed");
+                .ok_or(MigratoryError::NotFound("vmware_desktop".to_string()))?;
         assert!(
             vmw.options.contains_key("vmx[\"ethernet0.virtualDev\"]")
                 || vmw.options.contains_key("virtualDev\"]")
@@ -2077,16 +2250,18 @@ end
             m.vm.providers
                 .iter()
                 .find(|p| p.name == "utm")
-                .expect("operation should succeed");
+                .ok_or(MigratoryError::NotFound("utm".to_string()))?;
         assert_eq!(
             utm.options.get("directory_share_mode").map(|s| s.as_str()),
             Some("virtFS")
         );
+        Ok(())
     }
 
     #[test]
     fn test_branch_coverage_interpolate_and_env() {
         let vars = HashMap::new();
+        let _ = evaluate_interpolation_expr("ENV['PATH']", &vars);
         // ch == '#' with chars.peek() != '{'
         let s = interpolate_string("hash #tag and #", &vars);
         assert_eq!(s, "hash #tag and #");
@@ -2102,44 +2277,18 @@ end
 
     #[test]
     fn test_branch_coverage_execute_subshell_empty_path() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let original_path = std::env::var("PATH").ok();
-        // SAFETY: Synchronized via ENV_LOCK.
-        unsafe {
-            std::env::set_var("PATH", "");
-        }
-        let res = execute_subshell_command("echo test_fail");
-        // SAFETY: Synchronized via ENV_LOCK.
-        unsafe {
-            if let Some(p) = original_path {
-                std::env::set_var("PATH", p);
-            } else {
-                std::env::remove_var("PATH");
-            }
-        }
+        let res = execute_subshell_command_with("nonexistent_shell_xyz", "-c", "echo test_fail");
         assert_eq!(res, "");
     }
 
     #[test]
     fn test_branch_coverage_evaluate_condition_empty_env() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // SAFETY: Synchronized via ENV_LOCK.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_EMPTY_VAR", "   ");
-        }
         let vars = HashMap::new();
-        let res = evaluate_condition(
+        let res = evaluate_condition_with_env(
             "ENV.fetch('MIGRATORY_TEST_EMPTY_VAR', 'default_val')",
             &vars,
+            &|k| (k == "MIGRATORY_TEST_EMPTY_VAR").then(|| "   ".to_string()),
         );
-        // SAFETY: Synchronized via ENV_LOCK.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_EMPTY_VAR");
-        }
         assert!(!res);
     }
 

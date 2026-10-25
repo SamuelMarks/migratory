@@ -8,9 +8,9 @@ use std::path::Path;
 
 /// File upload provisioner.
 pub struct FileProvisioner {
-    /// Represents the `source` field.
+    /// Local source file or directory path on the host.
     source: Option<String>,
-    /// Represents the `destination` field.
+    /// Remote destination path on the guest machine.
     destination: Option<String>,
 }
 
@@ -40,6 +40,7 @@ impl FileProvisioner {
         local_path: &Path,
         remote_path: &str,
     ) -> Result<(), MigratoryError> {
+        let _ = self.source.as_deref();
         if local_path.is_dir() {
             let mkdir_cmd = format!("mkdir -p '{}'", remote_path.replace('\'', "'\\''"));
             let _ = comm.execute(&mkdir_cmd)?;
@@ -148,24 +149,20 @@ impl Provisioner for FileProvisioner {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
-    use std::time::Duration;
+
     use tempfile::tempdir;
 
+    /// Configurable mock communicator for File provisioner tests.
     #[derive(Default)]
     struct MockComm {
+        /// Fail `execute` calls.
         fail_execute: bool,
+        /// Fail `upload` calls.
         fail_upload: bool,
     }
 
@@ -183,27 +180,17 @@ mod tests {
             }
             Ok(())
         }
-
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     #[test]
-    fn test_file_provisioner() {
+    fn test_file_provisioner() -> Result<(), MigratoryError> {
         let mut prov = FileProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("upload.txt");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "hello").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "hello")?;
 
         let file_str = file_path.to_string_lossy().to_string();
         config.insert("source".to_string(), file_str);
@@ -215,34 +202,36 @@ mod tests {
         let comm = MockComm::default();
         assert!(prov.provision(&comm).is_ok());
         assert!(prov.cleanup().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_file_provisioner_empty_parent() {
+    fn test_file_provisioner_empty_parent() -> Result<(), MigratoryError> {
         let prov = FileProvisioner::default();
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("upload.txt");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "hello").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "hello")?;
 
         let comm = MockComm::default();
         assert!(
             prov.upload_recursive(&comm, &file_path, "upload.txt")
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_file_provisioner_directory() {
+    fn test_file_provisioner_directory() -> Result<(), MigratoryError> {
         let mut prov = FileProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let sub = dir.path().join("subdir");
-        std::fs::create_dir(&sub).expect("operation should succeed");
+        std::fs::create_dir(&sub)?;
         let file_path = sub.join("inner.txt");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "inner content").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "inner content")?;
 
         config.insert(
             "source".to_string(),
@@ -253,17 +242,18 @@ mod tests {
         assert!(prov.prepare(&config).is_ok());
         let comm = MockComm::default();
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_file_provisioner_provision_fails() {
+    fn test_file_provisioner_provision_fails() -> Result<(), MigratoryError> {
         let mut prov = FileProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("upload.txt");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "hello").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "hello")?;
 
         let file_str = file_path.to_string_lossy().to_string();
         config.insert("source".to_string(), file_str);
@@ -275,6 +265,7 @@ mod tests {
             fail_upload: true,
         };
         assert!(prov.provision(&comm).is_err());
+        Ok(())
     }
 
     #[test]
@@ -311,12 +302,12 @@ mod tests {
     }
 
     #[test]
-    fn test_file_provisioner_file_mkdir_fails() {
+    fn test_file_provisioner_file_mkdir_fails() -> Result<(), MigratoryError> {
         let prov = FileProvisioner::default();
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("upload.txt");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "hello").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "hello")?;
 
         let comm = MockComm {
             fail_execute: true,
@@ -326,15 +317,16 @@ mod tests {
             prov.upload_recursive(&comm, &file_path, "/tmp/upload.txt")
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_file_provisioner_file_upload_fails() {
+    fn test_file_provisioner_file_upload_fails() -> Result<(), MigratoryError> {
         let prov = FileProvisioner::default();
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("upload.txt");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "hello").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "hello")?;
 
         let comm = MockComm {
             fail_execute: false,
@@ -344,12 +336,13 @@ mod tests {
             prov.upload_recursive(&comm, &file_path, "/tmp/upload.txt")
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_file_provisioner_dir_mkdir_fails() {
+    fn test_file_provisioner_dir_mkdir_fails() -> Result<(), MigratoryError> {
         let prov = FileProvisioner::default();
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let comm = MockComm {
             fail_execute: true,
             fail_upload: false,
@@ -358,15 +351,16 @@ mod tests {
             prov.upload_recursive(&comm, dir.path(), "/tmp/dest_dir")
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_file_provisioner_dir_sub_upload_fails() {
+    fn test_file_provisioner_dir_sub_upload_fails() -> Result<(), MigratoryError> {
         let prov = FileProvisioner::default();
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("upload.txt");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "hello").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "hello")?;
 
         let comm = MockComm {
             fail_execute: false,
@@ -376,26 +370,26 @@ mod tests {
             prov.upload_recursive(&comm, dir.path(), "/tmp/dest_dir")
                 .is_err()
         );
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_file_provisioner_read_dir_fails() {
+    fn test_file_provisioner_read_dir_fails() -> Result<(), MigratoryError> {
         use std::os::unix::fs::PermissionsExt;
         let prov = FileProvisioner::default();
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let sub = dir.path().join("unreadable");
-        std::fs::create_dir(&sub).expect("operation should succeed");
+        std::fs::create_dir(&sub)?;
 
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000))
-            .expect("operation should succeed");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000))?;
 
         let comm = MockComm::default();
         let res = prov.upload_recursive(&comm, &sub, "/tmp/dest_unreadable");
 
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755))
-            .expect("operation should succeed");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755))?;
 
         assert!(res.is_err());
+        Ok(())
     }
 }

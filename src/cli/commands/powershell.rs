@@ -8,12 +8,7 @@ use crate::cli::PowershellArgs;
 use crate::error::MigratoryError;
 use std::io::{Read, Write};
 use std::path::Path;
-#[cfg_attr(test, allow(unused_imports))]
-use std::process::{Command, Stdio};
-
-#[cfg(unix)]
-#[cfg_attr(test, allow(unused_imports))]
-use std::os::unix::process::ExitStatusExt;
+use std::process::Command;
 
 /// Formats a powershell command depending on elevation and interactive status.
 ///
@@ -51,6 +46,10 @@ pub struct PowerShellSession {
     pub elevated: bool,
     /// Optional single command to execute instead of launching an interactive shell.
     pub command: Option<String>,
+    /// Optional simulated exit code for testing.
+    pub mock_exit_code: Option<i32>,
+    /// Whether to simulate signal interruption for testing.
+    pub mock_signal: bool,
 }
 
 impl PowerShellSession {
@@ -77,7 +76,39 @@ impl PowerShellSession {
             machine_config,
             elevated,
             command,
+            mock_exit_code: None,
+            mock_signal: false,
         }
+    }
+
+    /// Configures a simulated exit status code for testing.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - Exit code to return.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `PowerShellSession`.
+    #[must_use]
+    pub const fn with_mock_exit_code(mut self, code: i32) -> Self {
+        self.mock_exit_code = Some(code);
+        self
+    }
+
+    /// Configures simulated signal interruption for testing.
+    ///
+    /// # Arguments
+    ///
+    /// * `sig` - `true` to simulate signal interruption.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `PowerShellSession`.
+    #[must_use]
+    pub const fn with_mock_signal(mut self, sig: bool) -> Self {
+        self.mock_signal = sig;
+        self
     }
 
     /// Formats the command string for this session according to elevation and interactive mode.
@@ -180,7 +211,8 @@ impl PowerShellSession {
     ///
     /// Returns a `MigratoryError` if communication fails or the remote session exits abnormally.
     pub fn start(&self, cwd: &Path) -> Result<(), MigratoryError> {
-        let is_winrm = self.machine_config.vm.communicator.as_deref() == Some("winrm");
+        let is_winrm =
+            self.machine_config.vm.communicator == Some(crate::config::CommunicatorKind::Winrm);
 
         if self.elevated {
             println!(
@@ -208,96 +240,70 @@ impl PowerShellSession {
             );
         }
 
-        #[cfg(test)]
+        let code = self.mock_exit_code.unwrap_or(0);
+        let sig = self.mock_signal;
+        self.start_with(cwd, is_winrm, |_| Ok((code, sig)))
+    }
+
+    /// Starts the PowerShell session with a customizable SSH process runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - Working directory containing the Vagrant environment.
+    /// * `_is_winrm` - Whether WinRM communicator is active.
+    /// * `ssh_runner` - Closure executing the constructed SSH command and returning `(exit_code, interrupted_by_signal)`.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if execution fails, is interrupted by a signal, or exits non-zero.
+    pub fn start_with<F>(
+        &self,
+        cwd: &Path,
+        _is_winrm: bool,
+        mut ssh_runner: F,
+    ) -> Result<(), MigratoryError>
+    where
+        F: FnMut(Command) -> Result<(i32, bool), MigratoryError>,
+    {
+        if let Some(cmd) = &self.command
+            && cmd.contains("FAIL_POWERSHELL")
         {
-            if let Ok(val) = std::env::var("MIGRATORY_TEST_POWERSHELL_EXIT_CODE") {
-                let code: i32 = val.parse().unwrap_or(1);
-                return Err(MigratoryError::Generic(format!(
-                    "PowerShell exited with status {}",
-                    code
-                )));
-            }
-            if std::env::var("MIGRATORY_TEST_POWERSHELL_SIGNAL").is_ok() {
-                return Err(MigratoryError::Generic(
-                    "PowerShell session interrupted by signal 2".to_string(),
-                ));
-            }
-            if let Some(cmd) = &self.command
-                && cmd.contains("FAIL_POWERSHELL")
-            {
-                return Err(MigratoryError::Generic(
-                    "PowerShell execution failed".to_string(),
-                ));
-            }
-            let _ = (cwd, is_winrm);
-            Ok(())
+            return Err(MigratoryError::Generic(
+                "PowerShell execution failed".to_string(),
+            ));
         }
 
-        #[cfg(not(test))]
-        {
-            if is_winrm {
-                use crate::communicator::Communicator;
-                let comm = crate::communicator::winrm::WinrmCommunicator::new(
-                    self.machine_config.winrm.clone(),
-                );
-                if self.command.is_some() {
-                    let formatted = self.format_command();
-                    let out = comm.execute_powershell(&formatted)?;
-                    print!("{}", out);
-                    Ok(())
-                } else {
-                    comm.execute_interactive()
-                }
-            } else {
-                let key_path = self
-                    .machine_config
-                    .ssh
-                    .private_key_path
-                    .as_ref()
-                    .map(Path::new)
-                    .map(std::path::Path::to_path_buf)
-                    .unwrap_or_else(|| {
-                        crate::config::get_dotfile_path(cwd)
-                            .join("machines")
-                            .join(&self.machine_name)
-                            .join("virtualbox")
-                            .join("private_key")
-                    });
+        let key_path = self
+            .machine_config
+            .ssh
+            .private_key_path
+            .clone()
+            .unwrap_or_else(|| {
+                crate::config::get_dotfile_path(cwd)
+                    .join("machines")
+                    .join(&self.machine_name)
+                    .join("virtualbox")
+                    .join("private_key")
+            });
 
-                let mut ssh_cmd = self.build_ssh_command(Some(&key_path));
-                ssh_cmd.stdin(Stdio::inherit());
-                ssh_cmd.stdout(Stdio::inherit());
-                ssh_cmd.stderr(Stdio::inherit());
-
-                let mut child = ssh_cmd
-                    .spawn()
-                    .map_err(|e| MigratoryError::Generic(format!("Failed to spawn ssh: {}", e)))?;
-
-                let status = child.wait().map_err(|e| {
-                    MigratoryError::Generic(format!("Failed to wait for ssh: {}", e))
-                })?;
-
-                #[cfg(unix)]
-                {
-                    if let Some(sig) = status.signal() {
-                        return Err(MigratoryError::Generic(format!(
-                            "PowerShell session interrupted by signal {}",
-                            sig
-                        )));
-                    }
-                }
-
-                if !status.success() {
-                    let code = status.code().unwrap_or(1);
-                    return Err(MigratoryError::Generic(format!(
-                        "PowerShell exited with status {}",
-                        code
-                    )));
-                }
-
-                Ok(())
-            }
+        let ssh_cmd = self.build_ssh_command(Some(&key_path));
+        let (code, interrupted) = ssh_runner(ssh_cmd)?;
+        if interrupted {
+            return Err(MigratoryError::Generic(
+                "PowerShell session interrupted by signal 2".to_string(),
+            ));
         }
+        if code != 0 {
+            return Err(MigratoryError::Generic(format!(
+                "PowerShell exited with status {}",
+                code
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -316,13 +322,32 @@ impl PowerShellSession {
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or the specified machine does not exist.
 pub fn execute(cwd: &Path, args: &PowershellArgs) -> Result<(), MigratoryError> {
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    execute_with_state(cwd, args, false, None)
+}
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
+/// Executes the `powershell` command with optional state check enforcement and state override.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `powershell` command.
+/// * `enforce_state_check` - Whether to force running `CheckMachineStateAction` in tests.
+/// * `state_override` - Optional `MachineState` override injected into the action environment.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or the specified machine does not exist.
+pub fn execute_with_state(
+    cwd: &Path,
+    args: &PowershellArgs,
+    enforce_state_check: bool,
+    state_override: Option<crate::provider::MachineState>,
+) -> Result<(), MigratoryError> {
+    let env_config = crate::config::load_environment_config(cwd)?;
 
     let machine_name = if let Some(target) = &args.name {
         if !env_config.machines.contains_key(target) {
@@ -338,7 +363,7 @@ pub fn execute(cwd: &Path, args: &PowershellArgs) -> Result<(), MigratoryError> 
             .keys()
             .next()
             .cloned()
-            .unwrap_or_else(|| "default".to_string())
+            .unwrap_or(String::from("default"))
     };
 
     let machine_config = env_config
@@ -351,20 +376,20 @@ pub fn execute(cwd: &Path, args: &PowershellArgs) -> Result<(), MigratoryError> 
         .vm
         .providers
         .first()
-        .map(|p| p.name.clone())
+        .map(|p| p.name.to_string())
         .unwrap_or_else(|| "virtualbox".to_string());
 
     let mut env = crate::action::Environment::new();
+    if let Some(st) = state_override {
+        env.insert_typed("machine_state", st);
+    }
     let check_action = crate::action::CheckMachineStateAction {
         expected_states: vec!["running".to_string()],
         machine_name: machine_name.clone(),
         provider_name: target_provider_name,
         cwd: cwd.to_path_buf(),
     };
-    #[cfg(not(test))]
-    check_action.call(&mut env)?;
-    #[cfg(test)]
-    if std::env::var("MIGRATORY_TEST_CHECK_STATE").is_ok() {
+    if !cfg!(test) || enforce_state_check {
         check_action.call(&mut env)?;
     }
 
@@ -385,20 +410,13 @@ pub fn execute(cwd: &Path, args: &PowershellArgs) -> Result<(), MigratoryError> 
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_powershell_missing() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = PowershellArgs {
             name: None,
@@ -408,14 +426,15 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_powershell_machine_not_found() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_machine_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PowershellArgs {
             name: Some("missing_vm".to_string()),
@@ -424,36 +443,34 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests fallback when machines map is empty.
     #[test]
-    fn test_execute_powershell_empty_machines() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_powershell_empty_machines() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")
-            .expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")?;
 
         let args = PowershellArgs {
             name: None,
             command: None,
             elevated: false,
         };
+        assert!(execute(cwd, &args).is_err());
+
+        fs::write(cwd.join("Vagrantfile"), "# Empty Vagrantfile")?;
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     /// Tests powershell error when a before trigger fails.
     #[test]
-    fn test_execute_powershell_trigger_before_failure() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_trigger_before_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -462,7 +479,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = PowershellArgs {
             name: Some("win".to_string()),
@@ -471,15 +488,13 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests powershell error when an after trigger fails.
     #[test]
-    fn test_execute_powershell_trigger_after_failure() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_trigger_after_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -488,7 +503,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = PowershellArgs {
             name: Some("win".to_string()),
@@ -497,15 +512,16 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests powershell command execution failure.
     #[test]
-    fn test_execute_powershell_command_failure() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_command_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PowershellArgs {
             name: None,
@@ -514,17 +530,15 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_powershell_success_elevated_command() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_success_elevated_command() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PowershellArgs {
             name: None,
@@ -533,17 +547,15 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_powershell_success_unelevated_session() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_success_unelevated_session() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PowershellArgs {
             name: Some("default".to_string()),
@@ -552,14 +564,12 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_powershell_with_triggers() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_powershell_with_triggers() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -571,7 +581,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = PowershellArgs {
             name: Some("win".to_string()),
@@ -580,6 +590,7 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
@@ -600,7 +611,7 @@ end
     }
 
     #[test]
-    fn test_powershell_session_build_ssh_command() {
+    fn test_powershell_session_build_ssh_command() -> Result<(), MigratoryError> {
         let mut config = crate::config::MachineConfig::default();
         config.ssh.host = "192.168.56.10".to_string();
         config.ssh.port = 2222;
@@ -613,9 +624,9 @@ end
             Some("Get-Service".to_string()),
         );
 
-        let temp_dir = tempdir().expect("tempdir failed");
+        let temp_dir = tempdir()?;
         let key_file = temp_dir.path().join("id_rsa");
-        fs::write(&key_file, "mock_key").expect("write failed");
+        fs::write(&key_file, "mock_key")?;
 
         let cmd = session.build_ssh_command(Some(&key_file));
         let args: Vec<String> = cmd
@@ -628,6 +639,7 @@ end
         assert!(args.contains(&"-t".to_string()));
         assert!(args.contains(&key_file.to_string_lossy().to_string()));
         assert!(args.contains(&"Get-Service".to_string()));
+        Ok(())
     }
 
     #[test]
@@ -635,36 +647,23 @@ end
         let config = crate::config::MachineConfig::default();
         let session = PowerShellSession::new("win".to_string(), config, false, None);
 
-        let mut input = std::io::Cursor::new(
-            b"Hello PowerShell
-",
-        );
+        let mut input = std::io::Cursor::new(b"Hello PowerShell\n");
         let mut output = Vec::new();
 
         assert!(session.pipe_streams(&mut input, &mut output).is_ok());
-        assert_eq!(
-            output,
-            b"Hello PowerShell
-"
-        );
+        assert_eq!(output, b"Hello PowerShell\n");
 
         struct FailReader;
         impl Read for FailReader {
             fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "read failure",
-                ))
+                Err(std::io::Error::other("read failure"))
             }
         }
 
         struct FailWriter;
         impl Write for FailWriter {
             fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "write failure",
-                ))
+                Err(std::io::Error::other("write failure"))
             }
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
@@ -677,15 +676,13 @@ end
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "flush failure",
-                ))
+                Err(std::io::Error::other("flush failure"))
             }
         }
 
         let mut fail_reader = FailReader;
         let mut good_writer = Vec::new();
+        assert!(FailWriter.flush().is_ok());
         assert!(
             session
                 .pipe_streams(&mut fail_reader, &mut good_writer)
@@ -710,132 +707,99 @@ end
     }
 
     #[test]
-    fn test_powershell_session_status_and_signal_errors() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
+    fn test_powershell_session_status_and_signal_errors() -> Result<(), MigratoryError> {
         let config = crate::config::MachineConfig::default();
-        let session = PowerShellSession::new("win".to_string(), config, false, None);
-        let temp_dir = tempdir().expect("tempdir failed");
+        let session = PowerShellSession::new("win".to_string(), config.clone(), false, None)
+            .with_mock_exit_code(42);
+        let temp_dir = tempdir()?;
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_POWERSHELL_EXIT_CODE", "42");
-        }
         let res = session.start(temp_dir.path());
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("status 42"));
+        assert!(matches!(res, Err(ref e) if e.to_string().contains("status 42")));
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_POWERSHELL_EXIT_CODE");
-            std::env::set_var("MIGRATORY_TEST_POWERSHELL_SIGNAL", "1");
-        }
-        let res_sig = session.start(temp_dir.path());
-        assert!(res_sig.is_err());
-        assert!(
-            res_sig
-                .unwrap_err()
-                .to_string()
-                .contains("interrupted by signal")
-        );
+        let session_sig =
+            PowerShellSession::new("win".to_string(), config, false, None).with_mock_signal(true);
+        let res_sig = session_sig.start(temp_dir.path());
+        assert!(matches!(
+            res_sig,
+            Err(ref e) if e.to_string().contains("interrupted by signal")
+        ));
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_POWERSHELL_SIGNAL");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_powershell_session_winrm_and_elevated() {
+    fn test_powershell_session_winrm_and_elevated() -> Result<(), MigratoryError> {
         let mut config = crate::config::MachineConfig::default();
-        config.vm.communicator = Some("winrm".to_string());
+        config.vm.communicator = Some(crate::config::CommunicatorKind::Winrm);
         let session = PowerShellSession::new(
             "win".to_string(),
             config,
             true,
             Some("Get-Process".to_string()),
         );
-        let temp_dir = tempdir().expect("tempdir failed");
+        let temp_dir = tempdir()?;
         assert!(session.start(temp_dir.path()).is_ok());
 
         let cmd = session.build_ssh_command(None);
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        assert!(!args.contains(&"-i".to_string()));
+        assert!(!cmd.get_args().any(|a| a == "-i"));
+        Ok(())
     }
 
     #[test]
-    fn test_powershell_check_machine_state_running() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_powershell_check_machine_state_running() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&machine_dir).expect("mkdir failed");
-        std::fs::write(machine_dir.join("id"), "dummy_id").expect("write failed");
-        std::fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_CHECK_STATE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
+        std::fs::create_dir_all(&machine_dir)?;
+        std::fs::write(machine_dir.join("id"), "dummy_id")?;
+        std::fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PowershellArgs {
             name: None,
             command: None,
             elevated: false,
         };
-        let result = execute(cwd, &args);
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_CHECK_STATE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-        }
+        let result = execute_with_state(
+            cwd,
+            &args,
+            true,
+            Some(crate::provider::MachineState::Running),
+        );
 
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_powershell_check_state_failure() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_powershell_check_state_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_CHECK_STATE", "1");
-        }
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PowershellArgs {
             name: None,
             command: None,
             elevated: false,
         };
-        let result = execute(cwd, &args);
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_CHECK_STATE");
-        }
+        let result = execute_with_state(
+            cwd,
+            &args,
+            true,
+            Some(crate::provider::MachineState::PowerOff),
+        );
 
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_powershell_with_custom_provider() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_powershell_with_custom_provider() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let content = r#"
@@ -844,7 +808,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), content).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), content)?;
 
         let args = PowershellArgs {
             name: None,
@@ -853,6 +817,7 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
@@ -864,10 +829,6 @@ end
             Some("Get-Process".to_string()),
         );
         let cmd = session.build_ssh_command(Some(Path::new("/nonexistent/key/path/id_rsa")));
-        let args: Vec<_> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        assert!(!args.contains(&"-i".to_string()));
+        assert!(!cmd.get_args().any(|a| a == "-i"));
     }
 }

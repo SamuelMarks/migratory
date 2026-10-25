@@ -9,21 +9,22 @@ use crate::provider;
 use crate::ui::{ConsoleUi, Ui};
 use std::path::Path;
 
-#[cfg(not(test))]
-/// Executes the `attempt_graceful_halt` function.
+/// Attempts a graceful OS-level shutdown of the guest machine over SSH.
+///
+/// # Arguments
+/// Attempts to gracefully shut down a guest via SSH before falling back to provider halt.
 ///
 /// # Arguments
 ///
-/// * `communicator` - The `communicator` argument.
+/// * `communicator` - Active communicator connected to the guest.
 ///
 /// # Returns
 ///
-/// Returns `bool`.
-fn attempt_graceful_halt(communicator: &crate::communicator::ssh::SshCommunicator) -> bool {
-    if let Ok(guest) = crate::guest::detect_guest(communicator) {
-        guest.halt(communicator).is_ok()
-    } else {
-        false
+/// Returns `true` if the guest OS was detected and accepted the halt command, `false` otherwise.
+fn attempt_graceful_halt(communicator: &dyn crate::communicator::Communicator) -> bool {
+    match crate::guest::detect_guest(communicator) {
+        Ok(g) => g.halt(communicator).is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -42,6 +43,32 @@ fn attempt_graceful_halt(communicator: &crate::communicator::ssh::SshCommunicato
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or if halting the provider fails.
 pub fn execute(cwd: &Path, args: &HaltArgs) -> Result<(), MigratoryError> {
+    execute_with_graceful(cwd, args, |comm| !cfg!(test) && attempt_graceful_halt(comm))
+}
+
+/// Executes the `halt` command with a customizable graceful halt handler.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `halt` command.
+/// * `graceful_halt_fn` - Callback attempting graceful OS shutdown via SSH communicator.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or if halting the provider fails.
+pub fn execute_with_graceful<G>(
+    cwd: &Path,
+    args: &HaltArgs,
+    graceful_halt_fn: G,
+) -> Result<(), MigratoryError>
+where
+    G: Fn(&crate::communicator::ssh::SshCommunicator) -> bool + Sync,
+{
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
     let _guard = lock_file.try_write().map_err(|_| {
@@ -49,15 +76,8 @@ pub fn execute(cwd: &Path, args: &HaltArgs) -> Result<(), MigratoryError> {
             "Vagrant environment is locked by another process".to_string(),
         )
     })?;
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
-
     let ui = ConsoleUi;
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-
-    let env_config = config::evaluate_vagrantfile(path_str).unwrap_or_default();
+    let env_config = config::load_environment_config(cwd)?;
     let machines = env_config.machines;
 
     let target_names = config::resolve_target_machines(&machines, args.name.as_deref())?;
@@ -65,14 +85,15 @@ pub fn execute(cwd: &Path, args: &HaltArgs) -> Result<(), MigratoryError> {
 
     crate::action::MachineOrchestrator::run(&target_names, args.parallel, |name| {
         let machine_config = machines.get(name).cloned().unwrap_or_default();
-        let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(cwd));
+        let state_mgr =
+            crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
         crate::config::execute_triggers("before", "halt", &machine_config.triggers)?;
 
         let target_provider_name = machine_config
             .vm
             .providers
             .first()
-            .map(|p| p.name.clone())
+            .map(|p| p.name.to_string())
             .unwrap_or_else(|| "virtualbox".to_string());
         let target_provider_name_str = target_provider_name.as_str();
 
@@ -99,18 +120,13 @@ pub fn execute(cwd: &Path, args: &HaltArgs) -> Result<(), MigratoryError> {
                     .join(name)
                     .join(target_provider_name_str)
                     .join("private_key");
-                comm_config.private_key_path = Some(key_path.to_string_lossy().to_string());
+                comm_config.private_key_path = Some(key_path);
             }
 
-            let _communicator = crate::communicator::ssh::SshCommunicator::new(comm_config);
+            let communicator = crate::communicator::ssh::SshCommunicator::new(comm_config);
 
             let mut graceful = false;
-
-            #[cfg(not(test))]
-            let graceful_success = attempt_graceful_halt(&_communicator);
-
-            #[cfg(test)]
-            let graceful_success = std::env::var("MOCK_GRACEFUL_SUCCESS").is_ok();
+            let graceful_success = graceful_halt_fn(&communicator);
 
             if graceful_success {
                 graceful = true;
@@ -140,37 +156,30 @@ pub fn execute(cwd: &Path, args: &HaltArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
-
-    #[test]
-    #[cfg(unix)]
-    fn test_execute_invalid_utf8_path() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-
-        let dir = tempfile::tempdir().expect("operation should succeed");
-        let mut path = dir.path().to_path_buf();
-        let invalid_utf8 = vec![0xFF, 0xFF, 0xFF];
-        path.push(OsString::from_vec(invalid_utf8));
-
-        let args = Default::default();
-        let res = super::execute(&path, &args);
-        assert!(res.is_err());
-    }
-
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_halt_not_created() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    #[cfg(unix)]
+    fn test_execute_invalid_utf8_path() -> Result<(), MigratoryError> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir()?;
+        let mut path = dir.path().to_path_buf();
+        let invalid_utf8 = vec![0xFF, 0xFF, 0xFF];
+        path.push(OsString::from_vec(invalid_utf8));
+
+        let args = HaltArgs::default();
+        let res = super::execute(&path, &args);
+        assert!(res.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_halt_not_created() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
         let args = HaltArgs {
             force: false,
@@ -179,14 +188,15 @@ mod tests {
             no_parallel: false,
         };
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_cyclic_dependency() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_cyclic_dependency() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vf = r#"
 Vagrant.configure("2") do |config|
@@ -198,7 +208,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vf).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vf)?;
         let args = HaltArgs {
             force: false,
             name: None,
@@ -207,28 +217,21 @@ end
         };
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::Validation(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_fallback_forced_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_fallback_forced_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
-        fs::write(cwd.join("Vagrantfile"), "# Dummy").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::remove_var("MOCK_GRACEFUL_SUCCESS");
-        }
+        fs::create_dir_all(&machine_dir)?;
+        fs::write(machine_dir.join("id"), "dummy_id")?;
+        fs::write(cwd.join("Vagrantfile"), "# Dummy")?;
 
         let args = HaltArgs {
             force: false,
@@ -237,15 +240,12 @@ end
             no_parallel: false,
         };
         assert!(execute(cwd, &args).is_ok());
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_missing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = HaltArgs {
             force: false,
@@ -256,84 +256,42 @@ end
 
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_success_graceful() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_success_graceful() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write a mock vagrantfile so it exists
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let id_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_machine_123").expect("operation should succeed");
-        fs::write(id_dir.join("provider"), "mock_provider").expect("operation should succeed");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_machine_123")?;
+        fs::write(id_dir.join("provider"), "mock_provider")?;
 
-        unsafe {
-            std::env::set_var("MOCK_GRACEFUL_SUCCESS", "1");
-        }
         let args = HaltArgs {
             force: false,
             name: None,
             parallel: false,
             no_parallel: false,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MOCK_GRACEFUL_SUCCESS");
-        }
+        let result = execute_with_graceful(cwd, &args, |_| true);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_success_force() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_success_force() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write a mock vagrantfile so it exists
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let id_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_id").expect("operation should succeed");
-
-        let bin_vbox = dir.path().join("VBoxManage");
-        let bin_lower = dir.path().join("vboxmanage");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&bin_vbox, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&bin_vbox, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-            std::fs::write(&bin_lower, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&bin_lower, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-        }
-        #[cfg(windows)]
-        {
-            let bin = dir.path().join("VBoxManage.bat");
-            std::fs::write(&bin, "@echo off\nexit 0\n").expect("operation should succeed");
-            let bin_lower = dir.path().join("vboxmanage.bat");
-            std::fs::write(&bin_lower, "@echo off\nexit 0\n").expect("operation should succeed");
-        }
-
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
-
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_id")?;
 
         let args = HaltArgs {
             force: true,
@@ -342,61 +300,48 @@ end
             no_parallel: false,
         };
         let result = execute(cwd, &args);
-
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
-
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_success_ungraceful() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_success_ungraceful() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let id_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_id").expect("operation should succeed");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_id")?;
 
-        let bin_vbox = dir.path().join("VBoxManage");
-        let bin_lower = dir.path().join("vboxmanage");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&bin_vbox, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&bin_vbox, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-            std::fs::write(&bin_lower, "#!/bin/sh\nexit 0\n").expect("operation should succeed");
-            std::fs::set_permissions(&bin_lower, std::fs::Permissions::from_mode(0o755))
-                .expect("operation should succeed");
-        }
-        #[cfg(windows)]
-        {
-            let bin = dir.path().join("VBoxManage.bat");
-            std::fs::write(&bin, "@echo off\nexit 0\n").expect("operation should succeed");
-            let bin_lower = dir.path().join("vboxmanage.bat");
-            std::fs::write(&bin_lower, "@echo off\nexit 0\n").expect("operation should succeed");
-        }
+        let args = HaltArgs {
+            force: false,
+            name: None,
+            parallel: false,
+            no_parallel: false,
+        };
+        let result = execute_with_graceful(cwd, &args, |_| false);
+        assert!(result.is_ok());
+        Ok(())
+    }
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::new();
-        new_path.push(dir.path());
-        #[cfg(unix)]
-        new_path.push(":");
-        #[cfg(windows)]
-        new_path.push(";");
-        new_path.push(&old_path);
+    #[test]
+    fn test_execute_halt_failure_ungraceful() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        let cwd = dir.path();
 
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-            std::env::remove_var("MOCK_GRACEFUL_SUCCESS"); // ensure graceful fails
-        }
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider "hyperv" do |v|
+  end
+end
+        "#;
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
+
+        let id_dir = cwd.join(".vagrant").join("machines").join("default");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_id")?;
 
         let args = HaltArgs {
             force: false,
@@ -406,19 +351,13 @@ end
         };
         let result = execute(cwd, &args);
 
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
-
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_failure_ungraceful() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_force_error() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -427,47 +366,15 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
-
-        let id_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_id").expect("operation should succeed");
-
-        unsafe {
-            std::env::remove_var("MOCK_GRACEFUL_SUCCESS"); // ensure graceful fails
-        }
-
-        let args = HaltArgs {
-            force: false,
-            name: None,
-            parallel: false,
-            no_parallel: false,
-        };
-        let result = execute(cwd, &args);
-
-        assert!(result.is_ok()); // Because execute returns Ok(()) even if provider halt fails, it just logs a warning
-    }
-
-    #[test]
-    fn test_execute_halt_force_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path();
-
-        let vagrantfile_content = r#"
-Vagrant.configure("2") do |config|
-  config.vm.provider "hyperv" do |v|
-  end
-end
-        "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).unwrap();
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("hyperv");
-        fs::create_dir_all(&id_dir).unwrap();
-        fs::write(id_dir.join("id"), "mock_machine_123").unwrap();
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_machine_123")?;
 
         let args = HaltArgs {
             force: true,
@@ -476,102 +383,14 @@ end
             no_parallel: false,
         };
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_ERROR", "true");
-        }
         let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_ERROR");
-        }
-
-        assert!(result.is_ok()); // Because it just logs a warning
-    }
-
-    #[test]
-    fn test_execute_halt_graceful_missing_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path();
-
-        // No ssh private_key in config
-        let vagrantfile_content = r#"
-Vagrant.configure("2") do |config|
-  config.vm.provider "virtualbox" do |v|
-  end
-end
-        "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).unwrap();
-
-        let id_dir = cwd
-            .join(".vagrant")
-            .join("machines")
-            .join("default")
-            .join("virtualbox");
-        fs::create_dir_all(&id_dir).unwrap();
-        fs::write(id_dir.join("id"), "mock_machine_123").unwrap();
-
-        let args = HaltArgs {
-            force: false,
-            name: None,
-            parallel: false,
-            no_parallel: false,
-        };
-
-        unsafe {
-            std::env::set_var("MOCK_GRACEFUL_SUCCESS", "1");
-        }
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MOCK_GRACEFUL_SUCCESS");
-        }
-
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_graceful_missing_key_and_fail_fallback() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path();
-
-        let vagrantfile_content = r#"
-Vagrant.configure("2") do |config|
-  config.vm.provider "hyperv" do |v|
-  end
-end
-        "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).unwrap();
-
-        let id_dir = cwd
-            .join(".vagrant")
-            .join("machines")
-            .join("default")
-            .join("hyperv");
-        fs::create_dir_all(&id_dir).unwrap();
-        fs::write(id_dir.join("id"), "mock_machine_123").unwrap();
-
-        let args = HaltArgs {
-            force: false,
-            name: None,
-            parallel: false,
-            no_parallel: false,
-        };
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_ERROR", "true");
-        }
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_ERROR");
-        }
-
-        assert!(result.is_ok()); // Logs warning for fallback
-    }
-
-    #[test]
-    fn test_execute_halt_force_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempfile::tempdir().unwrap();
+    fn test_execute_halt_graceful_missing_key() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -580,15 +399,81 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content).unwrap();
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&id_dir).unwrap();
-        std::fs::write(id_dir.join("id"), "mock_machine_123").unwrap();
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_machine_123")?;
+
+        let args = HaltArgs {
+            force: false,
+            name: None,
+            parallel: false,
+            no_parallel: false,
+        };
+
+        let result = execute_with_graceful(cwd, &args, |_| true);
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_halt_graceful_missing_key_and_fail_fallback() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
+        let cwd = dir.path();
+
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider "hyperv" do |v|
+  end
+end
+        "#;
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
+
+        let id_dir = cwd
+            .join(".vagrant")
+            .join("machines")
+            .join("default")
+            .join("hyperv");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_machine_123")?;
+
+        let args = HaltArgs {
+            force: false,
+            name: None,
+            parallel: false,
+            no_parallel: false,
+        };
+
+        let result = execute(cwd, &args);
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_halt_force_success() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
+        let cwd = dir.path();
+
+        let vagrantfile_content = r#"
+Vagrant.configure("2") do |config|
+  config.vm.provider "virtualbox" do |v|
+  end
+end
+        "#;
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
+
+        let id_dir = cwd
+            .join(".vagrant")
+            .join("machines")
+            .join("default")
+            .join("virtualbox");
+        std::fs::create_dir_all(&id_dir)?;
+        std::fs::write(id_dir.join("id"), "mock_machine_123")?;
 
         let args = HaltArgs {
             force: true,
@@ -598,16 +483,13 @@ end
         };
 
         let result = execute(cwd, &args);
-
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_graceful_with_key() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempfile::tempdir().unwrap();
+    fn test_execute_halt_graceful_with_key() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -617,15 +499,15 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content).unwrap();
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&id_dir).unwrap();
-        std::fs::write(id_dir.join("id"), "mock_machine_123").unwrap();
+        std::fs::create_dir_all(&id_dir)?;
+        std::fs::write(id_dir.join("id"), "mock_machine_123")?;
 
         let args = HaltArgs {
             force: false,
@@ -634,32 +516,25 @@ end
             no_parallel: false,
         };
 
-        unsafe {
-            std::env::set_var("MOCK_GRACEFUL_SUCCESS", "1");
-        }
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MOCK_GRACEFUL_SUCCESS");
-        }
-
+        let result = execute_with_graceful(cwd, &args, |_| true);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_read_id_error() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_halt_read_id_error() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
-        // Make read_id fail by creating a directory where the file should be
         let id_path = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox")
             .join("id");
-        fs::create_dir_all(&id_path).expect("operation should succeed");
+        fs::create_dir_all(&id_path)?;
 
         let args = HaltArgs {
             force: false,
@@ -669,11 +544,12 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_provider_error() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_halt_provider_error() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -682,11 +558,11 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let id_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_id").expect("operation should succeed");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_id")?;
 
         let args = HaltArgs {
             force: true,
@@ -696,11 +572,12 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_unknown_provider() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_halt_unknown_provider() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -709,7 +586,7 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = HaltArgs {
             force: false,
@@ -719,11 +596,12 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_with_machines_and_providers() {
-        let dir = tempfile::tempdir().expect("tempdir failed");
+    fn test_execute_halt_with_machines_and_providers() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -737,13 +615,13 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("write failed");
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let machines_dir = cwd.join(".vagrant").join("machines");
-        std::fs::create_dir_all(machines_dir.join("web")).expect("create_dir failed");
-        std::fs::create_dir_all(machines_dir.join("db")).expect("create_dir failed");
-        std::fs::write(machines_dir.join("web").join("id"), "web_id").expect("write failed");
-        std::fs::write(machines_dir.join("db").join("id"), "db_id").expect("write failed");
+        std::fs::create_dir_all(machines_dir.join("web"))?;
+        std::fs::create_dir_all(machines_dir.join("db"))?;
+        std::fs::write(machines_dir.join("web").join("id"), "web_id")?;
+        std::fs::write(machines_dir.join("db").join("id"), "db_id")?;
 
         let args = HaltArgs {
             force: true,
@@ -753,24 +631,18 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 }
 #[cfg(test)]
 mod extra_halt_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_halt_success_graceful_proper() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_success_graceful_proper() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -781,46 +653,37 @@ mod extra_halt_tests {
                 end
             end
         "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_machine_123").expect("operation should succeed");
-        // Also create the legacy provider file just in case
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_machine_123")?;
         fs::write(
             cwd.join(".vagrant")
                 .join("machines")
                 .join("default")
                 .join("provider"),
             "virtualbox",
-        )
-        .expect("operation should succeed");
+        )?;
 
-        unsafe {
-            std::env::set_var("MOCK_GRACEFUL_SUCCESS", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER", "1"); // Use mock provider instead of virtualbox
-        }
         let args = HaltArgs {
             force: false,
             name: None,
             parallel: false,
             no_parallel: false,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MOCK_GRACEFUL_SUCCESS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER");
-        }
+        let result = execute_with_graceful(cwd, &args, |_| true);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_failure_graceful_proper() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_failure_graceful_proper() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -831,19 +694,15 @@ mod extra_halt_tests {
                 end
             end
         "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_machine_123").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_HALT_ERROR", "1"); // Make mock provider fail
-        }
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_machine_123")?;
 
         let args = HaltArgs {
             force: false,
@@ -851,17 +710,14 @@ mod extra_halt_tests {
             parallel: false,
             no_parallel: false,
         };
-        let result = execute(cwd, &args);
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER_HALT_ERROR");
-        }
-        assert!(result.is_ok()); // The halt still returns Ok(()) even if provider halt fails in force
+        let result = execute_with_graceful(cwd, &args, |_| false);
+        assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_target_name() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_execute_halt_target_name() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -872,15 +728,15 @@ mod extra_halt_tests {
                 end
             end
         "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("web")
             .join("virtualbox");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        fs::write(id_dir.join("id"), "mock_machine_123").expect("operation should succeed");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_machine_123")?;
 
         let args_target = HaltArgs {
             force: true,
@@ -899,18 +755,17 @@ mod extra_halt_tests {
         };
         let result_not_found = execute(cwd, &args_not_found);
         assert!(result_not_found.is_err());
+        Ok(())
     }
 
     /// Tests halt error when the Vagrant environment is already locked.
     #[test]
-    fn test_execute_halt_locked_environment() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_locked_environment() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
-        let mut lock_file = local_state
-            .create_lock_file()
-            .expect("operation should succeed");
-        let _guard = lock_file.write().expect("operation should succeed");
+        let mut lock_file = local_state.create_lock_file()?;
+        let _guard = lock_file.write()?;
 
         let args = HaltArgs {
             force: false,
@@ -920,12 +775,13 @@ mod extra_halt_tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests halt error when a before trigger fails.
     #[test]
-    fn test_execute_halt_trigger_before_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_trigger_before_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -934,7 +790,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = HaltArgs {
             force: false,
@@ -944,12 +800,13 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     /// Tests halt error when an after trigger fails.
     #[test]
-    fn test_execute_halt_trigger_after_failure() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_trigger_after_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -958,7 +815,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = HaltArgs {
             force: false,
@@ -968,32 +825,23 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_halt_non_virtualbox_provider() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        }
-
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_halt_non_virtualbox_provider() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
   config.vm.provider "docker"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
-        let state_mgr = provider::StateManager::new(cwd.join(".vagrant"));
-        state_mgr
-            .write_id("default", "docker", "docker-id-halt")
-            .expect("operation should succeed");
+        let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
+        state_mgr.write_id("default", "docker", "docker-id-halt")?;
 
-        // Without force
         let args_graceful = HaltArgs {
             force: false,
             name: None,
@@ -1003,7 +851,6 @@ end
         let res_graceful = execute(cwd, &args_graceful);
         assert!(res_graceful.is_ok());
 
-        // With force
         let args_force = HaltArgs {
             force: true,
             name: None,
@@ -1013,8 +860,23 @@ end
         let res_force = execute(cwd, &args_force);
         assert!(res_force.is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
+        /// Communicator returning `"Linux\n"` to test `attempt_graceful_halt` success.
+        struct LinuxComm;
+        impl crate::communicator::Communicator for LinuxComm {
+            fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
+                Ok("Linux\n".to_string())
+            }
         }
+        /// Communicator failing detection to test `attempt_graceful_halt` failure.
+        struct UnknownComm;
+        impl crate::communicator::Communicator for UnknownComm {
+            fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
+                Err(MigratoryError::Generic("err".to_string()))
+            }
+        }
+        assert!(attempt_graceful_halt(&LinuxComm));
+        assert!(!attempt_graceful_halt(&UnknownComm));
+
+        Ok(())
     }
 }

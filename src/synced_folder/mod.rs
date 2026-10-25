@@ -3,10 +3,15 @@
 use crate::communicator::Communicator;
 use crate::error::MigratoryError;
 
+/// NFS synced folder implementation.
 pub mod nfs;
+/// Rsync synced folder implementation.
 pub mod rsync;
+/// SMB synced folder implementation.
 pub mod smb;
+/// VirtualBox (`vboxsf`) synced folder implementation.
 pub mod vbox;
+/// VirtIO-FS and Plan 9 (`9p`) synced folder implementation.
 pub mod virtiofs;
 
 /// Common options for synced folders.

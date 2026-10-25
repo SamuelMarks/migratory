@@ -6,18 +6,26 @@
 
 use crate::error::MigratoryError;
 
+/// BSD host OS capabilities.
 pub mod bsd;
+/// Darwin (macOS) host OS capabilities.
 pub mod darwin;
+/// Linux host OS capabilities.
 pub mod linux;
+/// Windows host OS capabilities.
 pub mod windows;
 
 /// Interface for OS-specific host operations.
 pub trait Host: Send + Sync {
     /// Name of the host OS (e.g. "darwin", "linux", "windows", "bsd").
-    fn name(&self) -> &str;
+    fn name(&self) -> &str {
+        "unknown"
+    }
 
     /// True if the current operating system matches this host implementation.
-    fn is_match(&self) -> bool;
+    fn is_match(&self) -> bool {
+        false
+    }
 
     /// Configures NFS exports on the host.
     ///
@@ -26,8 +34,23 @@ pub trait Host: Send + Sync {
     /// Returns `MigratoryError` if host NFS export manipulation fails.
     fn configure_nfs(
         &self,
-        folders: &[crate::config::SyncedFolderConfig],
-    ) -> Result<(), MigratoryError>;
+        _folders: &[crate::config::SyncedFolderConfig],
+    ) -> Result<(), MigratoryError> {
+        Ok(())
+    }
+
+    /// Prunes stale Migratory/Vagrant NFS export entries on the host.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if pruning host NFS exports fails.
+    fn prune_nfs_exports(&self) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Configures SMB shares on the host.
     ///
@@ -36,22 +59,28 @@ pub trait Host: Send + Sync {
     /// Returns `MigratoryError` if SMB share configuration fails.
     fn configure_smb(
         &self,
-        folders: &[crate::config::SyncedFolderConfig],
-    ) -> Result<(), MigratoryError>;
+        _folders: &[crate::config::SyncedFolderConfig],
+    ) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Checks if the current process has administrative privileges.
     ///
     /// # Errors
     ///
     /// Returns `MigratoryError` if privilege checking encounters a system error.
-    fn check_admin(&self) -> Result<bool, MigratoryError>;
+    fn check_admin(&self) -> Result<bool, MigratoryError> {
+        Ok(false)
+    }
 
     /// Resolves the correct local IP for bridging.
     ///
     /// # Errors
     ///
     /// Returns `MigratoryError` if host IP cannot be determined.
-    fn resolve_host_ip(&self) -> Result<String, MigratoryError>;
+    fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
+        Ok("127.0.0.1".to_string())
+    }
 
     /// Returns the system service manager used on this host (e.g. "launchd", "systemd", "openrc", "services.msc", "rc.d").
     fn service_manager(&self) -> &str {
@@ -76,20 +105,37 @@ pub trait Host: Send + Sync {
 ///
 /// Returns `MigratoryError` if the host OS cannot be determined.
 pub fn detect_host() -> Result<Box<dyn Host>, MigratoryError> {
+    detect_host_for_os(std::env::consts::OS)
+}
+
+/// Detects the host OS implementation for an explicit target OS identifier.
+///
+/// # Arguments
+///
+/// * `target_os` - OS identifier string (e.g. `"macos"`, `"darwin"`, `"linux"`, `"windows"`, `"freebsd"`).
+///
+/// # Returns
+///
+/// Returns a boxed [`Host`] implementation matching `target_os`.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if no host implementation matches `target_os`.
+pub fn detect_host_for_os(target_os: &str) -> Result<Box<dyn Host>, MigratoryError> {
     let darwin = darwin::DarwinHost;
-    if darwin.is_match() {
+    if darwin.is_match_os(target_os) {
         return Ok(Box::new(darwin));
     }
     let linux = linux::LinuxHost;
-    if linux.is_match() {
+    if linux.is_match_os(target_os) {
         return Ok(Box::new(linux));
     }
     let windows = windows::WindowsHost;
-    if windows.is_match() {
+    if windows.is_match_os(target_os) {
         return Ok(Box::new(windows));
     }
     let bsd = bsd::BsdHost;
-    if bsd.is_match() {
+    if bsd.is_match_os(target_os) {
         return Ok(Box::new(bsd));
     }
     Err(MigratoryError::Generic(
@@ -115,92 +161,49 @@ Cmnd_Alias VAGRANT_NFS_COMMANDS = /sbin/nfsd, /usr/sbin/exportfs, /etc/rc.d/moun
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
-    fn test_detect_host() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
+    fn test_detect_host() -> Result<(), MigratoryError> {
+        let res_current = detect_host()?;
+        assert!(!res_current.name().is_empty());
 
-        unsafe { std::env::set_var("MOCK_OS", "darwin") };
-        let res_darwin = detect_host();
-        assert!(res_darwin.is_ok());
-        assert_eq!(
-            res_darwin.expect("darwin host detection failed").name(),
-            "darwin"
-        );
+        let res_darwin = detect_host_for_os("darwin")?;
+        assert_eq!(res_darwin.name(), "darwin");
+        assert_eq!(detect_host_for_os("macos")?.name(), "darwin");
 
-        unsafe { std::env::set_var("MOCK_OS", "linux") };
-        let res_linux = detect_host();
-        assert!(res_linux.is_ok());
-        assert_eq!(
-            res_linux.expect("linux host detection failed").name(),
-            "linux"
-        );
+        let res_linux = detect_host_for_os("linux")?;
+        assert_eq!(res_linux.name(), "linux");
 
-        unsafe { std::env::set_var("MOCK_OS", "windows") };
-        let res_win = detect_host();
-        assert!(res_win.is_ok());
-        assert_eq!(
-            res_win.expect("win host detection failed").name(),
-            "windows"
-        );
+        let res_win = detect_host_for_os("windows")?;
+        assert_eq!(res_win.name(), "windows");
 
-        unsafe { std::env::set_var("MOCK_OS", "freebsd") };
-        let res_bsd = detect_host();
-        assert!(res_bsd.is_ok());
-        assert_eq!(res_bsd.expect("bsd host detection failed").name(), "bsd");
+        let res_bsd = detect_host_for_os("freebsd")?;
+        assert_eq!(res_bsd.name(), "bsd");
 
-        unsafe { std::env::set_var("MOCK_OS", "unknown_os_xyz") };
-        assert!(detect_host().is_err());
-
-        unsafe { std::env::remove_var("MOCK_OS") };
+        assert!(detect_host_for_os("unknown_os_xyz").is_err());
+        Ok(())
     }
 
+    /// Minimal host implementation used to test default trait methods on [`Host`].
     struct MinimalHost;
-    impl Host for MinimalHost {
-        fn name(&self) -> &str {
-            "minimal"
-        }
-        fn is_match(&self) -> bool {
-            true
-        }
-        fn configure_nfs(
-            &self,
-            _folders: &[crate::config::SyncedFolderConfig],
-        ) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn configure_smb(
-            &self,
-            _folders: &[crate::config::SyncedFolderConfig],
-        ) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn check_admin(&self) -> Result<bool, MigratoryError> {
-            Ok(false)
-        }
-        fn resolve_host_ip(&self) -> Result<String, MigratoryError> {
-            Ok("127.0.0.1".to_string())
-        }
-    }
+    impl Host for MinimalHost {}
 
     /// Tests default methods of Host trait.
     #[test]
-    fn test_host_trait_defaults() {
+    fn test_host_trait_defaults() -> Result<(), MigratoryError> {
         let host = MinimalHost;
+        assert_eq!(host.name(), "unknown");
+        assert!(!host.is_match());
+        assert!(host.configure_nfs(&[]).is_ok());
+        assert!(host.prune_nfs_exports().is_ok());
+        assert!(host.configure_smb(&[]).is_ok());
+        assert!(!host.check_admin()?);
+        assert_eq!(host.resolve_host_ip()?, "127.0.0.1");
         assert_eq!(host.service_manager(), "unknown");
-        let ifaces = host.list_bridge_interfaces();
-        assert!(ifaces.is_ok());
-        assert_eq!(ifaces.expect("operation should succeed"), vec!["lo"]);
+        let ifaces = host.list_bridge_interfaces()?;
+        assert_eq!(ifaces, vec!["lo"]);
+        Ok(())
     }
 
     #[test]

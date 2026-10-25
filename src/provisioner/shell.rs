@@ -8,25 +8,25 @@ use std::path::Path;
 
 /// Shell script provisioner.
 pub struct ShellProvisioner {
-    /// Represents the `inline` field.
+    /// Inline shell script commands to execute.
     inline: Option<String>,
-    /// Represents the `path` field.
+    /// Local path or remote HTTP(S) URL to a script file.
     path: Option<String>,
-    /// Represents the `args` field.
+    /// Arguments passed to the script during execution.
     args: Option<String>,
-    /// Represents the `upload_path` field.
+    /// Guest path where the script file is uploaded prior to execution.
     upload_path: Option<String>,
-    /// Represents the `powershell` field.
+    /// Whether to execute the script using PowerShell instead of `/bin/sh`.
     powershell: bool,
-    /// Represents the `powershell_args` field.
+    /// Custom arguments passed to `powershell.exe`.
     powershell_args: Option<String>,
-    /// Represents the `sensitive` field.
+    /// Whether environment variables and script contents should be redacted in logs.
     sensitive: bool,
-    /// Represents the `env` field.
+    /// Environment variables exported prior to executing the script.
     env: HashMap<String, String>,
-    /// Represents the `privileged` field.
+    /// Whether to run the script with `sudo` privileges on Unix guests.
     privileged: bool,
-    /// Represents the `reboot` field.
+    /// Whether to reboot the guest machine after the script completes.
     reboot: bool,
 }
 
@@ -65,17 +65,14 @@ fn download_remote_script(url: &str) -> Result<tempfile::NamedTempFile, Migrator
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .connect_timeout(std::time::Duration::from_millis(500))
-        .build()
-        .map_err(|e| MigratoryError::Generic(format!("Failed to build HTTP client: {}", e)))?;
+        .build()?;
     let response = client.get(url).send().map_err(|e| {
         MigratoryError::Generic(format!(
             "Failed to download remote shell script {}: {}",
             url, e
         ))
     })?;
-    let content = response.text().map_err(|e| {
-        MigratoryError::Generic(format!("Failed to read remote script content: {}", e))
-    })?;
+    let content = response.text()?;
     let mut temp = tempfile::NamedTempFile::new().map_err(MigratoryError::Io)?;
     std::io::Write::write_all(&mut temp, content.as_bytes()).map_err(MigratoryError::Io)?;
     Ok(temp)
@@ -83,10 +80,8 @@ fn download_remote_script(url: &str) -> Result<tempfile::NamedTempFile, Migrator
 
 /// Sleeps briefly to allow the connection to drop during reboot.
 fn sleep_for_reboot() {
-    #[cfg(not(test))]
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    #[cfg(test)]
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    let millis = if cfg!(test) { 1 } else { 5000 };
+    std::thread::sleep(std::time::Duration::from_millis(millis));
 }
 
 impl Provisioner for ShellProvisioner {
@@ -248,31 +243,17 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
+    /// No-op mock communicator for Shell provisioner tests.
     struct MockComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     #[test]
     fn test_shell_provisioner_inline() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
         config.insert("inline".to_string(), "echo 'hello'".to_string());
@@ -289,9 +270,6 @@ mod tests {
 
     #[test]
     fn test_shell_provisioner_inline_privileged() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
         config.insert("inline".to_string(), "echo 'hello'".to_string());
@@ -304,19 +282,16 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_provisioner_path() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_shell_provisioner_path() -> Result<(), MigratoryError> {
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("script.sh");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "echo 'test'").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "echo 'test'")?;
 
-        let path_str = file_path.to_str().expect("operation should succeed");
+        let path_str = file_path.to_string_lossy();
         config.insert("path".to_string(), path_str.to_string());
         config.insert("privileged".to_string(), "true".to_string());
         config.insert("args".to_string(), "--force".to_string());
@@ -325,37 +300,32 @@ mod tests {
 
         let comm = MockComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_shell_provisioner_path_unprivileged() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_shell_provisioner_path_unprivileged() -> Result<(), MigratoryError> {
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("script.sh");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "echo 'test'").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "echo 'test'")?;
 
-        let path_str = file_path.to_str().expect("operation should succeed");
+        let path_str = file_path.to_string_lossy();
         config.insert("path".to_string(), path_str.to_string());
         config.insert("privileged".to_string(), "false".to_string());
-        // no args to cover the `if let Some(args)` being false in path block
 
         assert!(prov.prepare(&config).is_ok());
 
         let comm = MockComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
     fn test_shell_provisioner_path_not_found() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
         config.insert("path".to_string(), "/nonexistent/script.sh".to_string());
@@ -369,9 +339,6 @@ mod tests {
 
     #[test]
     fn test_shell_provisioner_empty() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let mut prov = ShellProvisioner::new();
         let empty_config = HashMap::new();
         assert!(prov.prepare(&empty_config).is_ok());
@@ -381,9 +348,6 @@ mod tests {
 
     #[test]
     fn test_shell_provisioner_env_and_reboot() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
         config.insert("inline".to_string(), "echo".to_string());
@@ -401,9 +365,6 @@ mod tests {
 
     #[test]
     fn test_shell_provisioner_inline_unprivileged() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
         config.insert("inline".to_string(), "echo 'hello'".to_string());
@@ -418,9 +379,6 @@ mod tests {
 
     #[test]
     fn test_shell_provisioner_invalid_env() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
         config.insert("env".to_string(), "{ invalid_json }".to_string());
@@ -430,19 +388,16 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_provisioner_upload_path_and_powershell() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_shell_provisioner_upload_path_and_powershell() -> Result<(), MigratoryError> {
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("script.ps1");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "Write-Host 'test'").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "Write-Host 'test'")?;
 
-        let path_str = file_path.to_str().expect("operation should succeed");
+        let path_str = file_path.to_string_lossy();
         config.insert("path".to_string(), path_str.to_string());
         config.insert("upload_path".to_string(), "C:\\tmp\\script.ps1".to_string());
         config.insert("powershell".to_string(), "true".to_string());
@@ -452,22 +407,20 @@ mod tests {
 
         let comm = MockComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_shell_provisioner_powershell_args_and_sensitive() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_shell_provisioner_powershell_args_and_sensitive() -> Result<(), MigratoryError> {
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("script.ps1");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "Write-Host 'custom powershell'").expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "Write-Host 'custom powershell'")?;
 
-        let path_str = file_path.to_str().expect("operation should succeed");
+        let path_str = file_path.to_string_lossy();
         config.insert("path".to_string(), path_str.to_string());
         config.insert(
             "powershell_args".to_string(),
@@ -479,13 +432,11 @@ mod tests {
 
         let comm = MockComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
     fn test_shell_provisioner_remote_script_url() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = httpmock::MockServer::start();
         let _mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/script.sh");
@@ -519,10 +470,14 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_provisioner_failures() {
+    fn test_shell_provisioner_failures() -> Result<(), MigratoryError> {
+        /// Configurable failing communicator for Shell provisioner error tests.
         struct FailingComm {
+            /// Fail `upload` calls.
             fail_upload: bool,
+            /// Fail `execute` calls.
             fail_execute: bool,
+            /// Fail `wait_for_ready` calls.
             fail_wait: bool,
         }
         impl Communicator for FailingComm {
@@ -540,16 +495,6 @@ mod tests {
                     Ok(())
                 }
             }
-            fn download(
-                &self,
-                _remote_path: &str,
-                _local_path: &Path,
-            ) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                Ok(())
-            }
             fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
                 if self.fail_wait {
                     Err(MigratoryError::Generic("wait failed".to_string()))
@@ -559,11 +504,11 @@ mod tests {
             }
         }
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let file_path = dir.path().join("script.sh");
-        let mut file = File::create(&file_path).expect("operation should succeed");
-        writeln!(file, "echo 1").expect("operation should succeed");
-        let path_str = file_path.to_str().expect("operation should succeed");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "echo 1")?;
+        let path_str = file_path.to_string_lossy();
 
         // 1. Upload failure
         let mut prov1 = ShellProvisioner::default();
@@ -575,6 +520,11 @@ mod tests {
             fail_execute: false,
             fail_wait: false,
         };
+        assert!(
+            comm_up_fail
+                .wait_for_ready(Duration::from_millis(1))
+                .is_ok()
+        );
         assert!(prov1.provision(&comm_up_fail).is_err());
 
         // 2. Path execute failure
@@ -628,5 +578,6 @@ mod tests {
         );
         assert!(prov5.prepare(&config5).is_ok());
         assert!(prov5.provision(&comm_ok).is_err());
+        Ok(())
     }
 }

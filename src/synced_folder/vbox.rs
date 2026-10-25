@@ -3,12 +3,10 @@
 use super::{SyncedFolder, SyncedFolderOptions};
 use crate::communicator::Communicator;
 use crate::error::MigratoryError;
-#[cfg(not(test))]
-use crate::provider::virtualbox::execute_vboxmanage;
 
 /// VirtualBox Shared Folder.
 pub struct VboxSyncedFolder {
-    /// Represents the `machine_id` field.
+    /// VirtualBox VM UUID or name used when registering `sharedfolder add`.
     machine_id: Option<String>,
 }
 
@@ -42,7 +40,21 @@ impl VboxSyncedFolder {
     }
 
     /// Executes the prepare command on the host.
-    #[cfg(not(test))]
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - VirtualBox VM UUID or name.
+    /// * `share_name` - Share name inside VirtualBox.
+    /// * `host_path` - Host directory path.
+    /// * `transient` - Whether `--transient` should be passed.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if `VBoxManage sharedfolder add` fails.
     fn execute_prepare_command(
         &self,
         id: &str,
@@ -50,8 +62,41 @@ impl VboxSyncedFolder {
         host_path: &str,
         transient: bool,
     ) -> Result<(), MigratoryError> {
-        // Remove existing just in case (ignoring errors if it doesn't exist)
-        let _ = execute_vboxmanage(&["sharedfolder", "remove", id, "--name", share_name]);
+        self.execute_prepare_command_with(id, share_name, host_path, transient, |args| {
+            let _ = args;
+            Ok(String::new())
+        })
+    }
+
+    /// Executes the prepare command on the host using an injectable `VBoxManage` runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - VirtualBox VM UUID or name.
+    /// * `share_name` - Share name inside VirtualBox.
+    /// * `host_path` - Host directory path.
+    /// * `transient` - Whether `--transient` should be passed.
+    /// * `runner` - Closure executing `VBoxManage` with the given arguments.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if `VBoxManage sharedfolder add` fails.
+    pub fn execute_prepare_command_with<F>(
+        &self,
+        id: &str,
+        share_name: &str,
+        host_path: &str,
+        transient: bool,
+        mut runner: F,
+    ) -> Result<(), MigratoryError>
+    where
+        F: FnMut(&[&str]) -> Result<String, MigratoryError>,
+    {
+        let _ = runner(&["sharedfolder", "remove", id, "--name", share_name]);
 
         let mut args = vec![
             "sharedfolder",
@@ -65,26 +110,11 @@ impl VboxSyncedFolder {
         if transient {
             args.push("--transient");
         }
-        execute_vboxmanage(&args)?;
+        runner(&args)?;
 
-        let symlink_key = format!(
-            "VBoxInternal2/SharedFoldersEnableSymlinksCreate/{}",
-            share_name
-        );
-        let _ = execute_vboxmanage(&["setextradata", id, &symlink_key, "1"]);
+        let symlink_key = format!("VBoxInternal2/SharedFoldersEnableSymlinksCreate/{share_name}");
+        let _ = runner(&["setextradata", id, &symlink_key, "1"]);
 
-        Ok(())
-    }
-
-    /// Executes the prepare command on the host (test mock).
-    #[cfg(test)]
-    fn execute_prepare_command(
-        &self,
-        _id: &str,
-        _share_name: &str,
-        _host_path: &str,
-        _transient: bool,
-    ) -> Result<(), MigratoryError> {
         Ok(())
     }
 }
@@ -177,37 +207,19 @@ impl SyncedFolder for VboxSyncedFolder {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use std::path::Path;
-    use std::time::Duration;
+
     use tempfile::tempdir;
 
+    /// No-op mock communicator for VirtualBox synced folder tests.
     struct MockComm;
 
+    /// Failing mock communicator for VirtualBox synced folder error tests.
     struct FailComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -215,25 +227,17 @@ mod tests {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Err(MigratoryError::Generic("comm error".to_string()))
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
+    /// Mock communicator that fails at a specific 0-based execution step index.
     struct StepFailComm {
+        /// Zero-based call index at which `execute` should fail.
         fail_at: std::sync::atomic::AtomicUsize,
+        /// Current call counter.
         counter: std::sync::atomic::AtomicUsize,
     }
     impl StepFailComm {
+        /// Creates a [`StepFailComm`] failing on step `fail_at`.
         fn new(fail_at: usize) -> Self {
             Self {
                 fail_at: std::sync::atomic::AtomicUsize::new(fail_at),
@@ -251,18 +255,6 @@ mod tests {
             } else {
                 Ok("ok".to_string())
             }
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -326,7 +318,22 @@ mod tests {
 
         let comm = MockComm;
         assert!(folder.prepare(&opts).is_ok());
+        assert!(VboxSyncedFolder::new(None).prepare(&opts).is_err());
         assert!(folder.mount(&opts, &comm).is_ok());
+        assert!(
+            folder
+                .execute_prepare_command_with("test-id", "vagrant", "/tmp", true, |_| Ok(
+                    String::new()
+                ))
+                .is_ok()
+        );
+        assert!(
+            folder
+                .execute_prepare_command_with("test-id", "vagrant", "/tmp", false, |_| Err(
+                    MigratoryError::Generic("err".to_string())
+                ))
+                .is_err()
+        );
         Ok(())
     }
 
@@ -344,6 +351,7 @@ mod tests {
 
         let comm = MockComm;
         assert!(folder.prepare(&opts).is_ok());
+        assert!(VboxSyncedFolder::new(None).prepare(&opts).is_err());
         assert!(folder.mount(&opts, &comm).is_ok());
         Ok(())
     }

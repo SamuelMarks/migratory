@@ -255,17 +255,12 @@ impl Guest for BsdGuest {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::time::Duration;
 
+    /// Mock communicator returning a fixed result for `execute`.
     struct MockComm {
+        /// Canned output or error message.
         output: Result<String, String>,
     }
 
@@ -371,12 +366,12 @@ mod tests {
     }
 
     #[test]
-    fn test_bsd_guest() {
+    fn test_bsd_guest() -> Result<(), MigratoryError> {
         let comm = MockComm {
             output: Ok("FreeBSD\n".to_string()),
         };
         let guest = BsdGuest;
-        assert!(guest.detect(&comm).expect("detect should succeed"));
+        assert!(guest.detect(&comm)?);
         assert!(guest.change_hostname(&comm, "test").is_ok());
 
         let networks = vec![NetworkConfig::PrivateNetwork {
@@ -392,6 +387,7 @@ mod tests {
                 .is_ok()
         );
         assert!(guest.halt(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -414,25 +410,23 @@ mod tests {
     }
 
     #[test]
-    fn test_bsd_guest_not_bsd() {
+    fn test_bsd_guest_not_bsd() -> Result<(), MigratoryError> {
         let comm = MockComm {
             output: Ok("Linux\n".to_string()),
         };
         let guest = BsdGuest;
-        assert!(!guest.detect(&comm).expect("detect should succeed"));
+        assert!(!guest.detect(&comm)?);
+        Ok(())
     }
 
     #[test]
-    fn test_bsd_guest_detect_error() {
+    fn test_bsd_guest_detect_error() -> Result<(), MigratoryError> {
         let comm = MockComm {
             output: Err("timeout".to_string()),
         };
         let guest = BsdGuest;
-        assert!(
-            !guest
-                .detect(&comm)
-                .expect("detect should resolve to false on error")
-        );
+        assert!(!guest.detect(&comm)?);
+        Ok(())
     }
 
     #[test]
@@ -461,23 +455,15 @@ mod tests {
         assert!(!guest.rsync_installed(&fail_comm).unwrap_or(true));
     }
 
-    struct FnComm<F>(F);
+    /// Closure-backed mock communicator for testing selective command failures.
+    struct FnComm<F>(
+        /// Closure invoked on `execute`.
+        F,
+    );
 
-    impl<F: Fn(&str) -> Result<String, MigratoryError>> Communicator for FnComm<F> {
+    impl<F: Fn(&str) -> Result<String, MigratoryError> + Send + Sync> Communicator for FnComm<F> {
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
             (self.0)(command)
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 

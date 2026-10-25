@@ -1,22 +1,228 @@
 //! Provider module for hypervisor interactions.
 //!
 //! This module defines the core `Provider` trait which must be implemented
-//! by all supported virtual machine hypervisors, and manages state tracking
-//! for machines within the `.vagrant` directory equivalent.
+//! by all supported virtual machine hypervisors.
 
 use crate::config::VmConfig;
 use crate::error::MigratoryError;
-use std::fs;
-use std::path::{Path, PathBuf};
 
+/// Docker container provider implementation.
 pub mod docker;
+/// Microsoft Hyper-V provider implementation.
 pub mod hyperv;
+/// Libvirt / KVM provider implementation.
 pub mod libvirt;
+/// Parallels Desktop provider implementation.
 pub mod parallels;
+/// QEMU / libvirt provider implementation.
 pub mod qemu;
+/// UTM (macOS / Apple Silicon) provider implementation.
 pub mod utm;
+/// Oracle VirtualBox provider implementation.
 pub mod virtualbox;
+/// VMware Fusion / Workstation provider implementation.
 pub mod vmware;
+
+/// Abstraction over external process execution for hypervisor CLI tools.
+pub trait CommandRunner: Send + Sync {
+    /// Executes `program` with `args` and returns its captured standard output.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - Executable name or path.
+    /// * `args` - Slice of command-line arguments.
+    ///
+    /// # Returns
+    ///
+    /// Returns captured stdout on zero exit status.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if spawning fails or the process exits non-zero.
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, MigratoryError>;
+
+    /// Checks whether `program` can be spawned with `check_arg`.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - Executable name or path.
+    /// * `check_arg` - Version or help flag (e.g. `"--version"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the command could be spawned, `false` otherwise.
+    fn is_available(&self, program: &str, check_arg: &str) -> bool {
+        std::process::Command::new(program)
+            .arg(check_arg)
+            .output()
+            .is_ok()
+    }
+}
+
+/// Default [`CommandRunner`] that spawns real operating system processes via [`std::process::Command`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemCommandRunner;
+
+impl CommandRunner for SystemCommandRunner {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, MigratoryError> {
+        let output = std::process::Command::new(program).args(args).output();
+        match output {
+            Ok(out) => {
+                if out.status.success() {
+                    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+                } else {
+                    Err(MigratoryError::Generic(
+                        String::from_utf8_lossy(&out.stderr).to_string(),
+                    ))
+                }
+            }
+            Err(e) => Err(MigratoryError::Generic(e.to_string())),
+        }
+    }
+}
+
+/// Closure-backed [`CommandRunner`] for dependency injection in tests and custom runners.
+pub struct FnCommandRunner<F>
+where
+    F: Fn(&str, &[&str]) -> Result<String, MigratoryError> + Send + Sync,
+{
+    /// Handler invoked on [`CommandRunner::run`].
+    handler: F,
+    /// Availability flag returned by [`CommandRunner::is_available`].
+    available: bool,
+}
+
+impl<F> FnCommandRunner<F>
+where
+    F: Fn(&str, &[&str]) -> Result<String, MigratoryError> + Send + Sync,
+{
+    /// Creates a new [`FnCommandRunner`] with `available = true`.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler` - Closure invoked for each command execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new [`FnCommandRunner`].
+    pub fn new(handler: F) -> Self {
+        Self {
+            handler,
+            available: true,
+        }
+    }
+
+    /// Creates a new [`FnCommandRunner`] with an explicit `available` flag.
+    ///
+    /// # Arguments
+    ///
+    /// * `available` - Value returned by `is_available`.
+    /// * `handler` - Closure invoked for each command execution.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new [`FnCommandRunner`].
+    pub fn with_availability(available: bool, handler: F) -> Self {
+        Self { handler, available }
+    }
+}
+
+impl<F> CommandRunner for FnCommandRunner<F>
+where
+    F: Fn(&str, &[&str]) -> Result<String, MigratoryError> + Send + Sync,
+{
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, MigratoryError> {
+        (self.handler)(program, args)
+    }
+
+    fn is_available(&self, _program: &str, _check_arg: &str) -> bool {
+        self.available
+    }
+}
+
+/// Strongly-typed virtual machine runtime state returned by [`Provider::status`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum MachineState {
+    /// Machine has not been created yet (`"not created"`).
+    #[default]
+    NotCreated,
+    /// Machine is currently running (`"running"`).
+    Running,
+    /// Machine is powered off (`"poweroff"`).
+    PowerOff,
+    /// Machine state is saved to disk (`"saved"`).
+    Saved,
+    /// Machine is suspended or paused in memory (`"suspended"`).
+    Suspended,
+    /// Machine exited abnormally (`"aborted"`).
+    Aborted,
+    /// Machine is stopped (`"stopped"`).
+    Stopped,
+    /// Unrecognized or provider-specific raw state string.
+    Unknown(String),
+}
+
+impl MachineState {
+    /// Parses a raw status string into a [`MachineState`].
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Raw status string reported by a hypervisor CLI.
+    ///
+    /// # Returns
+    ///
+    /// Returns the corresponding [`MachineState`] variant.
+    pub fn from_raw(s: &str) -> Self {
+        let trimmed = s.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "not created" | "not_created" => Self::NotCreated,
+            "running" | "started" => Self::Running,
+            "poweroff" | "powered off" | "shut off" => Self::PowerOff,
+            "saved" => Self::Saved,
+            "suspended" => Self::Suspended,
+            "aborted" => Self::Aborted,
+            "stopped" | "off" => Self::Stopped,
+            "" | "unknown" => Self::Unknown("unknown".to_string()),
+            _ => Self::Unknown(trimmed.to_string()),
+        }
+    }
+
+    /// Returns the human-readable state string.
+    ///
+    /// # Returns
+    ///
+    /// String slice representing the state (e.g., `"running"`, `"not created"`).
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::NotCreated => "not created",
+            Self::Running => "running",
+            Self::PowerOff => "poweroff",
+            Self::Saved => "saved",
+            Self::Suspended => "suspended",
+            Self::Aborted => "aborted",
+            Self::Stopped => "stopped",
+            Self::Unknown(s) => s.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for MachineState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl PartialEq<&str> for MachineState {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for MachineState {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
 
 /// Core provider interface.
 ///
@@ -43,7 +249,9 @@ pub trait Provider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if bringing up the VM fails.
-    fn up(&self, config: &VmConfig) -> Result<(), MigratoryError>;
+    fn up(&self, _config: &VmConfig) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Halts the machine gracefully.
     ///
@@ -54,7 +262,9 @@ pub trait Provider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if halting the VM fails.
-    fn halt(&self) -> Result<(), MigratoryError>;
+    fn halt(&self) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Imports a machine from a base box.
     ///
@@ -70,7 +280,9 @@ pub trait Provider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if importing fails.
-    fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError>;
+    fn import(&self, _box_dir: &std::path::Path, _vm_name: &str) -> Result<String, MigratoryError> {
+        Ok(String::new())
+    }
 
     /// Clones an existing machine (Linked Clone).
     ///
@@ -86,8 +298,13 @@ pub trait Provider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if cloning fails.
-    fn clone_machine(&self, base_machine_id: &str, vm_name: &str)
-    -> Result<String, MigratoryError>;
+    fn clone_machine(
+        &self,
+        _base_machine_id: &str,
+        _vm_name: &str,
+    ) -> Result<String, MigratoryError> {
+        Ok(String::new())
+    }
 
     /// Destroys the machine, removing all associated resources.
     ///
@@ -98,18 +315,22 @@ pub trait Provider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if destroying the VM fails.
-    fn destroy(&self) -> Result<(), MigratoryError>;
+    fn destroy(&self) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
-    /// Returns the current state/status of the machine.
+    /// Retrieves the current state of the machine.
     ///
     /// # Returns
     ///
-    /// A string describing the state (e.g., "running", "poweroff", "not created").
+    /// Returns `Ok(MachineState)` representing the state (e.g., [`MachineState::Running`], [`MachineState::PowerOff`], [`MachineState::NotCreated`]).
     ///
     /// # Errors
     ///
     /// Returns a `MigratoryError` if querying the state fails.
-    fn status(&self) -> Result<String, MigratoryError>;
+    fn status(&self) -> Result<MachineState, MigratoryError> {
+        Ok(MachineState::NotCreated)
+    }
 
     /// Suspends the machine.
     ///
@@ -120,7 +341,9 @@ pub trait Provider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if suspending the VM fails.
-    fn suspend(&self) -> Result<(), MigratoryError>;
+    fn suspend(&self) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Resumes the suspended machine.
     ///
@@ -131,7 +354,9 @@ pub trait Provider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if resuming the VM fails.
-    fn resume(&self) -> Result<(), MigratoryError>;
+    fn resume(&self) -> Result<(), MigratoryError> {
+        Ok(())
+    }
 
     /// Mounts synced folders configured for the machine.
     ///
@@ -258,11 +483,11 @@ pub trait Provider {
     }
 }
 
-/// Returns an instantiated provider based on its name.
+/// Returns an instantiated provider based on its name or [`crate::config::ProviderKind`].
 ///
 /// # Arguments
 ///
-/// * `name` - The canonical name of the provider.
+/// * `name` - The name or [`crate::config::ProviderKind`] of the provider.
 /// * `machine_id` - The stored ID of the machine, if any.
 ///
 /// # Returns
@@ -273,474 +498,52 @@ pub trait Provider {
 ///
 /// Returns a `MigratoryError` if the provider name is unknown.
 pub fn get_provider(
-    name: &str,
+    name: impl AsRef<str>,
     machine_id: Option<String>,
 ) -> Result<Box<dyn Provider>, MigratoryError> {
-    match name {
-        "virtualbox" => Ok(Box::new(virtualbox::VirtualBoxProvider::new(machine_id))),
-        "qemu" => Ok(Box::new(qemu::QemuProvider::new(machine_id))),
-        "hyperv" => Ok(Box::new(hyperv::HypervProvider::new(machine_id))),
-        "vmware" | "vmware_desktop" | "vmware_fusion" | "vmware_workstation" => {
+    let raw_name = name.as_ref();
+    if let Ok(reg) = crate::plugin::global_registry().read()
+        && let Some(prov) = reg.get_provider(raw_name, machine_id.clone())
+    {
+        return Ok(prov);
+    }
+    match crate::config::ProviderKind::parse_raw(raw_name) {
+        crate::config::ProviderKind::VirtualBox => {
+            Ok(Box::new(virtualbox::VirtualBoxProvider::new(machine_id)))
+        }
+        crate::config::ProviderKind::Qemu => Ok(Box::new(qemu::QemuProvider::new(machine_id))),
+        crate::config::ProviderKind::Hyperv => {
+            Ok(Box::new(hyperv::HypervProvider::new(machine_id)))
+        }
+        crate::config::ProviderKind::Vmware => {
             Ok(Box::new(vmware::VmwareProvider::new(machine_id)))
         }
-        "docker" => Ok(Box::new(docker::DockerProvider::new(machine_id))),
-        "utm" => Ok(Box::new(utm::UtmProvider::new(machine_id))),
-        "libvirt" => Ok(Box::new(libvirt::LibvirtProvider::new(machine_id))),
-        "parallels" => Ok(Box::new(parallels::ParallelsProvider::new(machine_id))),
-        _ => Err(MigratoryError::Generic(format!(
+        crate::config::ProviderKind::Docker => {
+            Ok(Box::new(docker::DockerProvider::new(machine_id)))
+        }
+        crate::config::ProviderKind::Utm => Ok(Box::new(utm::UtmProvider::new(machine_id))),
+        crate::config::ProviderKind::Libvirt => {
+            Ok(Box::new(libvirt::LibvirtProvider::new(machine_id)))
+        }
+        crate::config::ProviderKind::Parallels => {
+            Ok(Box::new(parallels::ParallelsProvider::new(machine_id)))
+        }
+        crate::config::ProviderKind::Custom(unknown) => Err(MigratoryError::Generic(format!(
             "Unknown provider: {}",
-            name
+            unknown
         ))),
-    }
-}
-
-/// Manages `.vagrant/` state tracking.
-///
-/// Responsible for maintaining state files such as the hypervisor-specific
-/// machine IDs used to identify the running instances.
-pub struct StateManager {
-    /// Represents the `dir` field.
-    dir: PathBuf,
-}
-
-impl StateManager {
-    /// Creates a new state manager pointing to a `.vagrant` dir (or equivalent).
-    ///
-    /// # Arguments
-    ///
-    /// * `dir` - The path to the state directory.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new instance of `StateManager`.
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
-    }
-
-    /// Executes the `create_parent_dir` function.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The `path` argument.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<(), MigratoryError>`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails.
-    fn create_parent_dir(path: &Path) -> Result<(), MigratoryError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| MigratoryError::Generic(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    /// Creates a lock file for the state directory to prevent concurrent access.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `RwLock<std::fs::File>` on success.
-    pub fn create_lock_file(&self) -> Result<fd_lock::RwLock<std::fs::File>, MigratoryError> {
-        let lock_path = self.dir.join("action.lock");
-        Self::create_parent_dir(&lock_path)?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&lock_path)
-            .map_err(|e| MigratoryError::Generic(e.to_string()))?;
-
-        Ok(fd_lock::RwLock::new(file))
-    }
-
-    /// Reads the stored ID for a specific machine.
-    ///
-    /// # Arguments
-    ///
-    /// * `machine_name` - The logical name of the machine.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(Some(String))` containing the ID if it exists, or `Ok(None)` if it doesn't.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `MigratoryError` if an unexpected I/O error occurs reading the file.
-    pub fn read_id(
-        &self,
-        machine_name: &str,
-        provider_name: &str,
-    ) -> Result<Option<String>, MigratoryError> {
-        let path = self
-            .dir
-            .join("machines")
-            .join(machine_name)
-            .join(provider_name)
-            .join("id");
-        if path.exists() {
-            let id =
-                fs::read_to_string(path).map_err(|e| MigratoryError::Generic(e.to_string()))?;
-            Ok(Some(id.trim().to_string()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Writes the ID for a specific machine.
-    ///
-    /// # Arguments
-    ///
-    /// * `machine_name` - The logical name of the machine.
-    /// * `id` - The machine ID string to write.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `MigratoryError` if an I/O error occurs creating the directories or writing the file.
-    pub fn write_id(
-        &self,
-        machine_name: &str,
-        provider_name: &str,
-        id: &str,
-    ) -> Result<(), MigratoryError> {
-        let path = self
-            .dir
-            .join("machines")
-            .join(machine_name)
-            .join(provider_name)
-            .join("id");
-        Self::create_parent_dir(&path)?;
-        fs::write(path, id).map_err(|e| MigratoryError::Generic(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Clears the state for a specific machine by removing its directory.
-    ///
-    /// # Arguments
-    ///
-    /// * `machine_name` - The logical name of the machine.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `MigratoryError` if an I/O error occurs while removing the directory.
-    pub fn clear_machine_state(
-        &self,
-        machine_name: &str,
-        provider_name: &str,
-    ) -> Result<(), MigratoryError> {
-        let path = self
-            .dir
-            .join("machines")
-            .join(machine_name)
-            .join(provider_name);
-        if path.exists() {
-            fs::remove_dir_all(&path).map_err(|e| MigratoryError::Generic(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    /// Checks if a machine has been provisioned.
-    pub fn has_provisioned(
-        &self,
-        machine_name: &str,
-        provider_name: &str,
-    ) -> Result<bool, MigratoryError> {
-        let path = self
-            .dir
-            .join("machines")
-            .join(machine_name)
-            .join(provider_name)
-            .join("action_provision");
-        Ok(path.exists())
-    }
-
-    /// Marks a machine as provisioned.
-    pub fn mark_provisioned(
-        &self,
-        machine_name: &str,
-        provider_name: &str,
-    ) -> Result<(), MigratoryError> {
-        let path = self
-            .dir
-            .join("machines")
-            .join(machine_name)
-            .join(provider_name)
-            .join("action_provision");
-        Self::create_parent_dir(&path)?;
-        fs::write(path, "").map_err(|e| MigratoryError::Generic(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Clears the provisioned state.
-    pub fn clear_provisioned(
-        &self,
-        machine_name: &str,
-        provider_name: &str,
-    ) -> Result<(), MigratoryError> {
-        let path = self
-            .dir
-            .join("machines")
-            .join(machine_name)
-            .join(provider_name)
-            .join("action_provision");
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| MigratoryError::Generic(e.to_string()))?;
-        }
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use tempfile::tempdir;
 
-    #[test]
-    fn test_state_manager_provisioned() {
-        let dir = tempdir().expect("operation should succeed");
-        let manager = StateManager::new(dir.path().to_path_buf());
-
-        // Initial state
-        assert_eq!(
-            manager
-                .has_provisioned("test", "virtualbox")
-                .expect("operation should succeed"),
-            false
-        );
-
-        // Mark provisioned
-        manager
-            .mark_provisioned("test", "virtualbox")
-            .expect("operation should succeed");
-        assert_eq!(
-            manager
-                .has_provisioned("test", "virtualbox")
-                .expect("operation should succeed"),
-            true
-        );
-
-        // Clear provisioned
-        manager
-            .clear_provisioned("test", "virtualbox")
-            .expect("operation should succeed");
-        assert_eq!(
-            manager
-                .has_provisioned("test", "virtualbox")
-                .expect("operation should succeed"),
-            false
-        );
-
-        // Clear when doesn't exist
-        assert!(manager.clear_provisioned("test", "virtualbox").is_ok());
-
-        // Mark and then clear to hit the exists branch
-        manager
-            .mark_provisioned("test2", "virtualbox")
-            .expect("operation should succeed");
-        assert_eq!(
-            manager
-                .has_provisioned("test2", "virtualbox")
-                .expect("operation should succeed"),
-            true
-        );
-        manager
-            .clear_provisioned("test2", "virtualbox")
-            .expect("operation should succeed");
-        assert_eq!(
-            manager
-                .has_provisioned("test2", "virtualbox")
-                .expect("operation should succeed"),
-            false
-        );
-    }
-
-    #[test]
-    fn test_state_manager() {
-        let dir = tempdir().expect("operation should succeed");
-        let state = StateManager::new(dir.path().to_path_buf());
-
-        let id = state.read_id("default", "virtualbox");
-        assert!(id.is_ok());
-        assert!(id.expect("read_id should return Ok").is_none());
-
-        let write_result = state.write_id("default", "virtualbox", "12345");
-        assert!(write_result.is_ok());
-
-        let new_id = state
-            .read_id("default", "virtualbox")
-            .expect("read_id should return Ok");
-        assert_eq!(new_id.expect("id should be Some"), "12345");
-    }
-
-    #[test]
-    fn test_state_manager_write_error() {
-        let dir = tempdir().expect("operation should succeed");
-        let state = StateManager::new(dir.path().to_path_buf());
-
-        // Simulating a write error by attempting to write into a file treated as a directory.
-        let machines_dir = dir.path().join("machines");
-        std::fs::create_dir(&machines_dir).expect("operation should succeed");
-
-        let target_machine = machines_dir.join("error_machine");
-        std::fs::write(&target_machine, "not a dir").expect("operation should succeed");
-
-        let write_result = state.write_id("error_machine", "virtualbox", "12345");
-        assert!(write_result.is_err());
-    }
-
-    #[test]
-    fn test_state_manager_read_error() {
-        let dir = tempdir().expect("operation should succeed");
-        let state = StateManager::new(dir.path().to_path_buf());
-
-        let path = dir
-            .path()
-            .join("machines")
-            .join("default")
-            .join("virtualbox");
-        std::fs::create_dir_all(&path).expect("operation should succeed");
-        // Create `id` as a directory instead of a file, causing read_to_string to fail
-        let id_path = path.join("id");
-        std::fs::create_dir(&id_path).expect("operation should succeed");
-
-        let read_result = state.read_id("default", "virtualbox");
-        assert!(read_result.is_err());
-    }
-
-    #[test]
-    fn test_state_manager_lock_error() {
-        let dir = tempdir().expect("operation should succeed");
-        let state = StateManager::new(dir.path().to_path_buf());
-
-        // Success path
-        assert!(state.create_lock_file().is_ok());
-
-        // Failure path when lock file is a directory
-        let lock_path = dir.path().join("sub/action.lock");
-        std::fs::create_dir_all(&lock_path).expect("operation should succeed");
-        let state_err = StateManager::new(dir.path().join("sub"));
-        let lock_result = state_err.create_lock_file();
-        assert!(lock_result.is_err());
-    }
-
-    #[test]
-    fn test_state_manager_clear_machine_state() {
-        let dir = tempdir().expect("operation should succeed");
-        let state = StateManager::new(dir.path().to_path_buf());
-
-        // Test false branch
-        assert!(
-            state
-                .clear_machine_state("non_existent", "virtualbox")
-                .is_ok()
-        );
-
-        let write_result = state.write_id("default", "virtualbox", "12345");
-        assert!(write_result.is_ok());
-
-        assert!(
-            state
-                .read_id("default", "virtualbox")
-                .expect("operation should succeed")
-                .is_some()
-        );
-
-        let clear_result = state.clear_machine_state("default", "virtualbox");
-        assert!(clear_result.is_ok());
-
-        assert!(
-            state
-                .read_id("default", "virtualbox")
-                .expect("operation should succeed")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_state_manager_io_failures() {
-        let dir = tempdir().expect("operation should succeed");
-        let state = StateManager::new(dir.path().to_path_buf());
-
-        // 1. write_id failure when id is a directory
-        let id_dir = dir.path().join("machines/m1/p1/id");
-        std::fs::create_dir_all(&id_dir).expect("operation should succeed");
-        assert!(state.write_id("m1", "p1", "123").is_err());
-
-        // 2. mark_provisioned failure when action_provision is a directory
-        let prov_dir = dir.path().join("machines/m2/p2/action_provision");
-        std::fs::create_dir_all(&prov_dir).expect("operation should succeed");
-        assert!(state.mark_provisioned("m2", "p2").is_err());
-
-        // 3. clear_provisioned failure when action_provision is a non-empty directory
-        let sub_file = prov_dir.join("subfile");
-        std::fs::write(&sub_file, "sub").expect("operation should succeed");
-        assert!(state.clear_provisioned("m2", "p2").is_err());
-
-        // 4. clear_machine_state failure when path is a regular file
-        let file_path = dir.path().join("machines/m3/p3");
-        std::fs::create_dir_all(dir.path().join("machines/m3")).expect("operation should succeed");
-        std::fs::write(&file_path, "regular_file").expect("operation should succeed");
-        #[cfg(unix)]
-        {
-            assert!(state.clear_machine_state("m3", "p3").is_err());
-        }
-
-        // 5. create_parent_dir failure in create_lock_file
-        let file_as_dir = dir.path().join("file_lock_parent");
-        std::fs::write(&file_as_dir, "blocking").expect("operation should succeed");
-        let state_blocked_lock = StateManager::new(file_as_dir.join("sub"));
-        assert!(state_blocked_lock.create_lock_file().is_err());
-
-        // 6. create_parent_dir failure in mark_provisioned
-        let state_blocked_prov = StateManager::new(file_as_dir);
-        assert!(state_blocked_prov.mark_provisioned("m", "p").is_err());
-    }
-
+    /// Minimal provider implementation used to test default [`Provider`] trait methods.
     struct DefaultProvider;
     impl Provider for DefaultProvider {
         fn name(&self) -> &str {
             "default"
-        }
-        fn up(&self, _: &crate::config::VmConfig) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn halt(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn import(&self, _: &std::path::Path, _: &str) -> Result<String, MigratoryError> {
-            Ok("id".to_string())
-        }
-        fn clone_machine(&self, _: &str, _: &str) -> Result<String, MigratoryError> {
-            Ok("id".to_string())
-        }
-        fn destroy(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn status(&self) -> Result<String, MigratoryError> {
-            Ok("running".to_string())
-        }
-        fn suspend(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn resume(&self) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -748,8 +551,18 @@ mod tests {
     fn test_provider_default_methods() {
         let p = DefaultProvider;
 
-        assert!(p.resume().is_ok());
         let cfg = crate::config::VmConfig::default();
+        assert!(p.up(&cfg).is_ok());
+        assert!(p.halt().is_ok());
+        assert_eq!(
+            p.import(std::path::Path::new("."), "vm").ok(),
+            Some(String::new())
+        );
+        assert_eq!(p.clone_machine("base", "vm").ok(), Some(String::new()));
+        assert!(p.destroy().is_ok());
+        assert_eq!(p.status().ok(), Some(MachineState::NotCreated));
+        assert!(p.suspend().is_ok());
+        assert!(p.resume().is_ok());
         assert!(p.setup_synced_folders(&cfg).is_ok());
 
         assert!(p.snapshot_save("test").is_err());
@@ -757,6 +570,8 @@ mod tests {
         assert!(p.snapshot_list().is_err());
         assert!(p.snapshot_delete("test").is_err());
         assert!(p.export(std::path::Path::new("/dummy")).is_err());
+        let running_str = "running".to_string();
+        assert!(MachineState::Running == running_str);
     }
 
     #[test]

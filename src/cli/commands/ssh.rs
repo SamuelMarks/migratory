@@ -9,6 +9,11 @@ use crate::error::MigratoryError;
 use std::path::Path;
 use std::process::Command;
 
+/// Runs an SSH command process and returns whether it exited with success.
+fn run_ssh_command(mut ssh_cmd: Command) -> Result<bool, MigratoryError> {
+    Ok(cfg!(test) || ssh_cmd.status()?.success())
+}
+
 /// Executes the `ssh` command.
 ///
 /// # Arguments
@@ -24,13 +29,35 @@ use std::process::Command;
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or if SSH fails.
 pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    execute_with_runner(cwd, args, false, run_ssh_command)
+}
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = config::evaluate_vagrantfile(path_str).unwrap_or_default();
+/// Executes the `ssh` command using an injectable SSH command runner and state-check flag.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `ssh` command.
+/// * `enforce_state_check` - Whether `CheckMachineStateAction` should be enforced in tests.
+/// * `runner` - Closure executing the constructed `Command` and returning whether it succeeded.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if the machine is not found, not running, or SSH execution fails.
+pub fn execute_with_runner<F>(
+    cwd: &Path,
+    args: &SshArgs,
+    enforce_state_check: bool,
+    mut runner: F,
+) -> Result<(), MigratoryError>
+where
+    F: FnMut(Command) -> Result<bool, MigratoryError>,
+{
+    let env_config = config::load_environment_config(cwd)?;
 
     let machine_name = if let Some(target) = &args.name {
         if !env_config.machines.contains_key(target) {
@@ -46,7 +73,7 @@ pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
             .keys()
             .next()
             .cloned()
-            .unwrap_or_else(|| "default".to_string())
+            .unwrap_or(String::from("default"))
     };
 
     let machine_config = env_config
@@ -55,21 +82,23 @@ pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
         .cloned()
         .unwrap_or_default();
 
-    let target_provider_name = machine_config
-        .vm
-        .providers
-        .first()
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| "virtualbox".to_string());
+    let target_provider_name = match machine_config.vm.providers.first() {
+        Some(p) => p.name.to_string(),
+        None => "virtualbox".to_string(),
+    };
+
+    let state_mgr =
+        crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
+    let machine_state = state_mgr.machine_state(&machine_name, &target_provider_name);
 
     let mut env = crate::action::Environment::new();
     let check_action = crate::action::CheckMachineStateAction {
         expected_states: vec!["running".to_string()],
         machine_name: machine_name.clone(),
-        provider_name: target_provider_name,
+        provider_name: target_provider_name.clone(),
         cwd: cwd.to_path_buf(),
     };
-    if !cfg!(test) {
+    if !cfg!(test) || enforce_state_check {
         check_action.call(&mut env)?;
     }
 
@@ -83,17 +112,26 @@ pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
         println!("==> {}: Plain mode enabled.", machine_name);
     }
 
-    let host = machine_config.ssh.host.clone();
-    let port = machine_config.ssh.port;
+    let host = machine_state
+        .get_guest_ip()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| machine_config.ssh.host.clone());
+    let target_guest_port = machine_config.ssh.guest_port.unwrap_or(22);
+    let port = machine_state
+        .get_forwarded_host_port(target_guest_port)
+        .ok()
+        .flatten()
+        .unwrap_or(machine_config.ssh.port);
     let user = machine_config.ssh.username.clone();
 
     let key_path = if let Some(p) = machine_config.ssh.private_key_path {
-        Path::new(&p).to_path_buf()
+        p
     } else {
         crate::config::get_dotfile_path(cwd)
             .join("machines")
             .join(&machine_name)
-            .join("virtualbox")
+            .join(&target_provider_name)
             .join("private_key")
     };
 
@@ -135,23 +173,10 @@ pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
         println!("==> {}: Starting SSH session...", machine_name);
     }
 
-    if cfg!(test) {
-        crate::config::execute_triggers("after", "ssh", &machine_config.triggers)?;
-        return Ok(());
-    }
-
-    let mut child = ssh_cmd
-        .spawn()
-        .map_err(|e| MigratoryError::Generic(format!("Failed to spawn ssh: {}", e)))?;
-    let status = child
-        .wait()
-        .map_err(|e| MigratoryError::Generic(format!("Failed to wait for ssh: {}", e)))?;
-
-    if !status.success() {
-        return Err(MigratoryError::Generic(format!(
-            "SSH exited with status: {}",
-            status
-        )));
+    if !runner(ssh_cmd)? {
+        return Err(MigratoryError::Generic(
+            "SSH exited with non-zero status".to_string(),
+        ));
     }
 
     crate::config::execute_triggers("after", "ssh", &machine_config.triggers)?;
@@ -160,19 +185,12 @@ pub fn execute(cwd: &Path, args: &SshArgs) -> Result<(), MigratoryError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_ssh_missing() -> std::io::Result<()> {
+    fn test_execute_ssh_missing() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
         let args = SshArgs {
@@ -189,21 +207,14 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_ssh_success_session() -> std::io::Result<()> {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap();
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-        }
-
+    fn test_execute_ssh_success_session() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
         fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let id_dir = cwd.join(".vagrant/machines/default/virtualbox");
-        std::fs::create_dir_all(&id_dir).unwrap();
-        std::fs::write(id_dir.join("id"), "test-id").unwrap();
+        std::fs::create_dir_all(&id_dir)?;
+        std::fs::write(id_dir.join("id"), "test-id")?;
 
         let args = SshArgs {
             name: None,
@@ -240,21 +251,14 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_ssh_success_command() -> std::io::Result<()> {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap();
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-        }
-
+    fn test_execute_ssh_success_command() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
         fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let id_dir = cwd.join(".vagrant/machines/default/virtualbox");
-        std::fs::create_dir_all(&id_dir).unwrap();
-        std::fs::write(id_dir.join("id"), "test-id").unwrap();
+        std::fs::create_dir_all(&id_dir)?;
+        std::fs::write(id_dir.join("id"), "test-id")?;
 
         let args = SshArgs {
             name: None,
@@ -281,6 +285,14 @@ mod tests {
             extra_args: None,
             tty: true,
         };
+        assert!(execute(cwd, &args_tty).is_ok());
+        assert!(execute_with_runner(cwd, &args_tty, false, |_| Ok(false)).is_err());
+
+        // Test with explicit private_key_path in Vagrantfile
+        fs::write(
+            cwd.join("Vagrantfile"),
+            "Vagrant.configure(\"2\") do |config|\n  config.vm.provider \"virtualbox\"\n  config.ssh.private_key_path = \"/tmp/custom_key\"\nend\n",
+        )?;
         assert!(execute(cwd, &args_tty).is_ok());
         Ok(())
     }

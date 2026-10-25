@@ -24,7 +24,8 @@ use std::path::Path;
 ///
 /// Returns a `MigratoryError` if writing to the output stream fails, or if the capability is unsupported.
 pub fn execute(args: &CapArgs, mut writer: impl Write) -> Result<(), MigratoryError> {
-    execute_inner(args, &mut writer)
+    let cwd = std::env::current_dir().unwrap_or(std::path::PathBuf::from("."));
+    execute_with_options(args, &cwd, false, &mut writer)
 }
 
 /// Helper to execute host capabilities.
@@ -189,17 +190,55 @@ pub fn dispatch_guest_cap(
     Ok(())
 }
 
-/// Inner execution logic for capability commands operating on a dynamic writer.
+/// Executes the `cap` command with explicit working directory and dry-run control.
 ///
 /// # Arguments
 ///
 /// * `args` - The capability arguments.
+/// * `cwd` - Working directory containing the `Vagrantfile`.
+/// * `dry_run` - If `true`, skips live guest capability invocation after printing header/arguments.
 /// * `writer` - Mutable reference to trait object writer.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
 /// Returns a `MigratoryError` if writing fails or capability is unsupported.
-fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), MigratoryError> {
+pub fn execute_with_options(
+    args: &CapArgs,
+    cwd: &Path,
+    dry_run: bool,
+    writer: &mut dyn Write,
+) -> Result<(), MigratoryError> {
+    execute_with_options_and_state(args, cwd, dry_run, false, writer)
+}
+
+/// Executes the `cap` command with explicit working directory, dry-run control, and state check enforcement.
+///
+/// # Arguments
+///
+/// * `args` - The capability arguments.
+/// * `cwd` - Working directory containing the `Vagrantfile`.
+/// * `dry_run` - If `true`, skips live guest capability invocation after printing header/arguments.
+/// * `enforce_state_check` - Whether to force running `CheckMachineStateAction` in tests.
+/// * `writer` - Mutable reference to trait object writer.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if writing fails or capability is unsupported.
+pub fn execute_with_options_and_state(
+    args: &CapArgs,
+    cwd: &Path,
+    dry_run: bool,
+    enforce_state_check: bool,
+    writer: &mut dyn Write,
+) -> Result<(), MigratoryError> {
     let (machine_name, cap_name) = match (&args.name, &args.capability) {
         (Some(n), Some(c)) => (Some(n.clone()), c.clone()),
         (Some(n), None) => (None, n.clone()),
@@ -257,7 +296,7 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
         writeln!(writer, "Executing capability '{}'...", cap_name)
             .map_err(|e| MigratoryError::Generic(e.to_string()))?;
 
-        if let Ok(_env) = std::env::var("MIGRATORY_TEST_MOCK") {
+        if dry_run {
             if !args.extra_args.is_empty() {
                 writeln!(writer, "With arguments: {:?}", args.extra_args)
                     .map_err(|e| MigratoryError::Generic(e.to_string()))?;
@@ -265,23 +304,11 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
             return Ok(());
         }
 
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let path = crate::config::get_vagrantfile_path(&cwd);
-        if !path.exists() {
-            return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-        }
+        let env_config = crate::config::load_environment_config(cwd)?;
 
-        let path_str = path.to_str().unwrap_or("Vagrantfile");
-        let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
-
-        let target_machine_name = machine_name.unwrap_or_else(|| {
-            env_config
-                .machines
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| "default".to_string())
-        });
+        let target_machine_name = machine_name
+            .or_else(|| env_config.machines.keys().next().cloned())
+            .unwrap_or(String::from("default"));
 
         let machine_config = env_config
             .machines
@@ -295,7 +322,7 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
             .vm
             .providers
             .first()
-            .map(|p| p.name.clone())
+            .map(|p| p.name.to_string())
             .unwrap_or_else(|| "virtualbox".to_string());
 
         let mut env = crate::action::Environment::new();
@@ -303,15 +330,15 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
             expected_states: vec!["running".to_string()],
             machine_name: target_machine_name,
             provider_name: provider_name.clone(),
-            cwd,
+            cwd: cwd.to_path_buf(),
         };
-        if !cfg!(test) || std::env::var("MIGRATORY_TEST_CHECK_STATE").is_ok() {
+        if !cfg!(test) || enforce_state_check {
             use crate::action::Action;
             check_action.call(&mut env)?;
         }
 
         let comm: Box<dyn Communicator> =
-            if machine_config.vm.communicator.as_deref() == Some("winrm") {
+            if machine_config.vm.communicator == Some(crate::config::CommunicatorKind::Winrm) {
                 Box::new(crate::communicator::winrm::WinrmCommunicator::new(
                     machine_config.winrm.clone(),
                 ))
@@ -328,9 +355,9 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
                 _ => Box::new(crate::guest::linux::LinuxGuest),
             }
         } else if let Some(vm_guest) = &machine_config.vm.guest {
-            match vm_guest.to_lowercase().as_str() {
-                "windows" => Box::new(crate::guest::windows::WindowsGuest),
-                "bsd" | "freebsd" => Box::new(crate::guest::bsd::BsdGuest),
+            match vm_guest {
+                crate::config::GuestKind::Windows => Box::new(crate::guest::windows::WindowsGuest),
+                crate::config::GuestKind::Bsd => Box::new(crate::guest::bsd::BsdGuest),
                 _ => Box::new(crate::guest::linux::LinuxGuest),
             }
         } else {
@@ -351,13 +378,6 @@ fn execute_inner(args: &CapArgs, writer: &mut dyn Write) -> Result<(), Migratory
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -385,18 +405,6 @@ mod tests {
                 return Ok("/usr/bin/rsync".to_string());
             }
             Ok(String::new())
-        }
-        fn upload(&self, _local: &Path, _remote: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote: &str, _local: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: std::time::Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -440,20 +448,22 @@ mod tests {
         for (cap, extra) in caps {
             let mut writer = Vec::new();
             let res = dispatch_guest_cap(&guest, &comm, cap, &extra, "virtualbox", &mut writer);
-            assert!(res.is_ok(), "Capability {} failed: {:?}", cap, res);
+            assert!(res.is_ok(), "Capability {cap} failed: {res:?}");
         }
 
         let mut writer = Vec::new();
         let unknown =
             dispatch_guest_cap(&guest, &comm, "unknown_xyz", &[], "virtualbox", &mut writer);
         assert!(unknown.is_err());
+
+        let fail_comm = TestComm { fail: true };
+        assert!(
+            dispatch_guest_cap(&guest, &fail_comm, "halt", &[], "virtualbox", &mut writer).is_err()
+        );
     }
 
     struct FailGuest;
     impl crate::guest::Guest for FailGuest {
-        fn detect(&self, _comm: &dyn Communicator) -> Result<bool, MigratoryError> {
-            Ok(false)
-        }
         fn change_hostname(
             &self,
             _comm: &dyn Communicator,
@@ -551,7 +561,7 @@ mod tests {
 
         for (cap, extra) in caps {
             let res = dispatch_guest_cap(&guest, &comm, cap, &extra, "virtualbox", &mut writer);
-            assert!(res.is_err(), "Expected capability {} to fail", cap);
+            assert!(res.is_err(), "Expected capability {cap} to fail");
         }
     }
 
@@ -587,24 +597,15 @@ mod tests {
             let mut fail_writer = FailingWriter;
             let res =
                 dispatch_guest_cap(&guest, &comm, cap, &extra, "virtualbox", &mut fail_writer);
-            assert!(
-                res.is_err(),
-                "Expected write failure for capability {}",
-                cap
-            );
+            assert!(res.is_err(), "Expected write failure for capability {cap}");
         }
     }
 
     #[test]
-    fn test_execute_cap_with_vagrantfile_dispatch() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
-        let orig = std::env::current_dir().expect("current dir");
-        std::env::set_current_dir(dir.path()).expect("set_current_dir");
+    fn test_execute_cap_with_vagrantfile_dispatch() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        let cwd = dir.path();
 
-        // First test missing Vagrantfile
         let args_missing_vf = CapArgs {
             name: Some("web".to_string()),
             capability: Some("halt".to_string()),
@@ -614,12 +615,11 @@ mod tests {
         };
         let mut out = Vec::new();
         assert!(
-            matches!(execute(&args_missing_vf, &mut out), Err(MigratoryError::NotFound(ref s)) if s.contains("Vagrantfile"))
+            matches!(execute_with_options(&args_missing_vf, cwd, false, &mut out), Err(MigratoryError::NotFound(ref s)) if s.contains("Vagrantfile"))
         );
 
-        // Test Vagrantfile syntax error -> evaluate fails -> machines is empty -> unwrap_or_else hits line 284
         let broken_vf = "invalid ruby code {{{";
-        fs::write(dir.path().join("Vagrantfile"), broken_vf).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), broken_vf)?;
         let args_broken_vf = CapArgs {
             name: None,
             capability: Some("halt".to_string()),
@@ -627,7 +627,7 @@ mod tests {
             check: false,
             target_guest: None,
         };
-        let _ = execute(&args_broken_vf, &mut out);
+        let _ = execute_with_options(&args_broken_vf, cwd, false, &mut out);
 
         let vagrantfile = r#"
 Vagrant.configure("2") do |config|
@@ -647,9 +647,8 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(dir.path().join("Vagrantfile"), vagrantfile).expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile)?;
 
-        // name: None branch takes first machine from Vagrantfile
         let args_no_name = CapArgs {
             name: None,
             capability: Some("halt".to_string()),
@@ -657,9 +656,8 @@ end
             check: false,
             target_guest: None,
         };
-        let _ = execute(&args_no_name, &mut out);
+        let _ = execute_with_options(&args_no_name, cwd, false, &mut out);
 
-        // Missing machine
         let args_missing_machine = CapArgs {
             name: Some("nonexistent".to_string()),
             capability: Some("halt".to_string()),
@@ -668,10 +666,9 @@ end
             target_guest: None,
         };
         assert!(
-            matches!(execute(&args_missing_machine, &mut out), Err(MigratoryError::NotFound(ref s)) if s.contains("Machine 'nonexistent' not found"))
+            matches!(execute_with_options(&args_missing_machine, cwd, false, &mut out), Err(MigratoryError::NotFound(ref s)) if s.contains("Machine 'nonexistent' not found"))
         );
 
-        // target_guest windows branch
         let args_win_target = CapArgs {
             name: Some("web".to_string()),
             capability: Some("halt".to_string()),
@@ -679,9 +676,8 @@ end
             check: false,
             target_guest: Some("windows".to_string()),
         };
-        let _ = execute(&args_win_target, &mut out);
+        let _ = execute_with_options(&args_win_target, cwd, false, &mut out);
 
-        // target_guest bsd branch
         let args_bsd_target = CapArgs {
             name: Some("web".to_string()),
             capability: Some("halt".to_string()),
@@ -689,9 +685,8 @@ end
             check: false,
             target_guest: Some("bsd".to_string()),
         };
-        let _ = execute(&args_bsd_target, &mut out);
+        let _ = execute_with_options(&args_bsd_target, cwd, false, &mut out);
 
-        // target_guest linux branch
         let args_linux_target = CapArgs {
             name: Some("web".to_string()),
             capability: Some("halt".to_string()),
@@ -699,9 +694,8 @@ end
             check: false,
             target_guest: Some("linux".to_string()),
         };
-        let _ = execute(&args_linux_target, &mut out);
+        let _ = execute_with_options(&args_linux_target, cwd, false, &mut out);
 
-        // target_guest linux branch via vm_guest
         let args_linux_guest = CapArgs {
             name: Some("web".to_string()),
             capability: Some("halt".to_string()),
@@ -709,9 +703,8 @@ end
             check: false,
             target_guest: None,
         };
-        let _ = execute(&args_linux_guest, &mut out);
+        let _ = execute_with_options(&args_linux_guest, cwd, false, &mut out);
 
-        // winrm communicator and vm_guest windows branch
         let args_win_comm = CapArgs {
             name: Some("win".to_string()),
             capability: Some("halt".to_string()),
@@ -719,9 +712,8 @@ end
             check: false,
             target_guest: None,
         };
-        let _ = execute(&args_win_comm, &mut out);
+        let _ = execute_with_options(&args_win_comm, cwd, false, &mut out);
 
-        // vm_guest bsd branch
         let args_bsd_guest = CapArgs {
             name: Some("bsd".to_string()),
             capability: Some("halt".to_string()),
@@ -729,9 +721,8 @@ end
             check: false,
             target_guest: None,
         };
-        let _ = execute(&args_bsd_guest, &mut out);
+        let _ = execute_with_options(&args_bsd_guest, cwd, false, &mut out);
 
-        // detect guest fallback branch
         let args_detect = CapArgs {
             name: Some("detect".to_string()),
             capability: Some("halt".to_string()),
@@ -739,12 +730,8 @@ end
             check: false,
             target_guest: None,
         };
-        let _ = execute(&args_detect, &mut out);
+        let _ = execute_with_options(&args_detect, cwd, false, &mut out);
 
-        // With check state
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_CHECK_STATE", "1");
-        }
         let args_check_state = CapArgs {
             name: Some("web".to_string()),
             capability: Some("halt".to_string()),
@@ -752,12 +739,11 @@ end
             check: false,
             target_guest: None,
         };
-        let _ = execute(&args_check_state, &mut out);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_CHECK_STATE");
-        }
+        assert!(
+            execute_with_options_and_state(&args_check_state, cwd, false, true, &mut out).is_err()
+        );
 
-        std::env::set_current_dir(orig).expect("reset current dir");
+        Ok(())
     }
 
     #[test]
@@ -831,12 +817,6 @@ end
 
     #[test]
     fn test_execute_cap_host_nfs_and_smb() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
         let args_nfs = CapArgs {
             name: None,
             capability: Some("configure_nfs".to_string()),
@@ -856,20 +836,10 @@ end
         };
         out.clear();
         assert!(execute(&args_smb, &mut out).is_ok());
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
     }
 
     #[test]
     fn test_execute_cap() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
         let args = CapArgs {
             name: None,
             capability: Some("halt".to_string()),
@@ -878,23 +848,14 @@ end
             target_guest: None,
         };
         let mut out = Vec::new();
-        assert!(execute(&args, &mut out).is_ok());
+        assert!(execute_with_options(&args, Path::new("."), true, &mut out).is_ok());
 
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(output_str.trim(), "Executing capability 'halt'...");
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
     }
 
     #[test]
     fn test_execute_cap_host() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
         let args = CapArgs {
             name: None,
             capability: Some("check_admin".to_string()),
@@ -907,9 +868,6 @@ end
 
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("Admin check executed:"));
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
     }
 
     #[test]
@@ -945,12 +903,6 @@ end
 
     #[test]
     fn test_execute_cap_with_args() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
         let args = CapArgs {
             name: None,
             capability: Some("halt".to_string()),
@@ -959,21 +911,14 @@ end
             target_guest: None,
         };
         let mut out = Vec::new();
-        assert!(execute(&args, &mut out).is_ok());
+        assert!(execute_with_options(&args, Path::new("."), true, &mut out).is_ok());
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("Executing capability 'halt'..."));
         assert!(output_str.contains(r#"With arguments: ["arg1", "arg2"]"#));
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
     }
 
     #[test]
     fn test_execute_cap_write_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
         let args_none = CapArgs {
             name: None,
             capability: None,
@@ -1022,10 +967,7 @@ end
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 let s = String::from_utf8_lossy(buf);
                 if s.starts_with("With arguments") {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "write failed",
-                    ))
+                    Err(std::io::Error::other("write failed"))
                 } else {
                     Ok(buf.len())
                 }
@@ -1034,16 +976,10 @@ end
                 Ok(())
             }
         }
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
         let mut out4 = FailSecondWriter;
         assert!(out4.flush().is_ok());
-        let result4 = execute(&args_exec_args, &mut out4);
+        let result4 = execute_with_options(&args_exec_args, Path::new("."), true, &mut out4);
         assert!(result4.is_err());
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
 
         let args_host = CapArgs {
             name: None,
@@ -1077,33 +1013,35 @@ end
         let mut out7 = FailingWriter;
         let result7 = execute(&args_host3, &mut out7);
         assert!(result7.is_err());
+    }
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
+    /// Host implementation that fails all operations for capability error testing.
+    struct FailingCapHost;
+    impl crate::host::Host for FailingCapHost {
+        fn configure_nfs(
+            &self,
+            _folders: &[crate::config::SyncedFolderConfig],
+        ) -> Result<(), MigratoryError> {
+            Err(MigratoryError::Generic("nfs err".to_string()))
+        }
+        fn configure_smb(
+            &self,
+            _folders: &[crate::config::SyncedFolderConfig],
+        ) -> Result<(), MigratoryError> {
+            Err(MigratoryError::Generic("smb err".to_string()))
+        }
+        fn check_admin(&self) -> Result<bool, MigratoryError> {
+            Err(MigratoryError::Generic("admin err".to_string()))
         }
     }
 
     #[test]
     fn test_execute_cap_host_errors() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
-        // detect_host failure
-        unsafe {
-            std::env::set_var("MOCK_OS", "unsupported_os_123");
-        }
-        let args = CapArgs {
-            name: None,
-            capability: Some("check_admin".to_string()),
-            extra_args: vec![],
-            check: false,
-            target_guest: None,
-        };
+        let host = FailingCapHost;
         let mut out = Vec::new();
-        assert!(execute(&args, &mut out).is_err());
-        unsafe {
-            std::env::remove_var("MOCK_OS");
-        }
+        assert!(run_host_cap(&host, "check_admin", &mut out).is_err());
+        assert!(run_host_cap(&host, "configure_nfs", &mut out).is_err());
+        assert!(run_host_cap(&host, "configure_smb", &mut out).is_err());
+        assert!(crate::host::detect_host_for_os("unsupported_os_123").is_err());
     }
 }

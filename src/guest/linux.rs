@@ -750,23 +750,22 @@ impl Guest for LinuxGuest {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::time::Duration;
 
+    /// Mock communicator supporting selective command failures.
     struct MockComm {
+        /// Default output or error returned when no `fail_commands` pattern matches.
         output: Result<String, String>,
+        /// Command substrings that should trigger an error.
         fail_commands: Vec<String>,
     }
 
+    /// Pattern-matching mock communicator for multi-step guest interactions.
     struct MultiMockComm {
+        /// Ordered `(pattern, result)` pairs matched against executed commands.
         responses: Vec<(String, Result<String, String>)>,
+        /// Fallback result when no pattern matches.
         default: Result<String, String>,
     }
 
@@ -778,22 +777,6 @@ mod tests {
                 }
             }
             self.default.clone().map_err(MigratoryError::Generic)
-        }
-
-        fn upload(&self, _local: &Path, _remote: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-
-        fn download(&self, _remote: &str, _local: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -899,13 +882,13 @@ mod tests {
     }
 
     #[test]
-    fn test_linux_guest() {
+    fn test_linux_guest() -> Result<(), MigratoryError> {
         let comm = MockComm {
             fail_commands: vec![],
             output: Ok("Linux\n".to_string()),
         };
         let guest = LinuxGuest;
-        assert!(guest.detect(&comm).expect("detect should succeed"));
+        assert!(guest.detect(&comm)?);
         assert!(guest.change_hostname(&comm, "test").is_ok());
         assert!(guest.configure_networks(&comm, &[]).is_ok());
         assert!(
@@ -914,6 +897,7 @@ mod tests {
                 .is_ok()
         );
         assert!(guest.halt(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -967,27 +951,25 @@ mod tests {
     }
 
     #[test]
-    fn test_linux_guest_not_linux() {
+    fn test_linux_guest_not_linux() -> Result<(), MigratoryError> {
         let comm = MockComm {
             fail_commands: vec![],
             output: Ok("FreeBSD\n".to_string()),
         };
         let guest = LinuxGuest;
-        assert!(!guest.detect(&comm).expect("detect should succeed"));
+        assert!(!guest.detect(&comm)?);
+        Ok(())
     }
 
     #[test]
-    fn test_linux_guest_detect_error() {
+    fn test_linux_guest_detect_error() -> Result<(), MigratoryError> {
         let comm = MockComm {
             fail_commands: vec![],
             output: Err("timeout".to_string()),
         };
         let guest = LinuxGuest;
-        assert!(
-            !guest
-                .detect(&comm)
-                .expect("detect should resolve to false on error")
-        );
+        assert!(!guest.detect(&comm)?);
+        Ok(())
     }
 
     #[test]
@@ -1025,7 +1007,9 @@ mod tests {
             ("/etc/alpine-release", LinuxDistro::Alpine),
             ("/etc/SuSE-release", LinuxDistro::Suse),
         ] {
+            /// Fallback communicator matching a single release file path.
             struct FallbackComm {
+                /// Release file path that should succeed.
                 match_file: String,
             }
             impl Communicator for FallbackComm {
@@ -1035,18 +1019,6 @@ mod tests {
                     } else {
                         Ok(String::new())
                     }
-                }
-                fn upload(&self, _: &Path, _: &str) -> Result<(), MigratoryError> {
-                    Ok(())
-                }
-                fn download(&self, _: &str, _: &Path) -> Result<(), MigratoryError> {
-                    Ok(())
-                }
-                fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                    Ok(())
-                }
-                fn wait_for_ready(&self, _: Duration) -> Result<(), MigratoryError> {
-                    Ok(())
                 }
             }
             let comm = FallbackComm {
@@ -1104,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn test_linux_guest_command_failures() {
+    fn test_linux_guest_command_failures() -> Result<(), MigratoryError> {
         let guest = LinuxGuest;
         let fail_comm = MockComm {
             fail_commands: vec![],
@@ -1154,12 +1126,9 @@ mod tests {
                 .is_err()
         );
         assert!(guest.reboot(&fail_comm).is_err());
-        assert!(
-            !guest
-                .rsync_installed(&fail_comm)
-                .expect("operation should succeed")
-        );
+        assert!(!guest.rsync_installed(&fail_comm)?);
         assert!(guest.rsync_install(&fail_comm).is_err());
+        Ok(())
     }
 
     #[test]
@@ -1214,11 +1183,9 @@ mod tests {
             default: Ok(String::new()),
         };
         let res = guest.install_virtualbox_guest_additions(&fail_compile_comm, None);
-        assert!(res.is_err());
         assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("compilation or installation failed")
+            res.as_ref()
+                .is_err_and(|e| { e.to_string().contains("compilation or installation failed") })
         );
     }
 

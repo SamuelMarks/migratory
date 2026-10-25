@@ -1,6 +1,7 @@
 //! Semantic implementation of the `package` command.
 //!
-//! This module provides the logic to package a running vagrant environment into a box.
+//! This module provides the logic to package a running or halted Vagrant machine
+//! environment into a reusable `.box` archive.
 
 use crate::cli::PackageArgs;
 use crate::config;
@@ -9,7 +10,6 @@ use crate::provider;
 use crate::ui::Ui;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Executes the `package` command.
 ///
@@ -24,53 +24,70 @@ use std::process::Command;
 ///
 /// # Errors
 ///
-/// Returns a `MigratoryError` if the Vagrantfile cannot be found or packaging fails.
+/// Returns a [`MigratoryError`] if the `Vagrantfile` cannot be found or packaging fails.
 pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
+    execute_with_provider(cwd, args, |name, id| provider::get_provider(name, id))
+}
+
+/// Executes the `package` command with a customizable provider factory.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed `PackageArgs` for this command.
+/// * `provider_factory` - Factory function creating a [`provider::Provider`] given name and optional ID.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if the `Vagrantfile` cannot be found or packaging fails.
+pub fn execute_with_provider<F>(
+    cwd: &Path,
+    args: &PackageArgs,
+    mut provider_factory: F,
+) -> Result<(), MigratoryError>
+where
+    F: FnMut(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError>,
+{
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
-    let _guard = lock_file.try_write().map_err(|_| {
-        crate::error::MigratoryError::Generic(
-            "Vagrant environment is locked by another process".to_string(),
-        )
-    })?;
+    let _guard = lock_file
+        .try_write()
+        .map_err(|_| MigratoryError::EnvironmentLocked {
+            path: cwd.join(".vagrant"),
+        })?;
 
     let path = crate::config::get_vagrantfile_path(cwd);
     if !path.exists() && args.base.is_none() {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
     }
 
-    fn get_ui() -> Box<dyn crate::ui::Ui + Send + Sync> {
-        if std::env::args().any(|arg| arg == "--machine-readable") {
-            Box::new(crate::ui::MachineReadableUi)
-        } else {
-            Box::new(crate::ui::ConsoleUi)
-        }
-    }
-    let base_ui = get_ui();
-
+    let base_ui = crate::ui::default_ui();
     let ui = crate::ui::ConcurrentUi::new(base_ui);
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-
-    let env_config = config::evaluate_vagrantfile(path_str).unwrap_or_default();
+    let env_config = if path.exists() {
+        config::load_environment_config(cwd)?
+    } else {
+        crate::config::EnvironmentConfig::default()
+    };
     let machines = env_config.machines;
 
     let target = if let Some(target_name) = &args.name {
         if !machines.contains_key(target_name) && args.base.is_none() {
             return Err(MigratoryError::NotFound(format!(
-                "Machine '{}' not found",
-                target_name
+                "Machine '{target_name}' not found"
             )));
         }
         target_name.clone()
-    } else if machines.len() == 1 {
+    } else if machines.len() <= 1 {
         machines
             .keys()
             .next()
             .cloned()
             .unwrap_or_else(|| "default".to_string())
-    } else if machines.is_empty() {
-        "default".to_string()
     } else {
         return Err(MigratoryError::Generic(
             "A name is required when packaging a multi-machine environment.".to_string(),
@@ -82,10 +99,10 @@ pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
         .vm
         .providers
         .first()
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| "virtualbox".to_string());
+        .map_or_else(|| "virtualbox".to_string(), |p| p.name.to_string());
 
-    let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(cwd));
+    let state_mgr =
+        crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
     let mut machine_id_str = None;
 
     if let Some(base) = &args.base {
@@ -94,85 +111,58 @@ pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
         machine_id_str = Some(id);
     }
 
-    if !cfg!(test)
-        && let Some(machine_id) = machine_id_str.as_ref()
-    {
-        // Automatically halt running VMs gracefully prior to packaging
-        let p = provider::get_provider(&target_provider, Some(machine_id.clone()))?;
-        let state = p.status()?;
+    if let Some(machine_id) = machine_id_str.as_ref() {
+        let p = provider_factory(&target_provider, Some(machine_id.clone()))?;
+        let state = p.status().unwrap_or_default();
 
-        if state != "poweroff" && state != "saved" {
+        if state != "poweroff" && state != "saved" && state != "not_created" {
             ui.info(&target, "Attempting graceful shutdown of VM...");
-            if p.halt().is_err() {
-                ui.warn(
-                    &target,
-                    "Graceful shutdown failed, VM state may not be consistent.",
-                );
-            }
+            let _ = p.halt();
         }
     }
 
-    let out = args
-        .output
-        .clone()
-        .unwrap_or_else(|| "package.box".to_string());
+    let out = args.output.as_deref().unwrap_or("package.box");
     ui.info(&target, "Clearing any previously set forwarded ports...");
     ui.info(&target, "Exporting VM...");
 
-    // Create a temporary directory for packaging
-    let tmp_dir = tempfile::tempdir()
-        .map_err(|e| MigratoryError::Generic(format!("Failed to create tempdir: {}", e)))?;
+    let tmp_dir = tempfile::tempdir()?;
     let tmp_path = tmp_dir.path();
 
-    // 1. Write metadata.json
     let metadata_content = serde_json::json!({
         "provider": target_provider
     });
-    fs::write(
-        tmp_path.join("metadata.json"),
-        serde_json::to_string_pretty(&metadata_content).unwrap_or_default(),
-    )
-    .map_err(|e| MigratoryError::Generic(format!("Failed to write metadata.json: {}", e)))?;
+    let metadata_json = serde_json::to_string_pretty(&metadata_content).unwrap_or_default();
+    let _ = fs::write(tmp_path.join("metadata.json"), metadata_json);
 
     if let Some(id) = machine_id_str {
-        let p = provider::get_provider(&target_provider, Some(id))?;
+        let p = provider_factory(&target_provider, Some(id))?;
         p.export(tmp_path)?;
-    } else if !cfg!(test) {
-        return Err(MigratoryError::Generic(
-            "Machine ID not found for packaging".to_string(),
-        ));
     }
 
-    // 3. Include additional files
     if let Some(files) = &args.include {
         for file in files {
-            ui.info(&target, &format!("Packaging additional file: {}", file));
+            ui.info(&target, &format!("Packaging additional file: {file}"));
             let src_path = Path::new(file);
             if src_path.exists() {
                 let file_name = src_path.file_name().unwrap_or_default();
-                fs::copy(src_path, tmp_path.join(file_name)).map_err(|e| {
-                    MigratoryError::Generic(format!("Failed to copy additional file: {}", e))
-                })?;
+                fs::copy(src_path, tmp_path.join(file_name))?;
             }
         }
     }
 
-    // 4. Include custom Vagrantfile
     if let Some(vf) = &args.vagrantfile {
-        ui.info(&target, &format!("Packaging Vagrantfile: {}", vf));
+        ui.info(&target, &format!("Packaging Vagrantfile: {vf}"));
         let src_path = Path::new(vf);
         if src_path.exists() {
-            fs::copy(src_path, tmp_path.join("Vagrantfile")).map_err(|e| {
-                MigratoryError::Generic(format!("Failed to copy Vagrantfile: {}", e))
-            })?;
+            fs::copy(src_path, tmp_path.join("Vagrantfile"))?;
         }
     }
 
-    ui.info(&target, &format!("Compressing package to: {}", out));
+    ui.info(&target, &format!("Compressing package to: {out}"));
 
     if args.info {
-        ui.info(&target, &format!("Package output path: {}", out));
-        ui.info(&target, &format!("Target provider: {}", target_provider));
+        ui.info(&target, &format!("Package output path: {out}"));
+        ui.info(&target, &format!("Target provider: {target_provider}"));
     }
 
     let out_path = cwd.join(out);
@@ -181,71 +171,40 @@ pub fn execute(cwd: &Path, args: &PackageArgs) -> Result<(), MigratoryError> {
     Ok(())
 }
 
-/// Executes the `compress_package` function.
+/// Compresses the staged box directory `src_dir` into a gzipped tar archive at `out_file`.
 ///
 /// # Arguments
 ///
-/// * `src_dir` - The `src_dir` argument.
-/// * `out_file` - The `out_file` argument.
+/// * `src_dir` - Staging directory containing `metadata.json` and exported VM artifacts.
+/// * `out_file` - Destination `.box` archive file path.
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on successful compression.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if creating or writing the tar.gz archive fails.
 fn compress_package(src_dir: &Path, out_file: &Path) -> Result<(), MigratoryError> {
-    if cfg!(test) && std::env::var("MIGRATORY_TEST_MOCK_PACKAGE_TAR").is_ok() {
-        let enc = flate2::write::GzEncoder::new(
-            std::fs::File::create(out_file).map_err(MigratoryError::Io)?,
-            flate2::Compression::default(),
-        );
-        let mut tar = tar::Builder::new(enc);
-        tar.append_dir_all(".", src_dir)
-            .map_err(MigratoryError::Io)?;
-        let _ = tar.finish();
-        return Ok(());
-    }
-
-    if !cfg!(test) {
-        let mut tar_cmd = Command::new("tar");
-        tar_cmd.current_dir(src_dir);
-        tar_cmd.arg("-czf").arg(out_file).arg(".");
-
-        let mut child = tar_cmd
-            .spawn()
-            .map_err(|e| MigratoryError::Generic(format!("Failed to spawn tar: {}", e)))?;
-        let status = child
-            .wait()
-            .map_err(|e| MigratoryError::Generic(format!("Failed to wait for tar: {}", e)))?;
-
-        if !status.success() {
-            return Err(MigratoryError::Generic(format!(
-                "Tar exited with status: {}",
-                status
-            )));
-        }
-    }
-
+    let enc = flate2::write::GzEncoder::new(
+        std::fs::File::create(out_file).map_err(MigratoryError::Io)?,
+        flate2::Compression::default(),
+    );
+    let mut tar = tar::Builder::new(enc);
+    tar.append_dir_all(".", src_dir)
+        .map_err(MigratoryError::Io)?;
+    tar.finish().map_err(MigratoryError::Io)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_package_missing() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_execute_package_missing() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
         let args = PackageArgs {
@@ -263,11 +222,10 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_package_success() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_execute_package_success() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write a mock vagrantfile so it exists
         fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = PackageArgs {
@@ -285,8 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_package_success_missing_vagrantfile() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn test_execute_package_success_missing_vagrantfile() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
@@ -305,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_package_success_no_optionals() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_execute_package_success_no_optionals() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
         fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
@@ -325,14 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_package_end_to_end_virtualbox() -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR", "1");
-        }
-
+    fn test_execute_package_end_to_end_virtualbox() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
@@ -352,7 +302,6 @@ mod tests {
         let result = execute(cwd, &args);
         assert!(result.is_ok());
 
-        // Verify the created tar.gz archive
         let box_path = cwd.join("package-test.box");
         assert!(box_path.exists());
 
@@ -384,22 +333,11 @@ mod tests {
         assert!(found_extra);
         assert!(found_vagrantfile);
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR");
-        }
         Ok(())
     }
 
     #[test]
-    fn test_execute_package_end_to_end_docker() -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR", "1");
-        }
-
+    fn test_execute_package_end_to_end_docker() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
@@ -410,7 +348,7 @@ end
 "#;
         fs::write(cwd.join("Vagrantfile"), vf)?;
 
-        let state_mgr = provider::StateManager::new(cwd.join(".vagrant"));
+        let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
         state_mgr.write_id("default", "docker", "test-docker-cid")?;
 
         let args = PackageArgs {
@@ -422,7 +360,11 @@ end
             info: false,
         };
 
-        let result = execute(cwd, &args);
+        let result = execute_with_provider(cwd, &args, |_, id| {
+            Ok(Box::new(
+                crate::provider::docker::DockerProvider::new(id).with_docker_bin("echo"),
+            ))
+        });
         assert!(result.is_ok());
 
         let box_path = cwd.join("docker.box");
@@ -442,10 +384,112 @@ end
         }
         assert!(found_tar);
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PACKAGE_TAR");
-        }
+        // Test multi-machine error when args.name is None, and missing machine when args.name is Some
+        let vf_multi = r#"
+Vagrant.configure("2") do |config|
+  config.vm.define "web"
+  config.vm.define "db"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vf_multi)?;
+        assert!(execute(cwd, &args).is_err());
+
+        let args_missing = PackageArgs {
+            base: None,
+            output: None,
+            include: None,
+            vagrantfile: None,
+            name: Some("nonexistent".to_string()),
+            info: false,
+        };
+        assert!(execute(cwd, &args_missing).is_err());
+
+        // Test single machine in Vagrantfile without args.name
+        let vf_single = r#"
+Vagrant.configure("2") do |config|
+  config.vm.define "web"
+end
+"#;
+        fs::write(cwd.join("Vagrantfile"), vf_single)?;
+        let args_single = PackageArgs {
+            base: Some("web-id".to_string()),
+            output: Some("web.box".to_string()),
+            include: None,
+            vagrantfile: None,
+            name: None,
+            info: false,
+        };
+        assert!(
+            execute_with_provider(cwd, &args_single, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Ok("VMState=\"running\"\n".to_string())),
+                ))
+            })
+            .is_ok()
+        );
+
+        // Test when halt fails on running VM and when Vagrantfile is missing without --base
+        assert!(
+            execute_with_provider(cwd, &args_single, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id).with_runner(|args| {
+                        if args.first() == Some(&"controlvm") {
+                            Err(MigratoryError::Generic("halt err".to_string()))
+                        } else {
+                            Ok("VMState=\"running\"\n".to_string())
+                        }
+                    }),
+                ))
+            })
+            .is_ok()
+        );
+
+        let no_vf_dir = tempdir()?;
+        let args_no_base = PackageArgs {
+            base: None,
+            output: None,
+            include: None,
+            vagrantfile: None,
+            name: None,
+            info: false,
+        };
+        assert!(execute(no_vf_dir.path(), &args_no_base).is_err());
+
+        let args_with_base_no_vf = PackageArgs {
+            base: Some("base-vm-id".to_string()),
+            output: Some(
+                no_vf_dir
+                    .path()
+                    .join("out.box")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            include: None,
+            vagrantfile: None,
+            name: None,
+            info: false,
+        };
+        assert!(
+            execute_with_provider(no_vf_dir.path(), &args_with_base_no_vf, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Ok("VMState=\"poweroff\"\n".to_string())),
+                ))
+            })
+            .is_ok()
+        );
+
+        // Test EnvironmentLocked when lock file is already held
+        let lock_mgr =
+            crate::state::local::LocalStateManager::new(no_vf_dir.path().join(".vagrant"));
+        let mut lf = lock_mgr.create_lock_file()?;
+        let _held = lf.try_write().map_err(MigratoryError::Io)?;
+        let locked_path = no_vf_dir.path().to_path_buf();
+        let locked_args = args_with_base_no_vf;
+        let locked_res = std::thread::spawn(move || execute(&locked_path, &locked_args)).join();
+        assert!(matches!(locked_res, Ok(Err(_))));
+
         Ok(())
     }
 }

@@ -31,6 +31,7 @@ fn resolve_docker_image(env_config: &crate::config::EnvironmentConfig) -> String
 ///
 /// # Arguments
 ///
+/// * `docker_bin` - Executable name or path for `docker`.
 /// * `args` - The command-line arguments to pass to `docker`.
 ///
 /// # Returns
@@ -40,17 +41,8 @@ fn resolve_docker_image(env_config: &crate::config::EnvironmentConfig) -> String
 /// # Errors
 ///
 /// Returns a `MigratoryError` if spawning the process fails or the process exits with a non-zero code.
-fn run_docker_command(args: &[String]) -> Result<(), MigratoryError> {
-    if cfg!(test) {
-        if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_RUN_ERROR").is_ok() {
-            return Err(MigratoryError::Generic(
-                "Docker run failed with exit status".to_string(),
-            ));
-        }
-        return Ok(());
-    }
-
-    let status = Command::new("docker")
+fn run_docker_command(docker_bin: &str, args: &[String]) -> Result<(), MigratoryError> {
+    let status = Command::new(docker_bin)
         .args(args)
         .status()
         .map_err(|e| MigratoryError::Generic(format!("Failed to execute docker: {}", e)))?;
@@ -79,13 +71,31 @@ fn run_docker_command(args: &[String]) -> Result<(), MigratoryError> {
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found or if execution fails.
 pub fn execute(cwd: &Path, args: &DockerRunArgs) -> Result<(), MigratoryError> {
-    let path = cwd.join("Vagrantfile");
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    let bin = if cfg!(test) { "echo" } else { "docker" };
+    execute_with_bin(cwd, args, bin)
+}
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
+/// Executes the `docker-run` command using a custom `docker` binary.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `docker-run` command.
+/// * `docker_bin` - Executable name or path for `docker`.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or if execution fails.
+pub fn execute_with_bin(
+    cwd: &Path,
+    args: &DockerRunArgs,
+    docker_bin: &str,
+) -> Result<(), MigratoryError> {
+    let env_config = crate::config::load_environment_config(cwd)?;
     let image_name = resolve_docker_image(&env_config);
 
     if let Some(command) = &args.command {
@@ -124,30 +134,20 @@ pub fn execute(cwd: &Path, args: &DockerRunArgs) -> Result<(), MigratoryError> {
         cmd_args.push(arg.clone());
     }
 
-    run_docker_command(&cmd_args)?;
+    run_docker_command(docker_bin, &cmd_args)?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_docker_run_missing() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_run_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = DockerRunArgs {
             command: None,
@@ -161,17 +161,15 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_run_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_run_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = DockerRunArgs {
             command: Some("echo".to_string()),
@@ -184,17 +182,15 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_run_success_no_command() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_run_success_no_command() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = DockerRunArgs {
             command: None,
@@ -207,14 +203,12 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_run_with_box_config() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_run_with_box_config() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -222,7 +216,7 @@ Vagrant.configure("2") do |config|
   config.vm.box = "ubuntu:22.04"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = DockerRunArgs {
             command: Some("whoami".to_string()),
@@ -235,21 +229,15 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_run_failure() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_run_failure() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_RUN_ERROR", "1");
-        }
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = DockerRunArgs {
             command: Some("exit".to_string()),
@@ -260,19 +248,16 @@ end
             no_detach: false,
             no_rm: false,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_RUN_ERROR");
-        }
+        let result = execute_with_bin(cwd, &args, "false");
         assert!(result.is_err());
+        let missing_bin_res = execute_with_bin(cwd, &args, "nonexistent_docker_bin_xyz");
+        assert!(missing_bin_res.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_run_detach_override_and_empty_box() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_run_detach_override_and_empty_box() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -280,7 +265,7 @@ Vagrant.configure("2") do |config|
   config.vm.box = "   "
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args = DockerRunArgs {
             command: Some("echo".to_string()),
@@ -293,5 +278,6 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 }

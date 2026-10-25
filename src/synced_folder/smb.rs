@@ -158,16 +158,35 @@ impl SmbSyncedFolder {
         host_path: &str,
         share_name: &str,
     ) -> Result<(), MigratoryError> {
-        #[cfg(test)]
-        if std::env::var("MIGRATORY_TEST_MOCK_PREPARE_ERR").is_ok() {
-            return Err(MigratoryError::Generic("Mock prepare error".to_string()));
-        }
-
         let host = crate::host::detect_host()?;
+        self.execute_prepare_command_with_host(host_path, share_name, host.as_ref())
+    }
+
+    /// Executes the SMB prepare command on the provided [`crate::host::Host`] implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Local host directory to share via SMB.
+    /// * `share_name` - Name of the SMB share.
+    /// * `host` - Host implementation to configure SMB shares on.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if SMB share configuration fails.
+    pub fn execute_prepare_command_with_host(
+        &self,
+        host_path: &str,
+        share_name: &str,
+        host: &dyn crate::host::Host,
+    ) -> Result<(), MigratoryError> {
         let sf_config = crate::config::SyncedFolderConfig {
-            host_path: host_path.to_string(),
-            guest_path: format!("/{}", share_name),
-            folder_type: Some("smb".to_string()),
+            host_path: std::path::PathBuf::from(host_path),
+            guest_path: std::path::PathBuf::from(format!("/{}", share_name)),
+            folder_type: Some(crate::config::SyncedFolderType::Smb),
             disabled: false,
             ..Default::default()
         };
@@ -177,40 +196,24 @@ impl SmbSyncedFolder {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use std::path::Path;
-    use std::time::Duration;
+
     use tempfile::tempdir;
 
+    /// No-op mock communicator for SMB synced folder tests.
     struct MockComm;
 
+    /// Failing mock communicator for SMB synced folder error tests.
     struct FailComm;
 
+    /// Mock communicator that fails `sudo mkdir` commands.
     struct FailMkdirComm;
+    /// Mock communicator that fails `sudo mount` commands.
     struct FailMountComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -222,18 +225,6 @@ mod tests {
                 Ok(String::new())
             }
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     impl Communicator for FailMountComm {
@@ -244,40 +235,16 @@ mod tests {
                 Ok(String::new())
             }
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     impl Communicator for FailComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Err(MigratoryError::Generic("comm error".to_string()))
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     #[test]
-    fn test_smb_folder_mount_comm_failure() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_smb_folder_mount_comm_failure() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let folder = SmbSyncedFolder;
         let opts = SyncedFolderOptions {
@@ -297,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn test_smb_folder_success() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_smb_folder_success() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let folder = SmbSyncedFolder;
         let opts = SyncedFolderOptions {
@@ -381,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_smb_folder_empty_guest_path() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_smb_folder_empty_guest_path() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let folder = SmbSyncedFolder;
         let opts = SyncedFolderOptions {
@@ -395,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn test_smb_folder_with_mount_options() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_smb_folder_with_mount_options() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let folder = SmbSyncedFolder;
         let opts = SyncedFolderOptions {
@@ -421,12 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn test_smb_execute_prepare_command() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+    fn test_smb_execute_prepare_command() -> Result<(), MigratoryError> {
         let folder = SmbSyncedFolder;
-        let dir = tempdir().expect("tempdir failed");
+        let dir = tempdir()?;
         let opts = SyncedFolderOptions {
             guest_path: "/vagrant".to_string(),
             host_path: dir.path().to_string_lossy().to_string(),
@@ -438,21 +402,25 @@ mod tests {
                 .execute_prepare_command(&opts.host_path, "vagrant")
                 .is_ok()
         );
+        Ok(())
+    }
+
+    /// Failing mock host used to test SMB preparation failures.
+    struct FailingSmbHost;
+    impl crate::host::Host for FailingSmbHost {
+        fn configure_smb(
+            &self,
+            _folders: &[crate::config::SyncedFolderConfig],
+        ) -> Result<(), MigratoryError> {
+            Err(MigratoryError::Generic("Mock prepare error".to_string()))
+        }
     }
 
     #[test]
     fn test_smb_execute_prepare_command_mock_err() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
         let folder = SmbSyncedFolder;
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PREPARE_ERR", "1");
-        }
-        let res = folder.execute_prepare_command("/tmp", "vagrant");
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PREPARE_ERR");
-        }
+        let failing_host = FailingSmbHost;
+        let res = folder.execute_prepare_command_with_host("/tmp", "vagrant", &failing_host);
         assert!(res.is_err());
     }
 }

@@ -25,21 +25,53 @@ use std::path::PathBuf;
 ///
 /// Returns a `MigratoryError` if writing to the output stream or modifying the profile fails.
 pub fn execute(cmd: &AutocompleteCommands, mut writer: impl Write) -> Result<(), MigratoryError> {
-    match cmd {
-        AutocompleteCommands::Install(args) => install_autocomplete(args, &mut writer),
-    }
+    let shell_env = std::env::var("SHELL").unwrap_or_default();
+    let home_dir = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    let vagrant_home = crate::config::get_vagrant_home();
+    execute_with_env(cmd, &mut writer, &shell_env, &home_dir, &vagrant_home)
 }
 
-/// Executes the `get_shell_paths` function.
+/// Executes the `autocomplete` command with explicit environment configuration.
 ///
 /// # Arguments
 ///
-/// * `shell` - The `shell` argument.
-/// * `home_dir` - The `home_dir` argument.
+/// * `cmd` - The parsed `AutocompleteCommands` subcommand.
+/// * `writer` - A writable destination for output.
+/// * `shell_env` - Value of the `SHELL` environment variable.
+/// * `home_dir` - User's home directory path.
+/// * `vagrant_home` - Vagrant home directory path.
 ///
 /// # Returns
 ///
-/// Returns `(&'static str, PathBuf)`.
+/// Returns `Ok(())` on successful execution, or a `MigratoryError` on failure.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if writing to the output stream or modifying the profile fails.
+pub fn execute_with_env(
+    cmd: &AutocompleteCommands,
+    writer: &mut dyn Write,
+    shell_env: &str,
+    home_dir: &std::path::Path,
+    vagrant_home: &std::path::Path,
+) -> Result<(), MigratoryError> {
+    match cmd {
+        AutocompleteCommands::Install(args) => {
+            install_autocomplete(args, writer, shell_env, home_dir, vagrant_home)
+        }
+    }
+}
+
+/// Determines the completion script filename and profile path for a target shell.
+///
+/// # Arguments
+///
+/// * `shell` - Target shell variant (`Bash`, `Zsh`, `Fish`, etc.).
+/// * `home_dir` - User's home directory path.
+///
+/// # Returns
+///
+/// Returns a tuple of `(script_filename, profile_file_path)`.
 fn get_shell_paths(shell: Shell, home_dir: &std::path::Path) -> (&'static str, PathBuf) {
     match shell {
         Shell::Zsh => ("migratory-autocomplete.zsh", home_dir.join(".zshrc")),
@@ -48,19 +80,19 @@ fn get_shell_paths(shell: Shell, home_dir: &std::path::Path) -> (&'static str, P
     }
 }
 
-/// Executes the `ensure_parent_dir` function.
+/// Ensures that the parent directory of `path` exists, creating it recursively if needed.
 ///
 /// # Arguments
 ///
-/// * `path` - The `path` argument.
+/// * `path` - File path whose parent directory should be created.
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if creating the parent directory fails.
 fn ensure_parent_dir(path: &std::path::Path) -> Result<(), MigratoryError> {
     if let Some(parent) = path.parent() {
         if parent.as_os_str().is_empty() {
@@ -90,55 +122,52 @@ impl Write for FailingWriter {
     }
 }
 
-/// Executes the `append_to_profile_impl` function.
+/// Appends the completion sourcing block to the opened shell profile stream.
 ///
 /// # Arguments
 ///
-/// * `file` - The `file` argument.
-/// * `append_content` - The `append_content` argument.
+/// * `file` - Mutable writer for the target shell profile file.
+/// * `append_content` - Completion block text to append.
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if writing to the profile file fails.
 fn append_to_profile_impl(
     file: &mut dyn Write,
     append_content: &str,
 ) -> Result<(), MigratoryError> {
-    #[cfg(test)]
-    let mut failing = FailingWriter;
-    #[cfg(test)]
-    let file = if std::env::var("MIGRATORY_TEST_MOCK_PROFILE_WRITE_ERROR").is_ok() {
-        &mut failing as &mut dyn Write
-    } else {
-        file
-    };
-
     file.write_all(append_content.as_bytes())
         .map_err(|e| MigratoryError::Generic(format!("Failed to append to profile file: {}", e)))?;
     Ok(())
 }
 
-/// Executes the `install_autocomplete` function.
+/// Generates and installs the shell autocomplete script and updates the user's shell profile.
 ///
 /// # Arguments
 ///
-/// * `args` - The `args` argument.
-/// * `writer` - The `writer` argument.
+/// * `args` - Parsed installation arguments specifying target shells.
+/// * `writer` - Output writer for confirmation messages.
+/// * `shell_env` - Value of the `SHELL` environment variable.
+/// * `home_dir` - User's home directory path.
+/// * `vagrant_home` - Vagrant home directory path.
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if generating the completion script or updating the profile fails.
 fn install_autocomplete(
     args: &AutocompleteInstallArgs,
     writer: &mut dyn Write,
+    shell_env: &str,
+    home_dir: &std::path::Path,
+    vagrant_home: &std::path::Path,
 ) -> Result<(), MigratoryError> {
     let shell = if args.bash {
         Shell::Bash
@@ -146,29 +175,18 @@ fn install_autocomplete(
         Shell::Zsh
     } else if args.fish {
         Shell::Fish
+    } else if shell_env.contains("zsh") {
+        Shell::Zsh
+    } else if shell_env.contains("fish") {
+        Shell::Fish
     } else {
-        let shell_env = std::env::var("SHELL").unwrap_or_default();
-        if shell_env.contains("zsh") {
-            Shell::Zsh
-        } else if shell_env.contains("fish") {
-            Shell::Fish
-        } else {
-            Shell::Bash
-        }
+        Shell::Bash
     };
 
-    let home_dir = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("~"));
-
-    let vagrant_home = std::env::var("VAGRANT_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir.join(".vagrant.d"));
-
-    fs::create_dir_all(&vagrant_home)
+    fs::create_dir_all(vagrant_home)
         .map_err(|e| MigratoryError::Generic(format!("Failed to create vagrant home: {}", e)))?;
 
-    let (script_name, profile_file) = get_shell_paths(shell, &home_dir);
+    let (script_name, profile_file) = get_shell_paths(shell, home_dir);
 
     let script_path = vagrant_home.join(script_name);
     let profile_path = profile_file;
@@ -224,35 +242,20 @@ fn install_autocomplete(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use tempfile::tempdir;
 
-    fn setup_env() -> (tempfile::TempDir, PathBuf) {
-        let temp = tempdir().expect("operation should succeed");
+    fn setup_env() -> Result<(tempfile::TempDir, PathBuf, PathBuf), MigratoryError> {
+        let temp = tempdir()?;
         let home_dir = temp.path().join("home");
-        fs::create_dir_all(&home_dir).expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("HOME", &home_dir);
-            std::env::set_var("VAGRANT_HOME", home_dir.join(".vagrant.d"));
-            std::env::set_var("SHELL", "/bin/bash");
-        }
-        (temp, home_dir)
+        fs::create_dir_all(&home_dir)?;
+        let vagrant_home = home_dir.join(".vagrant.d");
+        Ok((temp, home_dir, vagrant_home))
     }
 
     #[test]
-    fn test_execute_install_bash() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_bash() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -261,27 +264,22 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home).is_ok());
 
-        let output_str = String::from_utf8(out).expect("Invalid utf8");
+        let output_str = String::from_utf8(out)?;
         assert!(output_str.contains("Autocomplete installed at paths:"));
         assert!(output_str.contains(".bashrc"));
 
-        // Verify script exists
-        let vagrant_dir = home_dir.join(".vagrant.d");
-        assert!(vagrant_dir.join("migratory-autocomplete.bash").exists());
+        assert!(vagrant_home.join("migratory-autocomplete.bash").exists());
 
-        // Verify profile modified
-        let profile_content = fs::read_to_string(home_dir.join(".bashrc")).unwrap();
+        let profile_content = fs::read_to_string(home_dir.join(".bashrc"))?;
         assert!(profile_content.contains("# >>>> Migratory command completion (start)"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_zsh() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_zsh() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: false,
@@ -290,22 +288,19 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home).is_ok());
 
-        let output_str = String::from_utf8(out).expect("Invalid utf8");
+        let output_str = String::from_utf8(out)?;
         assert!(output_str.contains(".zshrc"));
 
-        // Verify profile modified
-        let profile_content = fs::read_to_string(home_dir.join(".zshrc")).unwrap();
+        let profile_content = fs::read_to_string(home_dir.join(".zshrc"))?;
         assert!(profile_content.contains("# >>>> Migratory command completion (start)"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_fish() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_fish() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: false,
@@ -314,26 +309,19 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home).is_ok());
 
-        let output_str = String::from_utf8(out).expect("Invalid utf8");
+        let output_str = String::from_utf8(out)?;
         assert!(output_str.contains(".config/fish/config.fish"));
 
-        // Verify profile modified
-        let profile_content =
-            fs::read_to_string(home_dir.join(".config/fish/config.fish")).unwrap();
+        let profile_content = fs::read_to_string(home_dir.join(".config/fish/config.fish"))?;
         assert!(profile_content.contains("# >>>> Migratory command completion (start)"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_shell_env_zsh() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
-        unsafe {
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
+    fn test_execute_install_shell_env_zsh() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: false,
@@ -342,21 +330,16 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_env(&cmd, &mut out, "/bin/zsh", &home_dir, &vagrant_home).is_ok());
 
-        let profile_content = fs::read_to_string(home_dir.join(".zshrc")).unwrap();
+        let profile_content = fs::read_to_string(home_dir.join(".zshrc"))?;
         assert!(profile_content.contains("# >>>> Migratory command completion (start)"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_shell_env_fish() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
-        unsafe {
-            std::env::set_var("SHELL", "/opt/homebrew/bin/fish");
-        }
+    fn test_execute_install_shell_env_fish() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: false,
@@ -365,22 +348,25 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(
+            execute_with_env(
+                &cmd,
+                &mut out,
+                "/opt/homebrew/bin/fish",
+                &home_dir,
+                &vagrant_home
+            )
+            .is_ok()
+        );
 
-        let profile_content =
-            fs::read_to_string(home_dir.join(".config/fish/config.fish")).unwrap();
+        let profile_content = fs::read_to_string(home_dir.join(".config/fish/config.fish"))?;
         assert!(profile_content.contains("# >>>> Migratory command completion (start)"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_shell_env_bash() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
-        unsafe {
-            std::env::set_var("SHELL", "/bin/bash");
-        }
+    fn test_execute_install_shell_env_bash() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: false,
@@ -389,18 +375,16 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home).is_ok());
 
-        let profile_content = fs::read_to_string(home_dir.join(".bashrc")).unwrap();
+        let profile_content = fs::read_to_string(home_dir.join(".bashrc"))?;
         assert!(profile_content.contains("# >>>> Migratory command completion (start)"));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_already_installed() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_already_installed() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -409,26 +393,22 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
+        assert!(execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home).is_ok());
 
-        // Run again
         let mut out2 = Vec::new();
-        assert!(execute(&cmd, &mut out2).is_ok());
+        assert!(execute_with_env(&cmd, &mut out2, "/bin/bash", &home_dir, &vagrant_home).is_ok());
 
-        // Ensure marker isn't duplicated
-        let profile_content = fs::read_to_string(home_dir.join(".bashrc")).unwrap();
+        let profile_content = fs::read_to_string(home_dir.join(".bashrc"))?;
         let count = profile_content
             .matches("# >>>> Migratory command completion (start)")
             .count();
         assert_eq!(count, 1);
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_write_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, _home_dir) = setup_env();
+    fn test_execute_install_write_error() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -438,20 +418,16 @@ mod tests {
         let cmd = AutocompleteCommands::Install(args);
 
         let mut out = FailingWriter;
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_vagrant_home_creation_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_vagrant_home_creation_error() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
-        // Make VAGRANT_HOME a file so it fails to create a directory
-        let vh = home_dir.join(".vagrant.d");
-        fs::write(&vh, "not a dir").unwrap();
+        fs::write(&vagrant_home, "not a dir")?;
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -461,21 +437,17 @@ mod tests {
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
 
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_script_creation_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_script_creation_error() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
-        let vh = home_dir.join(".vagrant.d");
-        fs::create_dir_all(&vh).unwrap();
-        // Make the script path a directory so it fails to create a file
-        fs::create_dir(vh.join("migratory-autocomplete.bash")).unwrap();
+        fs::create_dir_all(&vagrant_home)?;
+        fs::create_dir(vagrant_home.join("migratory-autocomplete.bash"))?;
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -485,20 +457,17 @@ mod tests {
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
 
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_install_profile_creation_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_profile_creation_error() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
 
-        // Make .bashrc a directory so it fails to open it
         let profile = home_dir.join(".bashrc");
-        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&profile)?;
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -508,8 +477,9 @@ mod tests {
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
 
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -522,13 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_install_profile_exists() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .unwrap();
-        let (_temp, home_dir) = setup_env();
+    fn test_execute_install_profile_exists() -> Result<(), MigratoryError> {
+        let (_temp, home_dir, vagrant_home) = setup_env()?;
         let profile = home_dir.join(".bashrc");
-        std::fs::write(&profile, "existing content").unwrap();
+        std::fs::write(&profile, "existing content")?;
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -537,8 +504,9 @@ mod tests {
         };
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
@@ -570,28 +538,16 @@ mod tests {
 
 #[cfg(test)]
 mod extra_autocomplete_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use crate::cli::commands::box_cmd::tests::ENV_LOCK;
     use tempfile::tempdir;
 
     /// Tests error when profile parent dir cannot be created.
     #[test]
-    fn test_execute_install_profile_dir_creation_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-
-        let temp = tempdir().expect("operation should succeed");
+    fn test_execute_install_profile_dir_creation_error() -> Result<(), MigratoryError> {
+        let temp = tempdir()?;
         let home_dir = temp.path().join("home_file");
-        std::fs::write(&home_dir, "file").expect("operation should succeed");
-
-        unsafe { std::env::set_var("HOME", &home_dir) };
-        unsafe { std::env::set_var("VAGRANT_HOME", temp.path().join("vagrant")) };
+        std::fs::write(&home_dir, "file")?;
+        let vagrant_home = temp.path().join("vagrant");
 
         let args = AutocompleteInstallArgs {
             bash: true,
@@ -601,85 +557,15 @@ mod extra_autocomplete_tests {
         let cmd = AutocompleteCommands::Install(args);
         let mut out = Vec::new();
 
-        let result = execute(&cmd, &mut out);
+        let result = execute_with_env(&cmd, &mut out, "/bin/bash", &home_dir, &vagrant_home);
         assert!(result.is_err());
-    }
 
-    /// Tests fallback when HOME is unset.
-    #[test]
-    fn test_execute_install_home_unset() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let orig_cwd = std::env::current_dir().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
-        std::env::set_current_dir(temp.path()).expect("operation should succeed");
-
-        let orig_home = std::env::var("HOME").unwrap_or_default();
-
-        unsafe { std::env::remove_var("HOME") };
-        unsafe { std::env::set_var("VAGRANT_HOME", temp.path().join("vagrant")) };
-
-        let args = AutocompleteInstallArgs {
-            bash: true,
-            zsh: false,
+        let args_none = AutocompleteInstallArgs {
             fish: false,
-        };
-        let cmd = AutocompleteCommands::Install(args);
-        let mut out = Vec::new();
-        let _ = execute(&cmd, &mut out);
-
-        unsafe { std::env::set_var("HOME", orig_home) };
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
-        std::env::set_current_dir(orig_cwd).expect("operation should succeed");
-    }
-
-    /// Tests fallback when VAGRANT_HOME is unset.
-    #[test]
-    fn test_execute_install_vagrant_home_unset() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
-        let home_dir = temp.path().join("home");
-        std::fs::create_dir_all(&home_dir).expect("operation should succeed");
-
-        unsafe { std::env::set_var("HOME", &home_dir) };
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
-
-        let args = AutocompleteInstallArgs {
-            bash: true,
+            bash: false,
             zsh: false,
-            fish: false,
         };
-        let cmd = AutocompleteCommands::Install(args);
-        let mut out = Vec::new();
-        assert!(execute(&cmd, &mut out).is_ok());
-
-        unsafe { std::env::remove_var("VAGRANT_HOME") };
-    }
-
-    /// Tests profile file write error during append.
-    #[test]
-    fn test_execute_install_profile_write_error() {
-        let _guard = ENV_LOCK.lock().expect("operation should succeed");
-        let temp = tempdir().expect("operation should succeed");
-        let home_dir = temp.path().join("home");
-        std::fs::create_dir_all(&home_dir).expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("HOME", &home_dir);
-            std::env::set_var("VAGRANT_HOME", home_dir.join(".vagrant.d"));
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROFILE_WRITE_ERROR", "1");
-        }
-
-        let args = AutocompleteInstallArgs {
-            bash: true,
-            zsh: false,
-            fish: false,
-        };
-        let cmd = AutocompleteCommands::Install(args);
-        let mut out = Vec::new();
-        let res = execute(&cmd, &mut out);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROFILE_WRITE_ERROR");
-        }
-        assert!(res.is_err());
+        let _ = execute(&AutocompleteCommands::Install(args_none), &mut Vec::new());
+        Ok(())
     }
 }

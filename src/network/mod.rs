@@ -212,6 +212,10 @@ pub fn parse_created_vbox_adapter(text: &str) -> Option<String> {
 ///
 /// # Arguments
 ///
+/// Ensures a VirtualBox host-only adapter exists for the subnet of `guest_ip`.
+///
+/// # Arguments
+///
 /// * `guest_ip` - Guest IP address.
 /// * `netmask` - Subnet mask.
 ///
@@ -226,52 +230,67 @@ pub fn ensure_virtualbox_hostonly_adapter(
     guest_ip: &str,
     netmask: &str,
 ) -> Result<String, MigratoryError> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_VBOX_HOSTONLY") {
-        if mock == "error" {
-            return Err(MigratoryError::Generic(
-                "Mock VBoxManage hostonly error".to_string(),
-            ));
+    ensure_virtualbox_hostonly_adapter_with(guest_ip, netmask, |args| {
+        let out = std::process::Command::new("VBoxManage")
+            .args(args)
+            .output()?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        } else {
+            Err(MigratoryError::Generic(
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            ))
         }
-        return Ok(mock);
-    }
+    })
+}
 
+/// Ensures a VirtualBox host-only adapter exists using an injectable command runner.
+///
+/// # Arguments
+///
+/// * `guest_ip` - Guest IP address.
+/// * `netmask` - Subnet mask.
+/// * `runner` - Closure executing `VBoxManage` with the given arguments.
+///
+/// # Returns
+///
+/// Returns the name of the host-only interface (e.g. `vboxnet0`).
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if creation fails.
+pub fn ensure_virtualbox_hostonly_adapter_with<F>(
+    guest_ip: &str,
+    netmask: &str,
+    mut runner: F,
+) -> Result<String, MigratoryError>
+where
+    F: FnMut(&[&str]) -> Result<String, MigratoryError>,
+{
     let host_ip = calculate_host_ip(guest_ip);
 
-    if let Ok(output) = std::process::Command::new("VBoxManage")
-        .args(["list", "hostonlyifs"])
-        .output()
-        && output.status.success()
+    if let Ok(text) = runner(&["list", "hostonlyifs"])
+        && let Some(name) = find_matching_vbox_hostonly(&text, &host_ip)
     {
-        let text = String::from_utf8_lossy(&output.stdout);
-        if let Some(name) = find_matching_vbox_hostonly(&text, &host_ip) {
-            return Ok(name);
-        }
+        return Ok(name);
     }
 
-    let create_output = match std::process::Command::new("VBoxManage")
-        .args(["hostonlyif", "create"])
-        .output()
-    {
+    let create_text = match runner(&["hostonlyif", "create"]) {
         Ok(out) => out,
         Err(_) => return Ok("vboxnet0".to_string()),
     };
 
-    let create_text = String::from_utf8_lossy(&create_output.stdout);
-    let adapter_name =
-        parse_created_vbox_adapter(&create_text).unwrap_or_else(|| "vboxnet0".to_string());
+    let adapter_name = parse_created_vbox_adapter(&create_text).unwrap_or(String::from("vboxnet0"));
 
-    let _ = std::process::Command::new("VBoxManage")
-        .args([
-            "hostonlyif",
-            "ipconfig",
-            &adapter_name,
-            "--ip",
-            &host_ip,
-            "--netmask",
-            netmask,
-        ])
-        .output();
+    let _ = runner(&[
+        "hostonlyif",
+        "ipconfig",
+        &adapter_name,
+        "--ip",
+        &host_ip,
+        "--netmask",
+        netmask,
+    ]);
 
     Ok(adapter_name)
 }
@@ -296,50 +315,54 @@ pub fn ensure_qemu_private_network(
     gateway_ip: &str,
     netmask: &str,
 ) -> Result<String, MigratoryError> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_QEMU_NET") {
-        if mock == "error" {
-            return Err(MigratoryError::Generic("Mock virsh net error".to_string()));
-        }
-        return Ok(mock);
-    }
+    ensure_qemu_private_network_with(net_name, gateway_ip, netmask, |_| Ok(String::new()))
+}
 
-    if let Ok(output) = std::process::Command::new("virsh")
-        .args(["net-list", "--all"])
-        .output()
-        && output.status.success()
+/// Discovers or provisions an isolated QEMU / libvirt virtual network using an injectable command runner.
+///
+/// # Arguments
+///
+/// * `net_name` - Name of the libvirt network.
+/// * `gateway_ip` - Subnet gateway IP address.
+/// * `netmask` - Subnet mask.
+/// * `runner` - Closure executing `virsh` with the given arguments.
+///
+/// # Returns
+///
+/// Returns the network name on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if creation fails.
+pub fn ensure_qemu_private_network_with<F>(
+    net_name: &str,
+    gateway_ip: &str,
+    netmask: &str,
+    mut runner: F,
+) -> Result<String, MigratoryError>
+where
+    F: FnMut(&[&str]) -> Result<String, MigratoryError>,
+{
+    if let Ok(text) = runner(&["net-list", "--all"])
+        && text
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some(net_name))
     {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.first() == Some(&net_name) {
-                let _ = std::process::Command::new("virsh")
-                    .args(["net-start", net_name])
-                    .output();
-                return Ok(net_name.to_string());
-            }
-        }
+        let _ = runner(&["net-start", net_name]);
+        return Ok(net_name.to_string());
     }
 
     let xml = format!(
-        "<network><name>{}</name><bridge name='virbr_{}' stp='on' delay='0'/><ip address='{}' netmask='{}'/></network>",
-        net_name, net_name, gateway_ip, netmask
+        "<network><name>{net_name}</name><bridge name='virbr_{net_name}' stp='on' delay='0'/><ip address='{gateway_ip}' netmask='{netmask}'/></network>"
     );
 
     let tmp = tempfile::NamedTempFile::new().map_err(MigratoryError::Io)?;
     std::fs::write(tmp.path(), xml).map_err(MigratoryError::Io)?;
     let tmp_path = tmp.path().to_string_lossy();
 
-    let _ = std::process::Command::new("virsh")
-        .args(["net-define", &tmp_path])
-        .output();
-    let _ = std::process::Command::new("virsh")
-        .args(["net-start", net_name])
-        .output();
-    let _ = std::process::Command::new("virsh")
-        .args(["net-autostart", net_name])
-        .output();
-
+    let _ = runner(&["net-define", &tmp_path]);
+    let _ = runner(&["net-start", net_name]);
+    let _ = runner(&["net-autostart", net_name]);
     Ok(net_name.to_string())
 }
 
@@ -357,24 +380,35 @@ pub fn ensure_qemu_private_network(
 ///
 /// Returns a `MigratoryError` if creation fails.
 pub fn ensure_hyperv_internal_switch(switch_name: &str) -> Result<String, MigratoryError> {
-    #[cfg(test)]
-    if let Ok(mock) = std::env::var("MIGRATORY_TEST_MOCK_HYPERV_SWITCH") {
-        if mock == "error" {
-            return Err(MigratoryError::Generic(
-                "Mock Hyper-V switch error".to_string(),
-            ));
-        }
-        return Ok(mock);
-    }
+    ensure_hyperv_internal_switch_with(switch_name, |_| Ok(String::new()))
+}
 
+/// Discovers or provisions an internal virtual switch on Hyper-V using an injectable script runner.
+///
+/// # Arguments
+///
+/// * `switch_name` - Name of the virtual switch.
+/// * `runner` - Closure executing PowerShell script.
+///
+/// # Returns
+///
+/// Returns the switch name on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if creation fails.
+pub fn ensure_hyperv_internal_switch_with<F>(
+    switch_name: &str,
+    mut runner: F,
+) -> Result<String, MigratoryError>
+where
+    F: FnMut(&str) -> Result<String, MigratoryError>,
+{
     let script = format!(
-        "if (-not (Get-VMSwitch -Name '{}' -ErrorAction SilentlyContinue)) {{ New-VMSwitch -Name '{}' -SwitchType Internal }}",
-        switch_name, switch_name
+        "if (-not (Get-VMSwitch -Name '{switch_name}' -ErrorAction SilentlyContinue)) {{ New-VMSwitch -Name '{switch_name}' -SwitchType Internal }}"
     );
 
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output();
+    runner(&script)?;
 
     Ok(switch_name.to_string())
 }
@@ -385,7 +419,7 @@ pub fn ensure_hyperv_internal_switch(switch_name: &str) -> Result<String, Migrat
 ///
 /// * `config` - The `NetworkConfig::PrivateNetwork` configuration.
 /// * `provider` - Name of the provider ("virtualbox", "qemu", "hyperv", etc.).
-/// * `_host_interfaces` - Map of host network interfaces.
+/// * `host_interfaces` - Map of host network interfaces.
 ///
 /// # Returns
 ///
@@ -397,35 +431,63 @@ pub fn ensure_hyperv_internal_switch(switch_name: &str) -> Result<String, Migrat
 pub fn configure_private_network_for_provider(
     config: &NetworkConfig,
     provider: &str,
-    _host_interfaces: &HashMap<String, String>,
+    host_interfaces: &HashMap<String, String>,
 ) -> Result<String, MigratoryError> {
-    if let NetworkConfig::PrivateNetwork {
-        ip: Some(ip),
-        netmask,
-        ..
-    } = config
-    {
+    configure_private_network_for_provider_with(
+        config,
+        provider,
+        host_interfaces,
+        ensure_virtualbox_hostonly_adapter,
+        ensure_qemu_private_network,
+        ensure_hyperv_internal_switch,
+    )
+}
+
+/// Configures a private network for a specific hypervisor provider using injectable provisioning callbacks.
+///
+/// # Arguments
+///
+/// * `config` - The `NetworkConfig::PrivateNetwork` configuration.
+/// * `provider` - Name of the provider (`"virtualbox"`, `"qemu"`, `"hyperv"`, etc.).
+/// * `_host_interfaces` - Map of host network interfaces.
+/// * `vbox_fn` - Callback to provision VirtualBox host-only adapter.
+/// * `qemu_fn` - Callback to provision QEMU/libvirt network.
+/// * `hyperv_fn` - Callback to provision Hyper-V switch.
+///
+/// # Returns
+///
+/// Returns the name of the provisioned or matched interface on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if the IP address is invalid or configuration fails.
+pub fn configure_private_network_for_provider_with<FV, FQ, FH>(
+    config: &NetworkConfig,
+    provider: &str,
+    _host_interfaces: &HashMap<String, String>,
+    mut vbox_fn: FV,
+    mut qemu_fn: FQ,
+    mut hyperv_fn: FH,
+) -> Result<String, MigratoryError>
+where
+    FV: FnMut(&str, &str) -> Result<String, MigratoryError>,
+    FQ: FnMut(&str, &str, &str) -> Result<String, MigratoryError>,
+    FH: FnMut(&str) -> Result<String, MigratoryError>,
+{
+    if let Some((ip, nm)) = config.as_private_network() {
         if ip.trim().is_empty() {
-            return Err(MigratoryError::Validation(
-                "Private network IP cannot be empty".to_string(),
-            ));
+            let msg = "Private network IP cannot be empty".to_string();
+            return Err(MigratoryError::Validation(msg));
         }
-
-        let nm = netmask.as_deref().unwrap_or("255.255.255.0");
-
         match provider.to_lowercase().as_str() {
-            "virtualbox" => ensure_virtualbox_hostonly_adapter(ip, nm),
-            "qemu" | "libvirt" => {
-                let host_ip = calculate_host_ip(ip);
-                ensure_qemu_private_network("migratory_private", &host_ip, nm)
-            }
-            "hyperv" | "hyper-v" => ensure_hyperv_internal_switch("Migratory_Private"),
+            "virtualbox" => vbox_fn(ip, nm),
+            "qemu" | "libvirt" => qemu_fn("migratory_private", &calculate_host_ip(ip), nm),
+            "hyperv" | "hyper-v" => hyperv_fn("Migratory_Private"),
             _ => Ok("private_net".to_string()),
         }
     } else {
-        Err(MigratoryError::Validation(
-            "Expected PrivateNetwork config".to_string(),
-        ))
+        let msg = "Expected PrivateNetwork config".to_string();
+        Err(MigratoryError::Validation(msg))
     }
 }
 
@@ -517,13 +579,6 @@ pub fn generate_guest_network_script(configs: &[NetworkConfig]) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
@@ -556,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn test_port_collision_check() {
+    fn test_port_collision_check() -> Result<(), MigratoryError> {
         let port_cfg = NetworkConfig::ForwardedPort {
             guest: 80,
             host: 8080,
@@ -567,7 +622,7 @@ mod tests {
         let open_ports = vec![8080, 8081];
 
         // Should auto-correct to 8082
-        let res = check_forwarded_port(&port_cfg, &open_ports).expect("operation should succeed");
+        let res = check_forwarded_port(&port_cfg, &open_ports)?;
         assert!(res.collision);
         // It might be different if actual system port 8082 is in use, but usually it's free.
         assert!(res.corrected_host_port >= 8082);
@@ -590,8 +645,7 @@ mod tests {
             protocol: None,
             host_ip: None,
         };
-        let res_no_collide =
-            check_forwarded_port(&port_cfg_no_collide, &[]).expect("operation should succeed");
+        let res_no_collide = check_forwarded_port(&port_cfg_no_collide, &[])?;
         assert!(!res_no_collide.collision);
         assert_eq!(res_no_collide.corrected_host_port, 45000);
 
@@ -603,6 +657,7 @@ mod tests {
             host_ip: None,
         };
         assert!(check_forwarded_port(&max_net, &[65535]).is_err());
+        Ok(())
     }
 
     #[test]
@@ -627,21 +682,9 @@ mod tests {
         assert!(configure_public_network(&pub_net, &host_interfaces, None).is_err());
     }
 
+    /// Mock UI that selects the first choice for bridging tests.
     struct MockUi;
     impl crate::ui::Ui for MockUi {
-        fn info(&self, _target: &str, _msg: &str) {}
-        fn success(&self, _target: &str, _msg: &str) {}
-        fn warn(&self, _target: &str, _msg: &str) {}
-        fn error(&self, _target: &str, _msg: &str) {}
-        fn detail(&self, _target: &str, _msg: &str) {}
-        fn create_progress(
-            &self,
-            _target: &str,
-            _total: u64,
-            _msg: &str,
-        ) -> indicatif::ProgressBar {
-            indicatif::ProgressBar::hidden()
-        }
         fn prompt_choice(
             &self,
             _header: &str,
@@ -652,21 +695,9 @@ mod tests {
         }
     }
 
+    /// Mock UI that fails `prompt_choice` to simulate user cancellation.
     struct MockFailingUi;
     impl crate::ui::Ui for MockFailingUi {
-        fn info(&self, _target: &str, _msg: &str) {}
-        fn success(&self, _target: &str, _msg: &str) {}
-        fn warn(&self, _target: &str, _msg: &str) {}
-        fn error(&self, _target: &str, _msg: &str) {}
-        fn detail(&self, _target: &str, _msg: &str) {}
-        fn create_progress(
-            &self,
-            _target: &str,
-            _total: u64,
-            _msg: &str,
-        ) -> indicatif::ProgressBar {
-            indicatif::ProgressBar::hidden()
-        }
         fn prompt_choice(
             &self,
             _header: &str,
@@ -678,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_network_ui_prompt() {
+    fn test_network_ui_prompt() -> Result<(), MigratoryError> {
         let pub_net = NetworkConfig::PublicNetwork {
             ip: None,
             bridge: None,
@@ -687,16 +718,16 @@ mod tests {
         let mut host_interfaces = HashMap::new();
         host_interfaces.insert("eth0".to_string(), "1.2.3.4".to_string());
         let ui = MockUi;
-        let res = configure_public_network(&pub_net, &host_interfaces, Some(&ui));
-        assert!(res.is_ok());
-        assert_eq!(res.expect("operation should succeed"), "eth0");
+        let res = configure_public_network(&pub_net, &host_interfaces, Some(&ui))?;
+        assert_eq!(res, "eth0");
 
         let failing_ui = MockFailingUi;
         assert!(configure_public_network(&pub_net, &host_interfaces, Some(&failing_ui)).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_configure_networks() {
+    fn test_configure_networks() -> Result<(), MigratoryError> {
         let priv_net = NetworkConfig::PrivateNetwork {
             ip: Some("10.0.0.1".to_string()),
             netmask: None,
@@ -722,8 +753,7 @@ mod tests {
         let mut ifaces = HashMap::new();
         ifaces.insert("eth0".to_string(), "Ethernet".to_string());
 
-        let res =
-            configure_public_network(&pub_net, &ifaces, None).expect("operation should succeed");
+        let res = configure_public_network(&pub_net, &ifaces, None)?;
         assert_eq!(res, "eth0");
 
         let pub_net_no_bridge = NetworkConfig::PublicNetwork {
@@ -731,11 +761,11 @@ mod tests {
             bridge: None,
             use_dhcp_assigned_default_route: false,
         };
-        let res2 = configure_public_network(&pub_net_no_bridge, &ifaces, None)
-            .expect("operation should succeed");
+        let res2 = configure_public_network(&pub_net_no_bridge, &ifaces, None)?;
         assert_eq!(res2, "eth0");
 
         assert!(configure_public_network(&priv_net, &ifaces, None).is_err());
+        Ok(())
     }
 
     #[test]
@@ -770,13 +800,6 @@ mod tests {
 
 #[cfg(test)]
 mod extra_network_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::config::NetworkConfig;
 
@@ -803,7 +826,7 @@ mod extra_network_tests {
     }
 
     #[test]
-    fn test_check_forwarded_port_with_range() {
+    fn test_check_forwarded_port_with_range() -> Result<(), MigratoryError> {
         let config = NetworkConfig::ForwardedPort {
             guest: 22,
             host: 2222,
@@ -813,9 +836,7 @@ mod extra_network_tests {
         };
 
         // Open ports includes 2222, range allows 2223..=2225
-        let res = check_forwarded_port_with_range(&config, &[2222], Some(2223..=2225));
-        assert!(res.is_ok());
-        let val = res.expect("operation should succeed");
+        let val = check_forwarded_port_with_range(&config, &[2222], Some(2223..=2225))?;
         assert!(val.collision);
         assert_eq!(val.corrected_host_port, 2223);
 
@@ -823,12 +844,13 @@ mod extra_network_tests {
         let res_exhausted =
             check_forwarded_port_with_range(&config, &[2222, 2223], Some(2222..=2223));
         assert!(res_exhausted.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_check_forwarded_port_with_occupied_socket() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
+    fn test_check_forwarded_port_with_occupied_socket() -> Result<(), MigratoryError> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
 
         let config = NetworkConfig::ForwardedPort {
             guest: 80,
@@ -839,27 +861,20 @@ mod extra_network_tests {
         };
 
         // 1. open_ports is empty, so is_port_in_use(port) detects collision
-        let res = check_forwarded_port_with_range(&config, &[], None);
-        assert!(res.is_ok());
-        let val = res.expect("operation should succeed");
+        let val = check_forwarded_port_with_range(&config, &[], None)?;
         assert!(val.collision);
         assert!(val.corrected_host_port != port);
 
         // 2. usable range containing occupied port
-        let res_range =
-            check_forwarded_port_with_range(&config, &[], Some(port..=port.saturating_add(2)));
-        assert!(res_range.is_ok());
-        let val_range = res_range.expect("operation should succeed");
+        let val_range =
+            check_forwarded_port_with_range(&config, &[], Some(port..=port.saturating_add(2)))?;
         assert!(val_range.collision);
         assert!(val_range.corrected_host_port != port);
+        Ok(())
     }
 
     #[test]
-    fn test_private_network_helpers_and_providers() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
+    fn test_private_network_helpers_and_providers() -> Result<(), MigratoryError> {
         // 1. calculate_host_ip
         assert_eq!(calculate_host_ip("192.168.56.10"), "192.168.56.1");
         assert_eq!(calculate_host_ip("10.0.0.99"), "10.0.0.1");
@@ -923,55 +938,85 @@ NetworkMask:     255.255.255.0
         };
         let empty_interfaces = HashMap::new();
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOX_HOSTONLY", "vboxnet0");
-            std::env::set_var("MIGRATORY_TEST_MOCK_QEMU_NET", "migratory_private");
-            std::env::set_var("MIGRATORY_TEST_MOCK_HYPERV_SWITCH", "Migratory_Private");
-        }
+        let ok_vbox = |_: &str, _: &str| Ok("vboxnet0".to_string());
+        let ok_qemu = |_: &str, _: &str, _: &str| Ok("migratory_private".to_string());
+        let ok_hyperv = |_: &str| Ok("Migratory_Private".to_string());
+        let err_vbox = |_: &str, _: &str| Err(MigratoryError::Generic("err".to_string()));
+        let err_qemu = |_: &str, _: &str, _: &str| Err(MigratoryError::Generic("err".to_string()));
+        let err_hyperv = |_: &str| Err(MigratoryError::Generic("err".to_string()));
 
         assert_eq!(
-            configure_private_network_for_provider(&priv_cfg, "virtualbox", &empty_interfaces)
-                .expect("vbox should succeed"),
+            configure_private_network_for_provider_with(
+                &priv_cfg,
+                "virtualbox",
+                &empty_interfaces,
+                ok_vbox,
+                ok_qemu,
+                ok_hyperv,
+            )?,
             "vboxnet0"
         );
         assert_eq!(
-            configure_private_network_for_provider(&priv_cfg, "qemu", &empty_interfaces)
-                .expect("qemu should succeed"),
+            configure_private_network_for_provider_with(
+                &priv_cfg,
+                "qemu",
+                &empty_interfaces,
+                ok_vbox,
+                ok_qemu,
+                ok_hyperv,
+            )?,
             "migratory_private"
         );
         assert_eq!(
-            configure_private_network_for_provider(&priv_cfg, "hyperv", &empty_interfaces)
-                .expect("hyperv should succeed"),
+            configure_private_network_for_provider_with(
+                &priv_cfg,
+                "hyperv",
+                &empty_interfaces,
+                ok_vbox,
+                ok_qemu,
+                ok_hyperv,
+            )?,
             "Migratory_Private"
         );
         assert_eq!(
-            configure_private_network_for_provider(&priv_cfg, "docker", &empty_interfaces)
-                .expect("docker should succeed"),
+            configure_private_network_for_provider(&priv_cfg, "docker", &empty_interfaces)?,
             "private_net"
         );
 
         // Error branches
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOX_HOSTONLY", "error");
-            std::env::set_var("MIGRATORY_TEST_MOCK_QEMU_NET", "error");
-            std::env::set_var("MIGRATORY_TEST_MOCK_HYPERV_SWITCH", "error");
-        }
         assert!(
-            configure_private_network_for_provider(&priv_cfg, "virtualbox", &empty_interfaces)
-                .is_err()
+            configure_private_network_for_provider_with(
+                &priv_cfg,
+                "virtualbox",
+                &empty_interfaces,
+                err_vbox,
+                ok_qemu,
+                ok_hyperv,
+            )
+            .is_err()
         );
         assert!(
-            configure_private_network_for_provider(&priv_cfg, "qemu", &empty_interfaces).is_err()
+            configure_private_network_for_provider_with(
+                &priv_cfg,
+                "qemu",
+                &empty_interfaces,
+                ok_vbox,
+                err_qemu,
+                ok_hyperv,
+            )
+            .is_err()
         );
         assert!(
-            configure_private_network_for_provider(&priv_cfg, "hyperv", &empty_interfaces).is_err()
+            configure_private_network_for_provider_with(
+                &priv_cfg,
+                "hyperv",
+                &empty_interfaces,
+                ok_vbox,
+                ok_qemu,
+                err_hyperv,
+            )
+            .is_err()
         );
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOX_HOSTONLY");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_QEMU_NET");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_HYPERV_SWITCH");
-        }
 
         // Empty IP validation
         let empty_ip_cfg = NetworkConfig::PrivateNetwork {
@@ -984,5 +1029,91 @@ NetworkMask:     255.255.255.0
             configure_private_network_for_provider(&empty_ip_cfg, "virtualbox", &empty_interfaces)
                 .is_err()
         );
+        assert!(
+            configure_private_network_for_provider_with(
+                &empty_ip_cfg,
+                "virtualbox",
+                &empty_interfaces,
+                ok_vbox,
+                ok_qemu,
+                ok_hyperv,
+            )
+            .is_err()
+        );
+
+        // 5. Direct unit tests for ensure_virtualbox_hostonly_adapter_with
+        let matched =
+            ensure_virtualbox_hostonly_adapter_with("192.168.56.10", "255.255.255.0", |_| {
+                Ok("Name: vboxnet0\nIPAddress: 192.168.56.1\n".to_string())
+            })?;
+        assert_eq!(matched, "vboxnet0");
+
+        let created =
+            ensure_virtualbox_hostonly_adapter_with("192.168.56.10", "255.255.255.0", |args| {
+                if args.first() == Some(&"list") {
+                    Ok(String::new())
+                } else if args.first() == Some(&"hostonlyif") && args.get(1) == Some(&"create") {
+                    Ok("Interface 'vboxnet5' was successfully created".to_string())
+                } else {
+                    Ok(String::new())
+                }
+            })?;
+        assert_eq!(created, "vboxnet5");
+
+        let fallback =
+            ensure_virtualbox_hostonly_adapter_with("192.168.56.10", "255.255.255.0", |_| {
+                Err(MigratoryError::Generic("err".to_string()))
+            })?;
+        assert_eq!(fallback, "vboxnet0");
+
+        // 6. Direct unit tests for ensure_qemu_private_network_with & ensure_qemu_private_network
+        let existing_qemu = ensure_qemu_private_network_with(
+            "migratory_private",
+            "192.168.56.1",
+            "255.255.255.0",
+            |args| {
+                if args.first() == Some(&"net-list") {
+                    Ok("migratory_private   inactive   yes\n".to_string())
+                } else {
+                    Ok(String::new())
+                }
+            },
+        )?;
+        assert_eq!(existing_qemu, "migratory_private");
+
+        let new_qemu = ensure_qemu_private_network_with(
+            "migratory_private",
+            "192.168.56.1",
+            "255.255.255.0",
+            |_| Ok("default   active   yes\n".to_string()),
+        )?;
+        assert_eq!(new_qemu, "migratory_private");
+        let _ = ensure_qemu_private_network("migratory_private", "192.168.56.1", "255.255.255.0");
+
+        // 7. Direct unit tests for ensure_hyperv_internal_switch_with & ensure_hyperv_internal_switch
+        let sw = ensure_hyperv_internal_switch_with("Migratory_Private", |_| Ok(String::new()))?;
+        assert_eq!(sw, "Migratory_Private");
+        let _ = ensure_hyperv_internal_switch("Migratory_Private");
+        let _ = configure_private_network_for_provider(
+            &NetworkConfig::PrivateNetwork {
+                ip: Some("192.168.56.10".to_string()),
+                netmask: None,
+                dhcp: false,
+                virtualbox_intnet: None,
+            },
+            "hyperv",
+            &empty_interfaces,
+        );
+        let _ = configure_private_network_for_provider(
+            &NetworkConfig::PrivateNetwork {
+                ip: Some("192.168.56.10".to_string()),
+                netmask: None,
+                dhcp: false,
+                virtualbox_intnet: None,
+            },
+            "qemu",
+            &empty_interfaces,
+        );
+        Ok(())
     }
 }

@@ -1,34 +1,31 @@
 //! Vagrant Cloud API client.
 //!
-//! This module provides a simple client for interacting with the Vagrant Cloud API,
-//! primarily to fetch metadata about boxes.
+//! This module provides a client for interacting with the Vagrant Cloud API
+//! to fetch box metadata, authenticate users, and manage boxes, versions, and providers.
 
 use crate::error::MigratoryError;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-/// Executes the `create_default_client` function.
-///
-/// # Arguments
-///
-/// * None
+/// Creates the default blocking HTTP client for Vagrant Cloud API requests.
 ///
 /// # Returns
 ///
-/// Returns `Client`.
+/// Returns a configured [`Client`] instance.
 fn create_default_client() -> Client {
-    Client::builder().build().unwrap_or_else(|_| Client::new())
+    Client::new()
 }
 
-/// Vagrant Cloud client.
+/// Vagrant Cloud API client.
 ///
-/// This struct holds the underlying HTTP client and the base URL for the API.
+/// Holds the underlying HTTP client, API base URL, and optional bearer token.
+#[derive(Clone)]
 pub struct CloudClient {
-    /// Represents the `client` field.
+    /// Blocking HTTP client used to issue API requests.
     client: Client,
-    /// Represents the `base_url` field.
+    /// Base URL for the Vagrant Cloud API (e.g., `https://app.vagrantup.com/api/v2`).
     base_url: String,
-    /// Represents the `token` field.
+    /// Optional authentication bearer token for authorized API endpoints.
     token: Option<String>,
 }
 
@@ -37,13 +34,13 @@ pub struct CloudClient {
 /// Represents the high-level metadata of a box in the catalog.
 #[derive(Deserialize, Debug)]
 pub struct BoxMetadata {
-    /// Description of the box.
+    /// Full Markdown description of the box.
     pub description_markdown: String,
-    /// Short description.
+    /// Short summary description of the box.
     pub short_description: String,
-    /// Box name.
+    /// Fully qualified box name (e.g., `hashicorp/bionic64`).
     pub name: String,
-    /// List of versions.
+    /// List of available versions for this box.
     pub versions: Vec<BoxVersion>,
 }
 
@@ -52,64 +49,128 @@ pub struct BoxMetadata {
 /// Represents a specific version string and its associated providers.
 #[derive(Deserialize, Debug)]
 pub struct BoxVersion {
-    /// Version string.
+    /// Semantic version string (e.g., `1.0.0`).
     pub version: String,
-    /// List of providers.
+    /// List of providers available for this version.
     pub providers: Vec<BoxProvider>,
 }
 
 /// A provider for a box version.
 ///
-/// Represents an available provider (like virtualbox, qemu) and its download URL.
+/// Represents an available provider (like `virtualbox` or `qemu`) and its download URL.
 #[derive(Deserialize, Debug)]
 pub struct BoxProvider {
-    /// Provider name.
+    /// Provider identifier (e.g., `virtualbox`).
     pub name: String,
-    /// Download URL.
+    /// Download URL for the `.box` artifact.
     pub url: String,
-    /// Optional checksum.
+    /// Optional cryptographic checksum of the `.box` artifact.
     pub checksum: Option<String>,
-    /// Optional checksum type (e.g. "sha256").
+    /// Optional checksum algorithm name (e.g., `sha256`).
     pub checksum_type: Option<String>,
 }
 
-impl CloudClient {
-    /// Creates a new client.
-    ///
-    /// Initializes an HTTP client configured for Vagrant Cloud API interactions.
+/// Configuration for constructing a [`CloudClient`].
+#[derive(Debug, Clone)]
+pub struct CloudClientConfig {
+    /// Base URL for the Vagrant Cloud API.
+    pub base_url: String,
+    /// Optional authentication bearer token.
+    pub token: Option<String>,
+}
+
+impl CloudClientConfig {
+    /// Resolves configuration from environment variables (`VAGRANT_CLOUD_URL`, `VAGRANT_CLOUD_TOKEN`, `VAGRANT_HOME`).
     ///
     /// # Returns
     ///
-    /// Returns a new instance of `CloudClient` on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `MigratoryError` if the underlying HTTP client cannot be built.
-    pub fn new() -> Result<Self, MigratoryError> {
-        if std::env::var("MIGRATORY_TEST_MOCK_CLIENT_ERROR").is_ok() {
-            return Err(MigratoryError::Generic("mock client error".to_string()));
-        }
-        let client = create_default_client();
-        let base_url = std::env::var("VAGRANT_CLOUD_URL")
-            .unwrap_or_else(|_| "https://app.vagrantup.com/api/v2".to_string());
+    /// Returns a [`CloudClientConfig`] populated from the environment.
+    pub fn from_env() -> Self {
+        Self::from_parts(
+            std::env::var("VAGRANT_CLOUD_URL").ok().as_deref(),
+            std::env::var("VAGRANT_CLOUD_TOKEN").ok().as_deref(),
+            std::env::var("VAGRANT_HOME").ok().as_deref(),
+        )
+    }
 
-        let token = std::env::var("VAGRANT_CLOUD_TOKEN").ok().or_else(|| {
-            let home_dir =
-                std::env::var("VAGRANT_HOME").unwrap_or_else(|_| ".vagrant.d".to_string());
-            let token_path = std::path::Path::new(&home_dir).join("data").join("token");
+    /// Resolves configuration from explicit optional environment variable strings.
+    ///
+    /// # Arguments
+    ///
+    /// * `cloud_url` - Optional `VAGRANT_CLOUD_URL` value.
+    /// * `cloud_token` - Optional `VAGRANT_CLOUD_TOKEN` value.
+    /// * `vagrant_home` - Optional `VAGRANT_HOME` directory path.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`CloudClientConfig`] populated from the provided values or defaults.
+    pub fn from_parts(
+        cloud_url: Option<&str>,
+        cloud_token: Option<&str>,
+        vagrant_home: Option<&str>,
+    ) -> Self {
+        let base_url = cloud_url
+            .unwrap_or("https://app.vagrantup.com/api/v2")
+            .to_string();
+
+        let token = cloud_token.map(String::from).or_else(|| {
+            let home_dir = vagrant_home.unwrap_or(".vagrant.d");
+            let token_path = std::path::Path::new(home_dir).join("data").join("token");
             std::fs::read_to_string(&token_path)
                 .ok()
                 .map(|s| s.trim().to_string())
         });
 
+        Self { base_url, token }
+    }
+}
+
+impl CloudClient {
+    /// Creates a new `CloudClient` using environment-resolved configuration.
+    ///
+    /// Initializes an HTTP client configured for Vagrant Cloud API interactions,
+    /// reading `VAGRANT_CLOUD_URL` and `VAGRANT_CLOUD_TOKEN` (or `~/.vagrant.d/data/token`)
+    /// when available.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new instance of [`CloudClient`] on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the underlying HTTP client cannot be initialized.
+    pub fn new() -> Result<Self, MigratoryError> {
+        Self::with_config(CloudClientConfig::from_env())
+    }
+
+    /// Creates a new `CloudClient` from an explicit [`CloudClientConfig`].
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Explicit client configuration.
+    ///
+    /// # Returns
+    ///
+    /// Returns a configured [`CloudClient`] on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MigratoryError::Validation`] if `config.base_url` is empty.
+    pub fn with_config(config: CloudClientConfig) -> Result<Self, MigratoryError> {
+        if config.base_url.trim().is_empty() {
+            return Err(MigratoryError::Validation(
+                "Cloud API base_url cannot be empty".to_string(),
+            ));
+        }
+        let client = create_default_client();
         Ok(Self {
             client,
-            base_url,
-            token,
+            base_url: config.base_url,
+            token: config.token,
         })
     }
 
-    /// Fetches metadata for a given box tag (e.g. "ubuntu/jammy64").
+    /// Fetches metadata for a given box tag (e.g., `"ubuntu/jammy64"`).
     ///
     /// # Arguments
     ///
@@ -117,11 +178,11 @@ impl CloudClient {
     ///
     /// # Returns
     ///
-    /// Returns the parsed `BoxMetadata` on success.
+    /// Returns the parsed [`BoxMetadata`] on success.
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if the HTTP request fails, returns a non-success status,
+    /// Returns a [`MigratoryError`] if the HTTP request fails, returns a non-success status,
     /// or if the JSON response cannot be parsed.
     pub fn fetch_metadata(&self, tag: &str) -> Result<BoxMetadata, MigratoryError> {
         let base = self.base_url.trim_end_matches('/');
@@ -143,7 +204,21 @@ impl CloudClient {
         Ok(metadata)
     }
 
-    /// Authenticates with Vagrant Cloud using basic auth and returns an access token.
+    /// Authenticates with Vagrant Cloud using HTTP Basic authentication and returns an access token.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The Vagrant Cloud username or email.
+    /// * `password` - The account password.
+    /// * `description` - Optional description for the generated token.
+    ///
+    /// # Returns
+    ///
+    /// Returns the newly issued authentication token string on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the request fails, credentials are rejected, or the response is invalid.
     pub fn authenticate(
         &self,
         username: &str,
@@ -153,12 +228,16 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/authenticate", base);
 
+        /// Token metadata payload nested inside an authentication request.
         #[derive(Serialize)]
         struct TokenRequest<'a> {
+            /// Human-readable description of the token.
             description: &'a str,
         }
+        /// Top-level JSON body for token creation requests.
         #[derive(Serialize)]
         struct AuthRequest<'a> {
+            /// Nested token request parameters.
             token: TokenRequest<'a>,
         }
 
@@ -167,8 +246,10 @@ impl CloudClient {
             token: TokenRequest { description: desc },
         };
 
+        /// JSON response returned from the `/authenticate` endpoint.
         #[derive(Deserialize)]
         struct AuthResponse {
+            /// Newly created bearer token string.
             token: String,
         }
 
@@ -195,6 +276,14 @@ impl CloudClient {
     }
 
     /// Fetches the currently authenticated user's username.
+    ///
+    /// # Returns
+    ///
+    /// Returns the authenticated username string on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if no token is configured, the request fails, or the token is invalid.
     pub fn whoami(&self) -> Result<String, MigratoryError> {
         let token = match &self.token {
             Some(t) if !t.is_empty() => t,
@@ -208,12 +297,16 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/authenticate", base);
 
+        /// Nested user profile object in authentication verification responses.
         #[derive(Deserialize)]
         struct UserObj {
+            /// Account username.
             username: String,
         }
+        /// Response payload from `GET /authenticate`.
         #[derive(Deserialize)]
         struct AuthResponse {
+            /// Authenticated user object.
             user: UserObj,
         }
 
@@ -239,7 +332,15 @@ impl CloudClient {
         Ok(parsed.user.username)
     }
 
-    /// Revokes the current authentication token.
+    /// Revokes the current authentication token on Vagrant Cloud.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success or when no token is present.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the HTTP revocation request fails.
     pub fn delete_token(&self) -> Result<(), MigratoryError> {
         let token = match &self.token {
             Some(t) if !t.is_empty() => t,
@@ -269,6 +370,20 @@ impl CloudClient {
     }
 
     /// Creates a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Box tag (e.g., `"user/box"`).
+    /// * `description` - Optional full description.
+    /// * `short_description` - Optional short summary description.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn create_box(
         &self,
         name: &str,
@@ -278,16 +393,22 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes", base);
 
+        /// Inner box creation parameters.
         #[derive(Serialize)]
         struct BoxCreate<'a> {
+            /// Name of the box to create.
             name: &'a str,
+            /// Optional full description.
             #[serde(skip_serializing_if = "Option::is_none")]
             description: Option<&'a str>,
+            /// Optional short description.
             #[serde(skip_serializing_if = "Option::is_none")]
             short_description: Option<&'a str>,
         }
+        /// Top-level JSON body for box creation.
         #[derive(Serialize)]
         struct CreateBoxRequest<'a> {
+            /// Box creation details.
             #[serde(rename = "box")]
             box_field: BoxCreate<'a>,
         }
@@ -317,6 +438,18 @@ impl CloudClient {
     }
 
     /// Deletes a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Box tag to delete (e.g., `"user/box"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn delete_box(&self, name: &str) -> Result<(), MigratoryError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}", base, name);
@@ -335,6 +468,20 @@ impl CloudClient {
     }
 
     /// Updates a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Box tag to update (e.g., `"user/box"`).
+    /// * `description` - Optional updated full description.
+    /// * `short_description` - Optional updated short summary description.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn update_box(
         &self,
         name: &str,
@@ -344,15 +491,20 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}", base, name);
 
+        /// Inner box update parameters.
         #[derive(Serialize)]
         struct BoxUpdate<'a> {
+            /// Updated full description.
             #[serde(skip_serializing_if = "Option::is_none")]
             description: Option<&'a str>,
+            /// Updated short description.
             #[serde(skip_serializing_if = "Option::is_none")]
             short_description: Option<&'a str>,
         }
+        /// Top-level JSON body for box update requests.
         #[derive(Serialize)]
         struct UpdateBoxRequest<'a> {
+            /// Box update details.
             #[serde(rename = "box")]
             box_field: BoxUpdate<'a>,
         }
@@ -381,6 +533,20 @@ impl CloudClient {
     }
 
     /// Creates a version for a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string to create (e.g., `"1.0.0"`).
+    /// * `description` - Optional version release notes / description.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn create_version(
         &self,
         box_name: &str,
@@ -390,14 +556,19 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions", base, box_name);
 
+        /// Inner version creation parameters.
         #[derive(Serialize)]
         struct VersionCreate<'a> {
+            /// Version identifier string.
             version: &'a str,
+            /// Optional version description.
             #[serde(skip_serializing_if = "Option::is_none")]
             description: Option<&'a str>,
         }
+        /// Top-level JSON body for version creation requests.
         #[derive(Serialize)]
         struct CreateVersionRequest<'a> {
+            /// Version creation details.
             version: VersionCreate<'a>,
         }
 
@@ -425,6 +596,19 @@ impl CloudClient {
     }
 
     /// Deletes a version for a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string to delete (e.g., `"1.0.0"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn delete_version(&self, box_name: &str, version: &str) -> Result<(), MigratoryError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}", base, box_name, version);
@@ -444,6 +628,19 @@ impl CloudClient {
     }
 
     /// Revokes a version for a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string to revoke (e.g., `"1.0.0"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn revoke_version(&self, box_name: &str, version: &str) -> Result<(), MigratoryError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}/revoke", base, box_name, version);
@@ -463,6 +660,20 @@ impl CloudClient {
     }
 
     /// Updates a version for a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string to update (e.g., `"1.0.0"`).
+    /// * `description` - Optional updated version description.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn update_version(
         &self,
         box_name: &str,
@@ -472,13 +683,17 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}", base, box_name, version);
 
+        /// Inner version update parameters.
         #[derive(Serialize)]
         struct VersionUpdate<'a> {
+            /// Updated version description.
             #[serde(skip_serializing_if = "Option::is_none")]
             description: Option<&'a str>,
         }
+        /// Top-level JSON body for version update requests.
         #[derive(Serialize)]
         struct UpdateVersionRequest<'a> {
+            /// Version update details.
             version: VersionUpdate<'a>,
         }
 
@@ -505,10 +720,10 @@ impl CloudClient {
     ///
     /// # Arguments
     ///
-    /// * `box_name` - Name of the box (e.g., "hashicorp/bionic64").
+    /// * `box_name` - Name of the box (e.g., `"hashicorp/bionic64"`).
     /// * `version` - Version of the box.
-    /// * `provider` - Provider name (e.g., "virtualbox").
-    /// * `architecture` - Optional target architecture (e.g., "amd64", "arm64").
+    /// * `provider` - Provider name (e.g., `"virtualbox"`).
+    /// * `architecture` - Optional target architecture (e.g., `"amd64"`, `"arm64"`).
     /// * `default_architecture` - Optional flag marking this provider as default architecture.
     ///
     /// # Returns
@@ -517,7 +732,7 @@ impl CloudClient {
     ///
     /// # Errors
     ///
-    /// Returns a `MigratoryError` if the provider cannot be created.
+    /// Returns a [`MigratoryError`] if the provider cannot be created.
     pub fn create_provider(
         &self,
         box_name: &str,
@@ -529,16 +744,22 @@ impl CloudClient {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}/providers", base, box_name, version);
 
+        /// Inner provider creation parameters.
         #[derive(Serialize)]
         struct ProviderCreate<'a> {
+            /// Provider identifier.
             name: &'a str,
+            /// Optional target CPU architecture.
             #[serde(skip_serializing_if = "Option::is_none")]
             architecture: Option<&'a str>,
+            /// Whether this architecture is the default for the provider.
             #[serde(skip_serializing_if = "Option::is_none")]
             default_architecture: Option<bool>,
         }
+        /// Top-level JSON body for provider creation requests.
         #[derive(Serialize)]
         struct CreateProviderRequest<'a> {
+            /// Provider creation details.
             provider: ProviderCreate<'a>,
         }
 
@@ -567,6 +788,22 @@ impl CloudClient {
     }
 
     /// Updates a provider for a version on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string (e.g., `"1.0.0"`).
+    /// * `provider` - Provider name (e.g., `"virtualbox"`).
+    /// * `checksum` - Optional cryptographic checksum value.
+    /// * `checksum_type` - Optional checksum algorithm (e.g., `"sha256"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn update_provider(
         &self,
         box_name: &str,
@@ -581,15 +818,20 @@ impl CloudClient {
             base, box_name, version, provider
         );
 
+        /// Inner provider update parameters.
         #[derive(Serialize)]
         struct ProviderUpdate<'a> {
+            /// Updated checksum string.
             #[serde(skip_serializing_if = "Option::is_none")]
             checksum: Option<&'a str>,
+            /// Updated checksum algorithm type.
             #[serde(skip_serializing_if = "Option::is_none")]
             checksum_type: Option<&'a str>,
         }
+        /// Top-level JSON body for provider update requests.
         #[derive(Serialize)]
         struct UpdateProviderRequest<'a> {
+            /// Provider update details.
             provider: ProviderUpdate<'a>,
         }
 
@@ -616,6 +858,20 @@ impl CloudClient {
     }
 
     /// Deletes a provider from a version on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string (e.g., `"1.0.0"`).
+    /// * `provider` - Provider name to delete (e.g., `"virtualbox"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn delete_provider(
         &self,
         box_name: &str,
@@ -642,7 +898,21 @@ impl CloudClient {
         Ok(())
     }
 
-    /// Gets the upload URL for a provider on Vagrant Cloud.
+    /// Gets the pre-signed upload URL for a provider artifact on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string (e.g., `"1.0.0"`).
+    /// * `provider` - Provider name (e.g., `"virtualbox"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns the upload target URL string on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns invalid JSON.
     pub fn get_upload_url(
         &self,
         box_name: &str,
@@ -655,8 +925,10 @@ impl CloudClient {
             base, box_name, version, provider
         );
 
+        /// JSON response containing the pre-signed upload URL.
         #[derive(Deserialize)]
         struct UploadResponse {
+            /// Target URL to `PUT` the box file to.
             upload_path: String,
         }
 
@@ -678,7 +950,20 @@ impl CloudClient {
         Ok(upload_resp.upload_path)
     }
 
-    /// Uploads a file to Vagrant Cloud using the provided upload path.
+    /// Uploads a `.box` file to Vagrant Cloud using the provided upload URL.
+    ///
+    /// # Arguments
+    ///
+    /// * `upload_path` - The pre-signed upload URL obtained from [`CloudClient::get_upload_url`].
+    /// * `file_path` - Local filesystem path to the `.box` archive to upload.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the local file cannot be opened or the HTTP `PUT` fails.
     pub fn upload_file(
         &self,
         upload_path: &str,
@@ -702,6 +987,19 @@ impl CloudClient {
     }
 
     /// Releases a version for a box on Vagrant Cloud.
+    ///
+    /// # Arguments
+    ///
+    /// * `box_name` - Box tag (e.g., `"user/box"`).
+    /// * `version` - Version string to mark as released (e.g., `"1.0.0"`).
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the API request fails or returns a non-success status.
     pub fn release_version(&self, box_name: &str, version: &str) -> Result<(), MigratoryError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/boxes/{}/versions/{}/release", base, box_name, version);
@@ -720,13 +1018,27 @@ impl CloudClient {
         Ok(())
     }
 
-    /// Searches for boxes on Vagrant Cloud.
+    /// Searches for boxes on Vagrant Cloud matching a query string.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - Search query term.
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of matching [`BoxMetadata`] entries on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the HTTP request fails or the JSON response is invalid.
     pub fn search_boxes(&self, query: &str) -> Result<Vec<BoxMetadata>, MigratoryError> {
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/search?q={}", base, query);
 
+        /// JSON response wrapper for box search results.
         #[derive(Deserialize)]
         struct SearchResponse {
+            /// List of matching boxes.
             boxes: Vec<BoxMetadata>,
         }
 
@@ -748,7 +1060,19 @@ impl CloudClient {
         Ok(search_resp.boxes)
     }
 
-    /// Helper for testing to inject a different base URL.
+    /// Helper for testing to inject a custom base URL.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_url` - Custom mock server base URL.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`CloudClient`] configured with `base_url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if initialization fails.
     #[cfg(test)]
     fn with_base_url(base_url: String) -> Result<Self, MigratoryError> {
         let client = create_default_client();
@@ -762,18 +1086,11 @@ impl CloudClient {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use httpmock::prelude::*;
 
     #[test]
-    fn test_whoami_json_error() {
+    fn test_whoami_json_error() -> Result<(), MigratoryError> {
         let server = MockServer::start();
 
         let mock_err = server.mock(|when, then| {
@@ -781,15 +1098,16 @@ mod tests {
             then.status(200).body("not json");
         });
 
-        let mut client = CloudClient::with_base_url(server.url("/api/v1")).unwrap();
+        let mut client = CloudClient::with_base_url(server.url("/api/v1"))?;
         client.token = Some("valid_token".to_string());
 
         assert!(client.whoami().is_err());
         mock_err.assert_calls(1);
+        Ok(())
     }
 
     #[test]
-    fn test_whoami() {
+    fn test_whoami() -> Result<(), MigratoryError> {
         let server = MockServer::start();
 
         let mock_ok = server.mock(|when, then| {
@@ -801,10 +1119,10 @@ mod tests {
             }));
         });
 
-        let mut client = CloudClient::with_base_url(server.url("/api/v1")).unwrap();
+        let mut client = CloudClient::with_base_url(server.url("/api/v1"))?;
         client.token = Some("valid_token".to_string());
 
-        let user = client.whoami().unwrap();
+        let user = client.whoami()?;
         assert_eq!(user, "test_user");
         mock_ok.assert_calls(1);
 
@@ -813,18 +1131,19 @@ mod tests {
             then.status(401);
         });
 
-        let mut client_err = CloudClient::with_base_url(server.url("/api/v1_err")).unwrap();
+        let mut client_err = CloudClient::with_base_url(server.url("/api/v1_err"))?;
         client_err.token = Some("invalid_token".to_string());
 
         assert!(client_err.whoami().is_err());
         mock_err.assert_calls(1);
 
-        let client_no_token = CloudClient::with_base_url(server.url("/api/v1")).unwrap();
+        let client_no_token = CloudClient::with_base_url(server.url("/api/v1"))?;
         assert!(client_no_token.whoami().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_delete_token() {
+    fn test_delete_token() -> Result<(), MigratoryError> {
         let server = MockServer::start();
 
         let mock_ok = server.mock(|when, then| {
@@ -832,7 +1151,7 @@ mod tests {
             then.status(200);
         });
 
-        let mut client = CloudClient::with_base_url(server.url("/api/v1")).unwrap();
+        let mut client = CloudClient::with_base_url(server.url("/api/v1"))?;
         client.token = Some("valid_token".to_string());
 
         assert!(client.delete_token().is_ok());
@@ -843,7 +1162,7 @@ mod tests {
             then.status(404);
         });
 
-        let mut client_404 = CloudClient::with_base_url(server.url("/api/v1_404")).unwrap();
+        let mut client_404 = CloudClient::with_base_url(server.url("/api/v1_404"))?;
         client_404.token = Some("token_404".to_string());
 
         assert!(client_404.delete_token().is_ok());
@@ -854,43 +1173,44 @@ mod tests {
             then.status(500);
         });
 
-        let mut client_err = CloudClient::with_base_url(server.url("/api/v1_err")).unwrap();
+        let mut client_err = CloudClient::with_base_url(server.url("/api/v1_err"))?;
         client_err.token = Some("error_token".to_string());
 
         assert!(client_err.delete_token().is_err());
         mock_err.assert_calls(1);
 
-        let client_no_token = CloudClient::with_base_url(server.url("/api/v1")).unwrap();
+        let client_no_token = CloudClient::with_base_url(server.url("/api/v1"))?;
         assert!(client_no_token.delete_token().is_ok());
+        Ok(())
     }
 
     #[test]
     fn test_client_init() {
-        let client = CloudClient::new();
+        let client = CloudClient::with_config(CloudClientConfig {
+            base_url: "https://app.vagrantup.com/api/v2".to_string(),
+            token: None,
+        });
         assert!(client.is_ok());
+        assert!(
+            CloudClient::with_config(CloudClientConfig {
+                base_url: String::new(),
+                token: None,
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn test_client_init_with_env() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", "http://localhost:1234");
-        }
-        let client = CloudClient::new();
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_URL");
-        }
+        let cfg = CloudClientConfig::from_parts(Some("http://localhost:1234"), None, None);
+        let client = CloudClient::with_config(cfg);
         assert!(client.is_ok());
     }
 
     #[test]
-    fn test_fetch_metadata_success() {
-        // Start a lightweight mock server.
+    fn test_fetch_metadata_success() -> Result<(), MigratoryError> {
         let server = MockServer::start();
 
-        // Create a mock on the server.
         let mock = server.mock(|when, then| {
             when.method(GET).path("/boxes/test/box");
             then.status(200).json_body(serde_json::json!({
@@ -911,11 +1231,9 @@ mod tests {
             }));
         });
 
-        let client = CloudClient::with_base_url(server.url("")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url(""))?;
 
-        let metadata = client
-            .fetch_metadata("test/box")
-            .expect("operation should succeed");
+        let metadata = client.fetch_metadata("test/box")?;
 
         assert_eq!(metadata.name, "test/box");
         assert_eq!(metadata.versions.len(), 1);
@@ -924,10 +1242,11 @@ mod tests {
         assert_eq!(metadata.versions[0].providers[0].name, "virtualbox");
 
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_fetch_metadata_not_found() {
+    fn test_fetch_metadata_not_found() -> Result<(), MigratoryError> {
         let server = MockServer::start();
 
         let mock = server.mock(|when, then| {
@@ -935,15 +1254,16 @@ mod tests {
             then.status(404);
         });
 
-        let client = CloudClient::with_base_url(server.url("")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url(""))?;
         let result = client.fetch_metadata("missing/box");
 
         assert!(result.is_err());
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_fetch_metadata_json_error() {
+    fn test_fetch_metadata_json_error() -> Result<(), MigratoryError> {
         let server = MockServer::start();
 
         let mock = server.mock(|when, then| {
@@ -951,20 +1271,21 @@ mod tests {
             then.status(200).body("not json");
         });
 
-        let client = CloudClient::with_base_url(server.url("")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url(""))?;
         let result = client.fetch_metadata("bad/box");
 
         assert!(result.is_err());
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_fetch_metadata_network_error() {
-        let client = CloudClient::with_base_url("http://127.0.0.1:0".to_string())
-            .expect("operation should succeed");
-        println!("Delete box result: {:?}", client.delete_box("user/box"));
+    fn test_fetch_metadata_network_error() -> Result<(), MigratoryError> {
+        let client = CloudClient::with_base_url("http://127.0.0.1:0".to_string())?;
+        let _ = client.delete_box("user/box");
         let result = client.fetch_metadata("test/box");
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -989,23 +1310,23 @@ mod tests {
     }
 
     #[test]
-    fn test_create_box_success_with_descriptions() {
+    fn test_create_box_success_with_descriptions() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(POST).path("/api/v1/boxes");
             then.status(200);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         let res = client.create_box("user/box", Some("desc1"), Some("desc2"));
         assert!(res.is_ok());
         mock.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_delete_box() {
+    fn test_delete_box() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock_ok = server.mock(|when, then| {
             when.method(DELETE).path("/api/v1/boxes/user/box");
@@ -1016,17 +1337,17 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(client.delete_box("user/box").is_ok());
         assert!(client.delete_box("user/box2").is_err());
         mock_ok.assert();
         mock_err.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_update_box() {
+    fn test_update_box() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(PUT).path("/api/v1/boxes/user/box");
@@ -1037,8 +1358,7 @@ mod tests {
             then.status(404);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(
             client
@@ -1048,10 +1368,11 @@ mod tests {
         assert!(client.update_box("user/box2", None, None).is_err());
         mock.assert();
         mock_err.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_create_version() {
+    fn test_create_version() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(POST).path("/api/v1/boxes/user/box/versions");
@@ -1062,8 +1383,7 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(
             client
@@ -1071,10 +1391,11 @@ mod tests {
                 .is_ok()
         );
         assert!(client.create_version("user/box2", "1.0", None).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_update_version() {
+    fn test_update_version() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(PUT).path("/api/v1/boxes/user/box/versions/1.0");
@@ -1086,8 +1407,7 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(
             client
@@ -1095,10 +1415,11 @@ mod tests {
                 .is_ok()
         );
         assert!(client.update_version("user/box2", "1.0", None).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_delete_version() {
+    fn test_delete_version() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(DELETE)
@@ -1111,15 +1432,15 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(client.delete_version("user/box", "1.0").is_ok());
         assert!(client.delete_version("user/box2", "1.0").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_release_version() {
+    fn test_release_version() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
@@ -1132,15 +1453,15 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(client.release_version("user/box", "1.0").is_ok());
         assert!(client.release_version("user/box2", "1.0").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_revoke_version() {
+    fn test_revoke_version() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
@@ -1153,15 +1474,15 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(client.revoke_version("user/box", "1.0").is_ok());
         assert!(client.revoke_version("user/box2", "1.0").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_create_provider() {
+    fn test_create_provider() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(POST)
@@ -1174,8 +1495,7 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(
             client
@@ -1197,10 +1517,11 @@ mod tests {
                 .create_provider("user/box", "1.0", "virtualbox", Some("amd64"), Some(false))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_update_provider() {
+    fn test_update_provider() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
@@ -1213,8 +1534,7 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(
             client
@@ -1226,10 +1546,11 @@ mod tests {
                 .update_provider("user/box2", "1.0", "virtualbox", None, None)
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_delete_provider() {
+    fn test_delete_provider() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(DELETE)
@@ -1242,8 +1563,7 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(
             client
@@ -1255,10 +1575,11 @@ mod tests {
                 .delete_provider("user/box2", "1.0", "virtualbox")
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_get_upload_url() {
+    fn test_get_upload_url() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(GET)
@@ -1277,8 +1598,7 @@ mod tests {
                 .body(r#"{"not_upload_path":"http://upload"}"#);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
         assert!(
             client
@@ -1295,10 +1615,11 @@ mod tests {
                 .get_upload_url("user/box3", "1.0", "virtualbox")
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_upload_file() {
+    fn test_upload_file() -> Result<(), MigratoryError> {
         use std::io::Write;
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
@@ -1310,13 +1631,10 @@ mod tests {
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
-        let mut temp_file = tempfile::NamedTempFile::new().expect("operation should succeed");
-        temp_file
-            .write_all(b"test")
-            .expect("operation should succeed");
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        temp_file.write_all(b"test")?;
 
         assert!(
             client
@@ -1328,10 +1646,11 @@ mod tests {
                 .upload_file(&server.url("/upload_err"), temp_file.path())
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_update_provider_with_checksum_type() {
+    fn test_update_provider_with_checksum_type() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(PUT)
@@ -1339,32 +1658,31 @@ mod tests {
             then.status(200);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
         assert!(
             client
                 .update_provider("user/box", "1.0", "virtualbox", None, Some("md5"))
                 .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_search_boxes_error() {
+    fn test_search_boxes_error() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_err = server.mock(|when, then| {
             when.method(GET).path("/api/v1/search");
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
         assert!(client.search_boxes("query").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_all_network_errors() {
-        let client = CloudClient::with_base_url("http://127.0.0.1:0".to_string())
-            .expect("operation should succeed");
+    fn test_all_network_errors() -> Result<(), MigratoryError> {
+        let client = CloudClient::with_base_url("http://127.0.0.1:0".to_string())?;
 
         assert!(
             client
@@ -1414,7 +1732,7 @@ mod tests {
         assert!(client.search_boxes("query").is_err());
         assert!(client.authenticate("user", "pass", None).is_err());
 
-        let temp_file = tempfile::NamedTempFile::new().expect("operation should succeed");
+        let temp_file = tempfile::NamedTempFile::new()?;
         assert!(
             client
                 .upload_file("http://127.0.0.1:0/upload", temp_file.path())
@@ -1429,59 +1747,58 @@ mod tests {
                 )
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_authenticate_success() {
+    fn test_authenticate_success() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock_ok = server.mock(|when, then| {
             when.method(POST)
                 .path("/api/v1/authenticate")
-                .header("Authorization", "Basic dXNlcm5hbWU6cGFzc3dvcmQ="); // base64 for username:password
+                .header("Authorization", "Basic dXNlcm5hbWU6cGFzc3dvcmQ=");
             then.status(200).json_body(serde_json::json!({
                 "token": "test_token"
             }));
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
-        let token = client
-            .authenticate("username", "password", Some("my token"))
-            .expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
+        let token = client.authenticate("username", "password", Some("my token"))?;
         assert_eq!(token, "test_token");
         mock_ok.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_authenticate_failure() {
+    fn test_authenticate_failure() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock_err = server.mock(|when, then| {
             when.method(POST).path("/api/v1/authenticate");
             then.status(401);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
         assert!(client.authenticate("user", "pass", None).is_err());
         mock_err.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_authenticate_json_error() {
+    fn test_authenticate_json_error() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let mock_bad_json = server.mock(|when, then| {
             when.method(POST).path("/api/v1/authenticate");
             then.status(200).body("not json");
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
         assert!(client.authenticate("user", "pass", None).is_err());
         mock_bad_json.assert();
+        Ok(())
     }
 
     #[test]
-    fn test_search_boxes_success_and_json_error() {
+    fn test_search_boxes_success_and_json_error() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _mock_ok = server.mock(|when, then| {
             when.method(GET).path("/api/v1/search").query_param("q", "query");
@@ -1495,112 +1812,75 @@ mod tests {
             then.status(200).body("invalid json");
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
 
-        let boxes = client
-            .search_boxes("query")
-            .expect("operation should succeed");
+        let boxes = client.search_boxes("query")?;
         assert_eq!(boxes.len(), 1);
         assert_eq!(boxes[0].name, "user/box");
 
         assert!(client.search_boxes("bad").is_err());
+        Ok(())
     }
 
-    fn restore_env(token: Option<String>, home: Option<String>) {
-        unsafe {
-            if let Some(t) = token {
-                std::env::set_var("VAGRANT_CLOUD_TOKEN", t);
-            } else {
-                std::env::remove_var("VAGRANT_CLOUD_TOKEN");
-            }
-            if let Some(h) = home {
-                std::env::set_var("VAGRANT_HOME", h);
-            } else {
-                std::env::remove_var("VAGRANT_HOME");
-            }
-        }
-    }
-
-    /// Tests CloudClient::new when environment variables are unset.
+    /// Tests `CloudClient::new` when environment variables are unset.
     #[test]
     fn test_cloud_client_new_env_fallbacks() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let orig_token = std::env::var("VAGRANT_CLOUD_TOKEN").ok();
-        let orig_home = std::env::var("VAGRANT_HOME").ok();
-
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_TOKEN");
-            std::env::remove_var("VAGRANT_HOME");
-        }
-
-        let client = CloudClient::new();
+        let _ = CloudClient::new();
+        let cfg = CloudClientConfig::from_parts(None, None, None);
+        let client = CloudClient::with_config(cfg);
         assert!(client.is_ok());
-
-        restore_env(orig_token, orig_home);
     }
 
-    /// Tests reading token from file when VAGRANT_CLOUD_TOKEN is unset.
+    /// Tests reading token from file when `VAGRANT_CLOUD_TOKEN` is unset.
     #[test]
-    fn test_cloud_client_token_from_file() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempfile::tempdir().expect("tempdir failed");
+    fn test_cloud_client_token_from_file() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let token_dir = dir.path().join("data");
-        std::fs::create_dir_all(&token_dir).expect("create_dir failed");
-        std::fs::write(token_dir.join("token"), "file-token-123\n").expect("write failed");
+        std::fs::create_dir_all(&token_dir)?;
+        std::fs::write(token_dir.join("token"), "file-token-123\n")?;
 
-        let orig_token = std::env::var("VAGRANT_CLOUD_TOKEN").ok();
-        let orig_home = std::env::var("VAGRANT_HOME").ok();
-
-        unsafe {
-            std::env::remove_var("VAGRANT_CLOUD_TOKEN");
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
-
-        let client = CloudClient::new().expect("operation should succeed");
+        let cfg = CloudClientConfig::from_parts(None, None, dir.path().to_str());
+        let client = CloudClient::with_config(cfg)?;
         assert_eq!(client.token, Some("file-token-123".to_string()));
 
-        restore_env(orig_token, orig_home);
+        Ok(())
     }
 
-    /// Tests whoami and delete_token with empty token.
+    /// Tests `whoami` and `delete_token` with empty token.
     #[test]
-    fn test_empty_token_branches() {
-        let mut client = CloudClient::new().expect("operation should succeed");
+    fn test_empty_token_branches() -> Result<(), MigratoryError> {
+        let mut client = CloudClient::new()?;
         client.token = Some(String::new());
 
         assert!(client.whoami().is_err());
         assert!(client.delete_token().is_ok());
+        Ok(())
     }
 
-    /// Tests create_box with None descriptions and failure status.
+    /// Tests `create_box` with `None` descriptions and failure status.
     #[test]
-    fn test_create_box_none_descriptions_and_failure() {
+    fn test_create_box_none_descriptions_and_failure() -> Result<(), MigratoryError> {
         let server = MockServer::start();
         let _create_mock = server.mock(|when, then| {
             when.method(POST).path("/api/v1/boxes");
             then.status(500);
         });
 
-        let client =
-            CloudClient::with_base_url(server.url("/api/v1")).expect("operation should succeed");
+        let client = CloudClient::with_base_url(server.url("/api/v1"))?;
         let res = client.create_box("user/box", None, None);
         assert!(res.is_err());
+        Ok(())
     }
 
-    /// Tests network errors in whoami and delete_token.
+    /// Tests network errors in `whoami` and `delete_token`.
     #[test]
-    fn test_whoami_and_delete_token_network_errors() {
+    fn test_whoami_and_delete_token_network_errors() -> Result<(), MigratoryError> {
         let mut client =
-            CloudClient::with_base_url("http://invalid.local.domain.test:12345".to_string())
-                .expect("operation should succeed");
+            CloudClient::with_base_url("http://invalid.local.domain.test:12345".to_string())?;
         client.token = Some("token123".to_string());
 
         assert!(client.whoami().is_err());
         assert!(client.delete_token().is_err());
+        Ok(())
     }
 }

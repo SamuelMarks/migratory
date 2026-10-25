@@ -87,17 +87,13 @@ impl Guest for SolarisGuest {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
+    /// Mock communicator for Solaris guest capability tests.
     struct MockComm {
+        /// Canned response returned on success.
         response: String,
+        /// Whether `execute` should return an error.
         should_fail: bool,
     }
 
@@ -128,30 +124,26 @@ mod tests {
     }
 
     #[test]
-    fn test_solaris_guest_methods() {
+    fn test_solaris_guest_methods() -> Result<(), MigratoryError> {
         let guest = SolarisGuest;
 
         let ok_comm = MockComm {
-            response: "SunOS
-"
-            .to_string(),
+            response: "SunOS\n".to_string(),
             should_fail: false,
         };
-        assert!(guest.detect(&ok_comm).expect("detect ok"));
+        assert!(guest.detect(&ok_comm)?);
 
         let linux_comm = MockComm {
-            response: "Linux
-"
-            .to_string(),
+            response: "Linux\n".to_string(),
             should_fail: false,
         };
-        assert!(!guest.detect(&linux_comm).expect("detect ok"));
+        assert!(!guest.detect(&linux_comm)?);
 
         let fail_comm = MockComm {
             response: String::new(),
             should_fail: true,
         };
-        assert!(!guest.detect(&fail_comm).expect("detect ok"));
+        assert!(!guest.detect(&fail_comm)?);
 
         assert!(guest.change_hostname(&ok_comm, "bento-omnios").is_ok());
         assert!(guest.change_hostname(&fail_comm, "bento-omnios").is_err());
@@ -202,5 +194,6 @@ mod tests {
                 .update_guest_additions(&ok_comm, "virtualbox", None)
                 .is_ok()
         );
+        Ok(())
     }
 }

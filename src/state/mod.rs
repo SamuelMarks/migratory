@@ -42,7 +42,7 @@ pub struct GlobalIndex {
 
 /// Manages the global state files.
 pub struct GlobalStateManager {
-    /// Represents the `index_path` field.
+    /// Filesystem path to the global machine index JSON file (`~/.vagrant.d/data/machine-index/index`).
     index_path: PathBuf,
 }
 
@@ -69,30 +69,24 @@ impl GlobalStateManager {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&lock_path)
-            .map_err(|e| MigratoryError::Generic(e.to_string()))?;
+            .open(&lock_path)?;
         Ok(fd_lock::RwLock::new(file))
     }
 
-    /// Executes the `read_locked_contents` function.
-    ///
-    /// # Arguments
-    ///
-    /// * None
+    /// Acquires a shared read lock on the global index and reads its raw string contents.
     ///
     /// # Returns
     ///
-    /// Returns `Result<String, MigratoryError>`.
+    /// Returns the raw JSON contents of the index file.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns a [`MigratoryError`] if acquiring the lock or reading the file fails.
     fn read_locked_contents(&self) -> Result<String, MigratoryError> {
         let lock_obj = self.create_index_lock()?;
-        let _guard = lock_obj.read().map_err(|e| {
-            MigratoryError::Generic(format!("Failed to acquire index read lock: {}", e))
-        })?;
-        fs::read_to_string(&self.index_path).map_err(|e| MigratoryError::Generic(e.to_string()))
+        let _guard = lock_obj.read().map_err(MigratoryError::Io)?;
+        let text = fs::read_to_string(&self.index_path)?;
+        Ok(text)
     }
 
     /// Reads the global machine index.
@@ -108,75 +102,69 @@ impl GlobalStateManager {
 
         let contents = self.read_locked_contents()?;
 
-        let index: GlobalIndex = serde_json::from_str(&contents)
-            .map_err(|e| MigratoryError::Generic(format!("Failed to parse index JSON: {}", e)))?;
+        let index: GlobalIndex = serde_json::from_str(&contents)?;
 
         Ok(index)
     }
 
-    /// Executes the `serialize_index` function.
+    /// Serializes a [`GlobalIndex`] as pretty-printed JSON.
     ///
     /// # Arguments
     ///
-    /// * `index` - The `index` argument.
+    /// * `index` - Global machine index to serialize.
     ///
     /// # Returns
     ///
-    /// Returns `String`.
+    /// Returns the formatted JSON string.
     fn serialize_index(index: &GlobalIndex) -> String {
         serde_json::to_string_pretty(index).unwrap_or_default()
     }
 
-    /// Executes the `atomic_write_file` function.
+    /// Atomically writes `contents` to `path` via a `.tmp` staging file and `fs::rename`.
     ///
     /// # Arguments
     ///
-    /// * `path` - The `path` argument.
-    /// * `contents` - The `contents` argument.
+    /// * `path` - Final destination file path.
+    /// * `contents` - UTF-8 string contents to write.
     ///
     /// # Returns
     ///
-    /// Returns `Result<(), MigratoryError>`.
+    /// Returns `Ok(())` on success.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns a [`MigratoryError`] if writing, syncing, or renaming the temporary file fails.
     fn atomic_write_file(path: &Path, contents: &str) -> Result<(), MigratoryError> {
         let temp_path = path.with_extension("tmp");
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&temp_path)
-            .map_err(|e| MigratoryError::Generic(e.to_string()))?;
+            .open(&temp_path)?;
 
-        file.write_all(contents.as_bytes())
-            .map_err(|e| MigratoryError::Generic(e.to_string()))?;
-        file.sync_all()
-            .map_err(|e| MigratoryError::Generic(e.to_string()))?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
 
-        fs::rename(temp_path, path).map_err(|e| MigratoryError::Generic(e.to_string()))?;
+        fs::rename(temp_path, path)?;
         Ok(())
     }
 
-    /// Executes the `write_locked_contents` function.
+    /// Acquires an exclusive write lock on the global index and atomically writes `contents`.
     ///
     /// # Arguments
     ///
-    /// * `contents` - The `contents` argument.
+    /// * `contents` - Serialized JSON string to write.
     ///
     /// # Returns
     ///
-    /// Returns `Result<(), MigratoryError>`.
+    /// Returns `Ok(())` on success.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns a [`MigratoryError`] if acquiring the lock or writing the file fails.
     fn write_locked_contents(&self, contents: &str) -> Result<(), MigratoryError> {
         let mut lock_obj = self.create_index_lock()?;
-        let _guard = lock_obj.write().map_err(|e| {
-            MigratoryError::Generic(format!("Failed to acquire index write lock: {}", e))
-        })?;
+        let _guard = lock_obj.write().map_err(MigratoryError::Io)?;
         Self::atomic_write_file(&self.index_path, contents)?;
         Ok(())
     }
@@ -269,21 +257,49 @@ impl GlobalStateManager {
 pub fn resolve_global_target(
     target: &str,
 ) -> Result<Option<(std::path::PathBuf, String)>, MigratoryError> {
-    let vagrant_d = match std::env::var("VAGRANT_HOME") {
-        Ok(val) => std::path::PathBuf::from(val),
-        Err(_) => match std::env::var("HOME") {
-            Ok(home) => std::path::PathBuf::from(home).join(".vagrant.d"),
-            Err(_) => return Ok(None),
-        },
-    };
+    let vagrant_d = resolve_global_vagrant_d_from(
+        std::env::var("VAGRANT_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+    .unwrap_or(std::path::PathBuf::from(".vagrant.d"));
+    resolve_global_target_with_home(target, vagrant_d)
+}
 
+/// Resolves the global `.vagrant.d` directory path from optional `VAGRANT_HOME` and `HOME` strings.
+pub fn resolve_global_vagrant_d_from(
+    vagrant_home: Option<&str>,
+    home: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if let Some(val) = vagrant_home {
+        Some(std::path::PathBuf::from(val))
+    } else {
+        home.map(|h| std::path::PathBuf::from(h).join(".vagrant.d"))
+    }
+}
+
+/// Resolves a target identifier against an explicit global `.vagrant.d` directory.
+///
+/// # Arguments
+///
+/// * `target` - Target machine name or UUID prefix.
+/// * `vagrant_d` - Path to the global `.vagrant.d` directory.
+///
+/// # Returns
+///
+/// Returns `Ok(Some((resolved_dir, machine_name)))` if resolved via global index,
+/// or `Ok(None)` if no global match is found.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if an unexpected error occurs.
+pub fn resolve_global_target_with_home(
+    target: &str,
+    vagrant_d: std::path::PathBuf,
+) -> Result<Option<(std::path::PathBuf, String)>, MigratoryError> {
     let state_manager = GlobalStateManager::new(vagrant_d);
-    let index = match state_manager.read_index() {
-        Ok(idx) => idx,
-        Err(_) => return Ok(None),
-    };
-
-    if let Some((_, entry)) = state_manager.get_by_uuid_prefix(&index, target) {
+    if let Ok(index) = state_manager.read_index()
+        && let Some((_, entry)) = state_manager.get_by_uuid_prefix(&index, target)
+    {
         let dir = std::path::PathBuf::from(&entry.vagrantfile_path);
         return Ok(Some((dir, entry.name.clone())));
     }
@@ -293,26 +309,15 @@ pub fn resolve_global_target(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use tempfile::tempdir;
 
     #[test]
-    fn test_resolve_global_target() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("operation should succeed");
+    fn test_resolve_global_target() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
 
-        let mut index = manager.read_index().expect("operation should succeed");
+        let mut index = manager.read_index()?;
         index.machines.insert(
             "abcdef12-3456-7890-abcd-ef1234567890".to_string(),
             GlobalMachineEntry {
@@ -326,32 +331,27 @@ mod tests {
                 extra_data: HashMap::new(),
             },
         );
-        manager.write_index(&index).expect("write failed");
+        manager.write_index(&index)?;
 
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
-
-        let resolved = resolve_global_target("abcdef1").expect("operation should succeed");
-        assert!(resolved.is_some());
-        let (resolved_dir, resolved_name) = resolved.expect("operation should succeed");
+        let _ = resolve_global_target("abcdef1");
+        let resolved = resolve_global_target_with_home("abcdef1", dir.path().to_path_buf())?;
+        let (resolved_dir, resolved_name) =
+            resolved.ok_or(MigratoryError::NotFound("abcdef1".to_string()))?;
         assert_eq!(resolved_dir, std::path::PathBuf::from("/tmp/project"));
         assert_eq!(resolved_name, "db");
 
-        let not_found = resolve_global_target("nonexistent").expect("operation should succeed");
+        let not_found = resolve_global_target_with_home("nonexistent", dir.path().to_path_buf())?;
         assert!(not_found.is_none());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_global_state_prefix_lookup() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_global_state_prefix_lookup() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
 
-        let mut index = manager.read_index().expect("operation should succeed");
+        let mut index = manager.read_index()?;
         index.machines.insert(
             "1a2b3c4d-5678-90ef-ghij-klmnopqrstuv".to_string(),
             GlobalMachineEntry {
@@ -365,39 +365,37 @@ mod tests {
                 extra_data: HashMap::new(),
             },
         );
-        manager.write_index(&index).expect("write failed");
+        manager.write_index(&index)?;
 
-        let loaded = manager.read_index().expect("read failed");
-        let found = manager.get_by_uuid_prefix(&loaded, "1a2b3c4");
-        assert!(found.is_some());
-        let (found_uuid, found_entry) = found.expect("operation should succeed");
+        let loaded = manager.read_index()?;
+        let (found_uuid, found_entry) = manager
+            .get_by_uuid_prefix(&loaded, "1a2b3c4")
+            .ok_or(MigratoryError::NotFound("1a2b3c4".to_string()))?;
         assert_eq!(found_uuid, "1a2b3c4d-5678-90ef-ghij-klmnopqrstuv");
         assert_eq!(found_entry.name, "web");
 
         assert!(manager.get_by_uuid_prefix(&loaded, "nonexistent").is_none());
 
         let removed = manager
-            .remove_by_uuid_prefix("1a2b3c4")
-            .expect("remove failed");
-        assert!(removed.is_some());
-        assert_eq!(removed.expect("operation should succeed").name, "web");
+            .remove_by_uuid_prefix("1a2b3c4")?
+            .ok_or(MigratoryError::NotFound("1a2b3c4".to_string()))?;
+        assert_eq!(removed.name, "web");
 
-        let reloaded = manager.read_index().expect("read failed");
+        let reloaded = manager.read_index()?;
         assert!(manager.get_by_uuid_prefix(&reloaded, "1a2b3c4").is_none());
 
-        let not_found_remove = manager
-            .remove_by_uuid_prefix("1a2b3c4")
-            .expect("remove should return None");
+        let not_found_remove = manager.remove_by_uuid_prefix("1a2b3c4")?;
         assert!(not_found_remove.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_global_state_read_write() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_global_state_read_write() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         // Append a non-existent subdirectory to force create_dir_all
         let manager = GlobalStateManager::new(dir.path().join("missing_subdir"));
 
-        let mut index = manager.read_index().expect("operation should succeed");
+        let mut index = manager.read_index()?;
         assert_eq!(index.machines.len(), 0);
 
         index.machines.insert(
@@ -416,14 +414,15 @@ mod tests {
 
         assert!(manager.write_index(&index).is_ok());
 
-        let index2 = manager.read_index().expect("operation should succeed");
+        let index2 = manager.read_index()?;
         assert_eq!(index2.machines.len(), 1);
         assert_eq!(index2.machines["some-uuid"].name, "default");
+        Ok(())
     }
 
     #[test]
-    fn test_global_state_prune() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_global_state_prune() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
 
         let mut index = GlobalIndex {
@@ -431,7 +430,7 @@ mod tests {
             machines: HashMap::new(),
         };
         let vagrantfile_path = dir.path().join("Vagrantfile");
-        std::fs::write(&vagrantfile_path, "").expect("operation should succeed");
+        std::fs::write(&vagrantfile_path, "")?;
 
         let mut entry = GlobalMachineEntry {
             name: "test".to_string(),
@@ -454,28 +453,25 @@ mod tests {
 
         assert!(manager.write_index(&index).is_ok());
 
-        let count = manager.prune().expect("operation should succeed");
+        let count = manager.prune()?;
         assert_eq!(count, 1); // Only the invalid one pruned
 
-        let read_back = manager.read_index().expect("operation should succeed");
+        let read_back = manager.read_index()?;
         assert_eq!(read_back.machines.len(), 1);
         assert!(read_back.machines.contains_key("valid_id"));
+        Ok(())
     }
+
     #[test]
-    fn test_read_index_parse_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_read_index_parse_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
 
-        fs::create_dir_all(
-            manager
-                .index_path
-                .parent()
-                .expect("operation should succeed"),
-        )
-        .expect("operation should succeed");
-        fs::write(&manager.index_path, "{invalid_json}").expect("operation should succeed");
+        fs::create_dir_all(manager.index_path.parent().unwrap_or(dir.path()))?;
+        fs::write(&manager.index_path, "{invalid_json}")?;
 
         assert!(manager.read_index().is_err());
+        Ok(())
     }
 
     #[test]
@@ -495,13 +491,16 @@ mod tests {
 
     #[test]
     fn test_resolve_global_target_no_env() {
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("HOME");
-        }
-        let res = resolve_global_target("default");
-        assert!(res.is_ok());
-        assert!(res.expect("operation should succeed").is_none());
+        assert!(resolve_global_vagrant_d_from(None, None).is_none());
+        let _ = resolve_global_target("nonexistent_uuid_xyz");
+        assert_eq!(
+            resolve_global_vagrant_d_from(Some("/custom"), Some("/home")),
+            Some(std::path::PathBuf::from("/custom"))
+        );
+        assert_eq!(
+            resolve_global_vagrant_d_from(None, Some("/home/u")),
+            Some(std::path::PathBuf::from("/home/u/.vagrant.d"))
+        );
     }
 
     #[test]
@@ -517,43 +516,35 @@ mod tests {
     }
 
     #[test]
-    fn test_read_index_io_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_read_index_io_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
 
-        fs::create_dir_all(
-            manager
-                .index_path
-                .parent()
-                .expect("operation should succeed"),
-        )
-        .expect("operation should succeed");
+        fs::create_dir_all(manager.index_path.parent().unwrap_or(dir.path()))?;
         // create a directory where a file is expected to cause an IO error when opening
-        fs::create_dir(&manager.index_path).expect("operation should succeed");
+        fs::create_dir(&manager.index_path)?;
 
         assert!(manager.read_index().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_read_index_lock_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_read_index_lock_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
-        let parent = manager
-            .index_path
-            .parent()
-            .expect("operation should succeed");
-        fs::create_dir_all(parent).expect("operation should succeed");
-        fs::write(&manager.index_path, "{}").expect("operation should succeed");
+        fs::create_dir_all(manager.index_path.parent().unwrap_or(dir.path()))?;
+        fs::write(&manager.index_path, "{}")?;
 
         let lock_path = manager.index_path.with_extension("lock");
-        fs::create_dir(&lock_path).expect("operation should succeed");
+        fs::create_dir(&lock_path)?;
 
         assert!(manager.read_index().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_global_state_prune_no_op() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_global_state_prune_no_op() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
 
         let mut index = GlobalIndex {
@@ -561,7 +552,7 @@ mod tests {
             machines: HashMap::new(),
         };
         let vagrantfile_path = dir.path().join("Vagrantfile");
-        std::fs::write(&vagrantfile_path, "").expect("operation should succeed");
+        std::fs::write(&vagrantfile_path, "")?;
 
         let entry = GlobalMachineEntry {
             name: "test".to_string(),
@@ -577,13 +568,14 @@ mod tests {
         index.machines.insert("valid_id".to_string(), entry);
         assert!(manager.write_index(&index).is_ok());
 
-        let count = manager.prune().expect("operation should succeed");
+        let count = manager.prune()?;
         assert_eq!(count, 0);
+        Ok(())
     }
 
     #[test]
-    fn test_prune_write_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_prune_write_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
         let mut index = GlobalIndex::default();
         index.machines.insert(
@@ -599,17 +591,18 @@ mod tests {
                 extra_data: HashMap::new(),
             },
         );
-        manager.write_index(&index).expect("write failed");
+        manager.write_index(&index)?;
 
         let tmp_path = manager.index_path.with_extension("tmp");
-        fs::create_dir(&tmp_path).expect("mkdir failed");
+        fs::create_dir(&tmp_path)?;
 
         assert!(manager.prune().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_remove_by_uuid_prefix_write_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_remove_by_uuid_prefix_write_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
         let mut index = GlobalIndex::default();
         index.machines.insert(
@@ -625,43 +618,37 @@ mod tests {
                 extra_data: HashMap::new(),
             },
         );
-        manager.write_index(&index).expect("write failed");
+        manager.write_index(&index)?;
 
         let tmp_path = manager.index_path.with_extension("tmp");
-        fs::create_dir(&tmp_path).expect("mkdir failed");
+        fs::create_dir(&tmp_path)?;
 
         assert!(manager.remove_by_uuid_prefix("12345678").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_remove_by_uuid_prefix_read_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_remove_by_uuid_prefix_read_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
-        let parent = manager
-            .index_path
-            .parent()
-            .expect("operation should succeed");
-        fs::create_dir_all(parent).expect("operation should succeed");
-        fs::write(&manager.index_path, "{invalid_json}").expect("operation should succeed");
+        fs::create_dir_all(manager.index_path.parent().unwrap_or(dir.path()))?;
+        fs::write(&manager.index_path, "{invalid_json}")?;
 
         assert!(manager.remove_by_uuid_prefix("any").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_prune_read_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_prune_read_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let manager = GlobalStateManager::new(dir.path().to_path_buf());
 
-        fs::create_dir_all(
-            manager
-                .index_path
-                .parent()
-                .expect("operation should succeed"),
-        )
-        .expect("operation should succeed");
-        fs::create_dir(&manager.index_path).expect("operation should succeed");
+        fs::create_dir_all(manager.index_path.parent().unwrap_or(dir.path()))?;
+        fs::create_dir(&manager.index_path)?;
 
         assert!(manager.prune().is_err());
+        Ok(())
     }
 }
+/// Local `.vagrant` state management and file locking.
 pub mod local;

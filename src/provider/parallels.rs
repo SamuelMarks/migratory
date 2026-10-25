@@ -4,10 +4,10 @@
 //! interfacing with the `prlctl` CLI to manage VM lifecycles, configure hardware,
 //! and orchestrate VM snapshots.
 
-use super::Provider;
+use super::{CommandRunner, Provider, SystemCommandRunner};
 use crate::config::VmConfig;
 use crate::error::MigratoryError;
-use std::process::Command;
+use std::sync::Arc;
 
 /// Parallels Desktop hypervisor provider.
 ///
@@ -15,10 +15,12 @@ use std::process::Command;
 pub struct ParallelsProvider {
     /// Machine identifier (VM name or UUID) in Parallels Desktop.
     machine_id: Option<String>,
+    /// Injectable command runner used to execute `prlctl`.
+    runner: Arc<dyn CommandRunner>,
 }
 
 impl ParallelsProvider {
-    /// Creates a new `ParallelsProvider` instance.
+    /// Creates a new `ParallelsProvider` instance using the default [`SystemCommandRunner`].
     ///
     /// # Arguments
     ///
@@ -27,12 +29,22 @@ impl ParallelsProvider {
     /// # Returns
     ///
     /// Returns a new `ParallelsProvider`.
-    ///
-    /// # Panics
-    ///
-    /// Never panics.
     pub fn new(machine_id: Option<String>) -> Self {
-        Self { machine_id }
+        Self::with_runner(machine_id, Arc::new(SystemCommandRunner))
+    }
+
+    /// Creates a new `ParallelsProvider` instance with an injected [`CommandRunner`].
+    ///
+    /// # Arguments
+    ///
+    /// * `machine_id` - Optional VM name or UUID in Parallels Desktop.
+    /// * `runner` - Command runner implementation.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `ParallelsProvider`.
+    pub fn with_runner(machine_id: Option<String>, runner: Arc<dyn CommandRunner>) -> Self {
+        Self { machine_id, runner }
     }
 
     /// Helper to get the required machine ID.
@@ -44,14 +56,27 @@ impl ParallelsProvider {
     /// # Errors
     ///
     /// Returns [`MigratoryError::Generic`] if the machine is not created.
-    ///
-    /// # Panics
-    ///
-    /// Never panics.
     fn require_id(&self) -> Result<&str, MigratoryError> {
         self.machine_id.as_deref().ok_or_else(|| {
             MigratoryError::Generic("Machine not created or ID not found".to_string())
         })
+    }
+
+    /// Executes `prlctl` via the configured [`CommandRunner`].
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Arguments passed to `prlctl`.
+    ///
+    /// # Returns
+    ///
+    /// Returns captured stdout on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if execution fails.
+    fn run_prlctl(&self, args: &[&str]) -> Result<String, MigratoryError> {
+        self.runner.run("prlctl", args)
     }
 
     /// Checks if Parallels Desktop is installed and available on the host system.
@@ -59,117 +84,35 @@ impl ParallelsProvider {
     /// # Returns
     ///
     /// Returns `true` if `prlctl` binary is available, `false` otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Never panics.
     pub fn is_available() -> bool {
-        if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL").is_ok() {
-            return std::env::var("MIGRATORY_TEST_MOCK_PRLCTL_UNAVAILABLE").is_err();
-        }
-        Command::new("prlctl").arg("--version").output().is_ok()
-    }
-}
-
-/// Helper function to execute `prlctl` commands with mock support.
-///
-/// # Arguments
-///
-/// * `args` - Command-line arguments to pass to `prlctl`.
-///
-/// # Returns
-///
-/// Returns the standard output string on success.
-///
-/// # Errors
-///
-/// Returns [`MigratoryError`] if command execution fails.
-///
-/// # Panics
-///
-/// Never panics.
-pub(crate) fn execute_prlctl(args: &[&str]) -> Result<String, MigratoryError> {
-    execute_prlctl_inner("prlctl", args)
-}
-
-/// Executes the `execute_prlctl_inner` function.
-///
-/// # Arguments
-///
-/// * `cmd` - The `cmd` argument.
-/// * `args` - The `args` argument.
-///
-/// # Returns
-///
-/// Returns `Result<String, MigratoryError>`.
-///
-/// # Errors
-///
-/// Returns an error if the operation fails.
-fn execute_prlctl_inner(cmd: &str, args: &[&str]) -> Result<String, MigratoryError> {
-    if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL").is_ok() {
-        if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL_ERROR").is_ok() {
-            return Err(MigratoryError::Generic("Mock prlctl error".to_string()));
-        }
-        if args.contains(&"status") {
-            if std::env::var("MIGRATORY_TEST_MOCK_RUNNING").is_ok() {
-                return Ok("running
-"
-                .to_string());
-            }
-            if std::env::var("MIGRATORY_TEST_MOCK_POWEROFF").is_ok() {
-                return Ok("stopped
-"
-                .to_string());
-            }
-            if std::env::var("MIGRATORY_TEST_MOCK_SAVED").is_ok() {
-                return Ok("suspended
-"
-                .to_string());
-            }
-            if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL_STATUS_EMPTY").is_ok() {
-                return Ok(String::new());
-            }
-            if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL_STATUS_OTHER").is_ok() {
-                return Ok("paused
-"
-                .to_string());
-            }
-            return Ok("running
-"
-            .to_string());
-        }
-        if args.contains(&"snapshot-list") {
-            if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL_SNAPSHOT_EMPTY").is_ok() {
-                return Ok(String::new());
-            }
-            if std::env::var("MIGRATORY_TEST_MOCK_PRLCTL_SNAPSHOT_SKIP").is_ok() {
-                return Ok(" {uuid-only}
- 
-"
-                .to_string());
-            }
-            return Ok(" {uuid-1} * snap1
- {uuid-2}   snap2
-"
-            .to_string());
-        }
-        return Ok(String::new());
+        Self::is_available_with("prlctl")
     }
 
-    let output = Command::new(cmd).args(args).output();
+    /// Checks if the specified Parallels `prlctl` binary is available on the host system.
+    ///
+    /// # Arguments
+    ///
+    /// * `bin` - Executable name or path to check.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if `bin` can be spawned, `false` otherwise.
+    pub fn is_available_with(bin: &str) -> bool {
+        Self::is_available_with_runner(bin, &SystemCommandRunner)
+    }
 
-    match output {
-        Ok(out) => {
-            if out.status.success() {
-                Ok(String::from_utf8_lossy(&out.stdout).to_string())
-            } else {
-                Err(MigratoryError::Generic(
-                    String::from_utf8_lossy(&out.stderr).to_string(),
-                ))
-            }
-        }
-        Err(e) => Err(MigratoryError::Generic(e.to_string())),
+    /// Checks if the specified `prlctl` binary is available using an injected [`CommandRunner`].
+    ///
+    /// # Arguments
+    ///
+    /// * `bin` - Executable name or path to check.
+    /// * `runner` - Command runner used to probe availability.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if available, `false` otherwise.
+    pub fn is_available_with_runner(bin: &str, runner: &dyn CommandRunner) -> bool {
+        runner.is_available(bin, "--version")
     }
 }
 
@@ -180,18 +123,18 @@ impl Provider for ParallelsProvider {
 
     fn up(&self, _config: &VmConfig) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_prlctl(&["start", id])?;
+        self.run_prlctl(&["start", id])?;
         Ok(())
     }
 
     fn halt(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_prlctl(&["stop", id])?;
+        self.run_prlctl(&["stop", id])?;
         Ok(())
     }
 
     fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
-        execute_prlctl(&["register", &box_dir.to_string_lossy()])?;
+        self.run_prlctl(&["register", &box_dir.to_string_lossy()])?;
         Ok(vm_name.to_string())
     }
 
@@ -200,65 +143,67 @@ impl Provider for ParallelsProvider {
         base_machine_id: &str,
         vm_name: &str,
     ) -> Result<String, MigratoryError> {
-        execute_prlctl(&["clone", base_machine_id, "--name", vm_name, "--linked"])?;
+        self.run_prlctl(&["clone", base_machine_id, "--name", vm_name, "--linked"])?;
         Ok(vm_name.to_string())
     }
 
     fn suspend(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_prlctl(&["suspend", id])?;
+        self.run_prlctl(&["suspend", id])?;
         Ok(())
     }
 
     fn resume(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_prlctl(&["resume", id])?;
+        self.run_prlctl(&["resume", id])?;
         Ok(())
     }
 
     fn destroy(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        let _ = execute_prlctl(&["stop", id, "--kill"]);
-        execute_prlctl(&["delete", id])?;
+        let _ = self.run_prlctl(&["stop", id, "--kill"]);
+        self.run_prlctl(&["delete", id])?;
         Ok(())
     }
 
-    fn status(&self) -> Result<String, MigratoryError> {
+    fn status(&self) -> Result<crate::provider::MachineState, MigratoryError> {
         let id = match &self.machine_id {
             Some(id) => id,
-            None => return Ok("not created".to_string()),
+            None => return Ok(crate::provider::MachineState::NotCreated),
         };
 
-        let out = execute_prlctl(&["status", id]).unwrap_or_else(|_| String::new());
+        let out = self
+            .run_prlctl(&["status", id])
+            .unwrap_or_else(|_| String::new());
         let trimmed = out.trim();
         if trimmed == "running" {
-            Ok("running".to_string())
+            Ok(crate::provider::MachineState::Running)
         } else if trimmed == "stopped" {
-            Ok("poweroff".to_string())
+            Ok(crate::provider::MachineState::PowerOff)
         } else if trimmed == "suspended" {
-            Ok("saved".to_string())
+            Ok(crate::provider::MachineState::Saved)
         } else if trimmed.is_empty() {
-            Ok("not created".to_string())
+            Ok(crate::provider::MachineState::NotCreated)
         } else {
-            Ok(trimmed.to_string())
+            Ok(crate::provider::MachineState::from_raw(trimmed))
         }
     }
 
     fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_prlctl(&["snapshot", id, "-n", name])?;
+        self.run_prlctl(&["snapshot", id, "-n", name])?;
         Ok(())
     }
 
     fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_prlctl(&["snapshot-switch", id, "-i", name])?;
+        self.run_prlctl(&["snapshot-switch", id, "-i", name])?;
         Ok(())
     }
 
     fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
         let id = self.require_id()?;
-        let out = execute_prlctl(&["snapshot-list", id, "-t"])?;
+        let out = self.run_prlctl(&["snapshot-list", id, "-t"])?;
         let mut list = Vec::new();
         for line in out.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -273,36 +218,40 @@ impl Provider for ParallelsProvider {
 
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_prlctl(&["snapshot-delete", id, "-i", name])?;
+        self.run_prlctl(&["snapshot-delete", id, "-i", name])?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
+    use crate::provider::FnCommandRunner;
 
     #[test]
-    fn test_parallels_provider_methods() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
+    fn test_parallels_provider_methods() -> Result<(), MigratoryError> {
+        let ok_runner: Arc<dyn CommandRunner> = Arc::new(FnCommandRunner::new(|_cmd, args| {
+            if args.contains(&"status") {
+                return Ok("running
+"
+                .to_string());
+            }
+            if args.contains(&"snapshot-list") {
+                return Ok(" {uuid-1} * snap1
+ {uuid-2}   snap2
+"
+                .to_string());
+            }
+            Ok(String::new())
+        }));
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PRLCTL", "1");
-        }
-
-        let p_none = ParallelsProvider::new(None);
+        let p_none = ParallelsProvider::with_runner(None, Arc::clone(&ok_runner));
         assert_eq!(p_none.name(), "parallels");
-        assert!(ParallelsProvider::is_available());
-        assert_eq!(p_none.status().expect("status ok"), "not created");
+        assert!(ParallelsProvider::is_available_with_runner(
+            "prlctl",
+            ok_runner.as_ref()
+        ));
+        assert_eq!(p_none.status()?, "not created");
         assert!(p_none.up(&VmConfig::default()).is_err());
         assert!(p_none.halt().is_err());
         assert!(p_none.suspend().is_err());
@@ -313,107 +262,114 @@ mod tests {
         assert!(p_none.snapshot_list().is_err());
         assert!(p_none.snapshot_delete("s1").is_err());
 
-        let p = ParallelsProvider::new(Some("test-prl".to_string()));
+        let p = ParallelsProvider::with_runner(Some("test-prl".to_string()), ok_runner);
         assert!(p.up(&VmConfig::default()).is_ok());
         assert!(p.halt().is_ok());
         assert!(p.suspend().is_ok());
         assert!(p.resume().is_ok());
         assert!(p.destroy().is_ok());
-        assert_eq!(
-            p.import(std::path::Path::new("/dummy"), "vm1")
-                .expect("import ok"),
-            "vm1"
+        assert_eq!(p.import(std::path::Path::new("/dummy"), "vm1")?, "vm1");
+        assert_eq!(p.clone_machine("base", "vm2")?, "vm2");
+        assert_eq!(p.status()?, "running");
+
+        // Status variants via injected runners
+        let p_stopped = ParallelsProvider::with_runner(
+            Some("test-prl".to_string()),
+            Arc::new(FnCommandRunner::new(|_, _| {
+                Ok("stopped
+"
+                .to_string())
+            })),
         );
-        assert_eq!(p.clone_machine("base", "vm2").expect("clone ok"), "vm2");
+        assert_eq!(p_stopped.status()?, "poweroff");
 
-        // Status tests - fallback running without explicit env var
-        assert_eq!(p.status().expect("status ok"), "running");
+        let p_suspended = ParallelsProvider::with_runner(
+            Some("test-prl".to_string()),
+            Arc::new(FnCommandRunner::new(|_, _| {
+                Ok("suspended
+"
+                .to_string())
+            })),
+        );
+        assert_eq!(p_suspended.status()?, "saved");
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
-        assert_eq!(p.status().expect("status ok"), "running");
+        let p_empty = ParallelsProvider::with_runner(
+            Some("test-prl".to_string()),
+            Arc::new(FnCommandRunner::new(|_, _| Ok(String::new()))),
+        );
+        assert_eq!(p_empty.status()?, "not created");
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-            std::env::set_var("MIGRATORY_TEST_MOCK_POWEROFF", "1");
-        }
-        assert_eq!(p.status().expect("status ok"), "poweroff");
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_POWEROFF");
-            std::env::set_var("MIGRATORY_TEST_MOCK_SAVED", "1");
-        }
-        assert_eq!(p.status().expect("status ok"), "saved");
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_SAVED");
-            std::env::set_var("MIGRATORY_TEST_MOCK_PRLCTL_STATUS_EMPTY", "1");
-        }
-        assert_eq!(p.status().expect("status ok"), "not created");
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PRLCTL_STATUS_EMPTY");
-            std::env::set_var("MIGRATORY_TEST_MOCK_PRLCTL_STATUS_OTHER", "1");
-        }
-        assert_eq!(p.status().expect("status ok"), "paused");
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PRLCTL_STATUS_OTHER");
-        }
+        let p_other = ParallelsProvider::with_runner(
+            Some("test-prl".to_string()),
+            Arc::new(FnCommandRunner::new(|_, _| {
+                Ok("paused
+"
+                .to_string())
+            })),
+        );
+        assert_eq!(p_other.status()?, "paused");
 
         // Snapshots
         assert!(p.snapshot_save("snap1").is_ok());
         assert!(p.snapshot_restore("snap1").is_ok());
         assert!(p.snapshot_delete("snap1").is_ok());
-        let list = p.snapshot_list().expect("list ok");
+        let list = p.snapshot_list()?;
         assert_eq!(list, vec!["snap1", "snap2"]);
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PRLCTL_SNAPSHOT_EMPTY", "1");
-        }
-        let list_empty = p.snapshot_list().expect("list ok");
+        let list_empty = p_empty.snapshot_list()?;
         assert!(list_empty.is_empty());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PRLCTL_SNAPSHOT_EMPTY");
-            std::env::set_var("MIGRATORY_TEST_MOCK_PRLCTL_SNAPSHOT_SKIP", "1");
-        }
-        let list_skip = p.snapshot_list().expect("list ok");
-        assert!(list_skip.is_empty());
+        let p_skip = ParallelsProvider::with_runner(
+            Some("test-prl".to_string()),
+            Arc::new(FnCommandRunner::new(|_, _| {
+                Ok(" {uuid-only}
+ 
+"
+                .to_string())
+            })),
+        );
+        assert!(p_skip.snapshot_list()?.is_empty());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PRLCTL_SNAPSHOT_SKIP");
-            std::env::set_var("MIGRATORY_TEST_MOCK_PRLCTL_ERROR", "1");
-        }
-        assert_eq!(p.status().expect("status ok"), "not created");
-        assert!(p.up(&VmConfig::default()).is_err());
-        assert!(p.halt().is_err());
-        assert!(p.suspend().is_err());
-        assert!(p.resume().is_err());
-        assert!(p.destroy().is_err());
-        assert!(p.import(std::path::Path::new("/dummy"), "vm").is_err());
-        assert!(p.clone_machine("base", "vm").is_err());
-        assert!(p.snapshot_save("s1").is_err());
-        assert!(p.snapshot_restore("s1").is_err());
-        assert!(p.snapshot_list().is_err());
-        assert!(p.snapshot_delete("s1").is_err());
+        let err_runner: Arc<dyn CommandRunner> =
+            Arc::new(FnCommandRunner::with_availability(false, |_, _| {
+                Err(MigratoryError::Generic("Mock prlctl error".to_string()))
+            }));
+        let p_err =
+            ParallelsProvider::with_runner(Some("test-prl".to_string()), Arc::clone(&err_runner));
+        assert_eq!(p_err.status()?, "not created");
+        assert!(p_err.up(&VmConfig::default()).is_err());
+        assert!(p_err.halt().is_err());
+        assert!(p_err.suspend().is_err());
+        assert!(p_err.resume().is_err());
+        assert!(p_err.destroy().is_err());
+        assert!(p_err.import(std::path::Path::new("/dummy"), "vm").is_err());
+        assert!(p_err.clone_machine("base", "vm").is_err());
+        assert!(p_err.snapshot_save("s1").is_err());
+        assert!(p_err.snapshot_restore("s1").is_err());
+        assert!(p_err.snapshot_list().is_err());
+        assert!(p_err.snapshot_delete("s1").is_err());
+        assert!(!ParallelsProvider::is_available_with_runner(
+            "prlctl",
+            err_runner.as_ref()
+        ));
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PRLCTL_ERROR");
-            std::env::set_var("MIGRATORY_TEST_MOCK_PRLCTL_UNAVAILABLE", "1");
-        }
-        assert!(!ParallelsProvider::is_available());
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PRLCTL_UNAVAILABLE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PRLCTL");
-        }
-
-        // Test real execution branches when mock is unset
-        assert!(execute_prlctl_inner("echo", &["test"]).is_ok());
-        assert!(execute_prlctl_inner("false", &["test"]).is_err());
-        assert!(execute_prlctl_inner("this_command_does_not_exist_xyz_123", &["test"]).is_err());
-        let _ = ParallelsProvider::is_available();
+        // Test real execution branches via SystemCommandRunner
+        let _ = ParallelsProvider::new(None);
+        assert!(SystemCommandRunner.run("echo", &["test"]).is_ok());
+        assert!(SystemCommandRunner.run("false", &["test"]).is_err());
+        assert!(
+            SystemCommandRunner
+                .run("this_command_does_not_exist_xyz_123", &["test"])
+                .is_err()
+        );
+        assert!(ParallelsProvider::is_available_with("echo"));
+        assert!(!ParallelsProvider::is_available_with(
+            "this_command_does_not_exist_xyz_123"
+        ));
+        assert_eq!(
+            ParallelsProvider::is_available(),
+            ParallelsProvider::is_available_with("prlctl")
+        );
+        Ok(())
     }
 }

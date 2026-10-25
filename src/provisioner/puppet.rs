@@ -7,17 +7,17 @@ use std::collections::HashMap;
 
 /// Puppet provisioner.
 pub struct PuppetProvisioner {
-    /// Represents the `manifest_file` field.
+    /// Name of the main Puppet manifest file to apply.
     manifest_file: Option<String>,
-    /// Represents the `manifests_path` field.
+    /// Local directory containing Puppet manifests.
     manifests_path: Option<String>,
-    /// Represents the `module_path` field.
+    /// Local directory containing Puppet modules.
     module_path: Option<String>,
-    /// Represents the `options` field.
+    /// Extra CLI options passed to `puppet apply` or `puppet agent`.
     options: Option<String>,
-    /// Represents the `puppet_server` field.
+    /// Optional Puppet Server hostname for agent mode.
     puppet_server: Option<String>,
-    /// Represents the `hiera_config_path` field.
+    /// Local path to a `hiera.yaml` configuration file.
     hiera_config_path: Option<String>,
 }
 
@@ -180,35 +180,16 @@ impl Provisioner for PuppetProvisioner {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::path::Path;
-    use std::time::Duration;
 
+    /// No-op mock communicator for Puppet provisioner tests.
     struct MockComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -285,18 +266,18 @@ mod tests {
     }
 
     #[test]
-    fn test_puppet_provisioner_upload_paths() {
-        let temp_dir = tempfile::tempdir().expect("tempdir failed");
+    fn test_puppet_provisioner_upload_paths() -> Result<(), MigratoryError> {
+        let temp_dir = tempfile::tempdir()?;
         let manifests_path = temp_dir.path().join("manifests");
-        std::fs::create_dir_all(&manifests_path).expect("create_dir failed");
+        std::fs::create_dir_all(&manifests_path)?;
         let manifest_file = manifests_path.join("default.pp");
-        std::fs::write(&manifest_file, "notify { 'test': }").expect("write failed");
+        std::fs::write(&manifest_file, "notify { 'test': }")?;
 
         let modules_path = temp_dir.path().join("modules");
-        std::fs::create_dir_all(&modules_path).expect("create_dir failed");
+        std::fs::create_dir_all(&modules_path)?;
 
         let hiera_file = temp_dir.path().join("hiera.yaml");
-        std::fs::write(&hiera_file, "---\n:backends:\n  - yaml").expect("write failed");
+        std::fs::write(&hiera_file, "---\n:backends:\n  - yaml")?;
 
         let mut prov = PuppetProvisioner::default();
         let mut config = HashMap::new();
@@ -317,37 +298,26 @@ mod tests {
 
         assert!(prov.prepare(&config).is_ok());
 
+        /// Communicator stub for verifying Puppet upload paths.
         struct TrackUploadsComm;
         impl Communicator for TrackUploadsComm {
             fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
                 Ok(String::new())
             }
-            fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn download(
-                &self,
-                _remote_path: &str,
-                _local_path: &Path,
-            ) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-                Ok(())
-            }
         }
 
         let comm = TrackUploadsComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_puppet_provisioner_error_paths() {
+    fn test_puppet_provisioner_error_paths() -> Result<(), MigratoryError> {
+        /// Configurable failing communicator for Puppet provisioner error tests.
         struct FailingComm {
+            /// Fail `upload` calls.
             fail_upload: bool,
+            /// Fail `execute` calls.
             fail_execute: bool,
         }
         impl Communicator for FailingComm {
@@ -365,28 +335,21 @@ mod tests {
                     Ok(())
                 }
             }
-            fn download(
-                &self,
-                _remote_path: &str,
-                _local_path: &Path,
-            ) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn execute_interactive(&self) -> Result<(), MigratoryError> {
-                Ok(())
-            }
-            fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-                Ok(())
-            }
         }
 
-        let temp_dir = tempfile::tempdir().expect("tempdir failed");
+        let temp_dir = tempfile::tempdir()?;
+        let ok_exec = FailingComm {
+            fail_upload: false,
+            fail_execute: false,
+        };
+        assert!(ok_exec.execute("echo").is_ok());
+        assert!(ok_exec.upload(Path::new("a"), "b").is_ok());
         let manifests_path = temp_dir.path().join("manifests");
-        std::fs::create_dir_all(&manifests_path).expect("create_dir failed");
+        std::fs::create_dir_all(&manifests_path)?;
         let modules_path = temp_dir.path().join("modules");
-        std::fs::create_dir_all(&modules_path).expect("create_dir failed");
+        std::fs::create_dir_all(&modules_path)?;
         let hiera_file = temp_dir.path().join("hiera.yaml");
-        std::fs::write(&hiera_file, "---\n").expect("write failed");
+        std::fs::write(&hiera_file, "---\n")?;
 
         // 1. manifests_path upload fails
         let mut prov = PuppetProvisioner::default();
@@ -446,5 +409,6 @@ mod tests {
             fail_execute: true,
         };
         assert!(prov4.provision(&comm_exec_fail).is_err());
+        Ok(())
     }
 }

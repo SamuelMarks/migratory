@@ -7,17 +7,17 @@ use std::collections::HashMap;
 
 /// Docker provisioner.
 pub struct DockerProvisioner {
-    /// Represents the `images` field.
+    /// Container images to pull via `docker pull`.
     images: Vec<String>,
-    /// Represents the `run` field.
+    /// Container image or command specification to run via `docker run -d`.
     run: Option<String>,
-    /// Represents the `compose` field.
+    /// Path to a `docker-compose.yml` file to bring up via `docker compose`.
     compose: Option<String>,
-    /// Represents the `install` field.
+    /// Whether to install the Docker engine on the guest if not already present.
     install: bool,
-    /// Represents the `build_image` field.
+    /// Image tag name to build when `build_path` is specified.
     build_image: Option<String>,
-    /// Represents the `build_path` field.
+    /// Guest directory path containing a `Dockerfile` to build.
     build_path: Option<String>,
 }
 
@@ -151,26 +151,13 @@ impl Provisioner for DockerProvisioner {
 mod tests {
     use super::*;
     use crate::communicator::Communicator;
-    use std::path::Path;
-    use std::time::Duration;
 
+    /// No-op mock communicator for Docker provisioner tests.
     struct MockComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
-        }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
         }
     }
 
@@ -222,31 +209,22 @@ mod tests {
         assert!(prov.install);
     }
 
+    /// Failing mock communicator for Docker provisioner error tests.
     struct FailingComm;
 
     impl Communicator for FailingComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Err(MigratoryError::Generic("Command failed".to_string()))
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
     /// Tests failure when installing docker.
     #[test]
     fn test_docker_provisioner_install_failure() {
-        let mut prov = DockerProvisioner::default();
-        prov.install = true;
+        let prov = DockerProvisioner {
+            install: true,
+            ..Default::default()
+        };
         let comm = FailingComm;
         assert!(prov.provision(&comm).is_err());
     }
@@ -254,9 +232,11 @@ mod tests {
     /// Tests failure when pulling an image.
     #[test]
     fn test_docker_provisioner_pull_failure() {
-        let mut prov = DockerProvisioner::default();
-        prov.install = false;
-        prov.images = vec!["alpine".to_string()];
+        let prov = DockerProvisioner {
+            install: false,
+            images: vec!["alpine".to_string()],
+            ..Default::default()
+        };
         let comm = FailingComm;
         assert!(prov.provision(&comm).is_err());
     }
@@ -264,10 +244,12 @@ mod tests {
     /// Tests failure and default path when building an image.
     #[test]
     fn test_docker_provisioner_build_failure() {
-        let mut prov = DockerProvisioner::default();
-        prov.install = false;
-        prov.build_image = Some("myapp".to_string());
-        prov.build_path = None; // covers unwrap_or(".")
+        let prov = DockerProvisioner {
+            install: false,
+            build_image: Some("myapp".to_string()),
+            build_path: None, // covers unwrap_or(".")
+            ..Default::default()
+        };
         let comm = FailingComm;
         assert!(prov.provision(&comm).is_err());
 
@@ -279,9 +261,11 @@ mod tests {
     /// Tests failure when running a container.
     #[test]
     fn test_docker_provisioner_run_failure() {
-        let mut prov = DockerProvisioner::default();
-        prov.install = false;
-        prov.run = Some("-d nginx".to_string());
+        let prov = DockerProvisioner {
+            install: false,
+            run: Some("-d nginx".to_string()),
+            ..Default::default()
+        };
         let comm = FailingComm;
         assert!(prov.provision(&comm).is_err());
     }
@@ -289,9 +273,11 @@ mod tests {
     /// Tests failure when executing compose.
     #[test]
     fn test_docker_provisioner_compose_failure() {
-        let mut prov = DockerProvisioner::default();
-        prov.install = false;
-        prov.compose = Some("docker-compose.yml".to_string());
+        let prov = DockerProvisioner {
+            install: false,
+            compose: Some("docker-compose.yml".to_string()),
+            ..Default::default()
+        };
         let comm = FailingComm;
         assert!(prov.provision(&comm).is_err());
     }

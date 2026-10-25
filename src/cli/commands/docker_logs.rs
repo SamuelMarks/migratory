@@ -1,23 +1,24 @@
 //! Semantic implementation of the `docker-logs` command.
 //!
-//! This module provides the logic to output the logs from a docker container.
+//! This module provides the logic to output the logs from a running Docker container
+//! managed by the Docker provider.
 
 use crate::cli::DockerLogsArgs;
 use crate::error::MigratoryError;
-use crate::provider::StateManager;
+use crate::state::local::LocalStateManager;
 use crate::ui::Ui;
 use std::path::Path;
 use std::process::Command;
 
-/// Executes the `map_docker_error` function.
+/// Converts a `std::io::Error` encountered while spawning `docker logs` into a [`MigratoryError`].
 ///
 /// # Arguments
 ///
-/// * `e` - The `e` argument.
+/// * `e` - The underlying I/O error.
 ///
 /// # Returns
 ///
-/// Returns `MigratoryError`.
+/// Returns [`MigratoryError::Generic`] containing the error description.
 fn map_docker_error(e: std::io::Error) -> MigratoryError {
     MigratoryError::Generic(e.to_string())
 }
@@ -35,42 +36,51 @@ fn map_docker_error(e: std::io::Error) -> MigratoryError {
 ///
 /// # Errors
 ///
-/// Returns a `MigratoryError` if the Vagrantfile cannot be found, if the container ID is missing, or if execution fails.
+/// Returns a [`MigratoryError`] if the `Vagrantfile` cannot be found, if the container ID is missing, or if execution fails.
 pub fn execute(cwd: &Path, args: &DockerLogsArgs) -> Result<(), MigratoryError> {
-    let path = cwd.join("Vagrantfile");
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    let bin = if cfg!(test) { "echo" } else { "docker" };
+    execute_with_bin(cwd, args, bin)
+}
 
-    fn get_ui() -> Box<dyn crate::ui::Ui + Send + Sync> {
-        if std::env::args().any(|arg| arg == "--machine-readable") {
-            Box::new(crate::ui::MachineReadableUi)
-        } else {
-            Box::new(crate::ui::ConsoleUi)
-        }
-    }
-    let base_ui = get_ui();
+/// Executes the `docker-logs` command using a custom `docker` binary.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `docker-logs` command.
+/// * `docker_bin` - Executable name or path for `docker`.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if the `Vagrantfile` cannot be found, if the container ID is missing, or if execution fails.
+pub fn execute_with_bin(
+    cwd: &Path,
+    args: &DockerLogsArgs,
+    docker_bin: &str,
+) -> Result<(), MigratoryError> {
+    let env_config = crate::config::load_environment_config(cwd)?;
 
+    let base_ui = crate::ui::default_ui();
     let ui = crate::ui::ConcurrentUi::new(base_ui);
-
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
     let machine_name = env_config
         .machines
         .iter()
         .find(|(_, m)| m.vm.providers.iter().any(|p| p.name == "docker"))
         .map(|(name, _)| name.clone())
         .or_else(|| env_config.machines.keys().next().cloned())
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or(String::from("default"));
 
-    let state_mgr = StateManager::new(cwd.join(".vagrant"));
+    let state_mgr = LocalStateManager::new(cwd.join(".vagrant"));
 
     let machine_id = match state_mgr.read_id(&machine_name, "docker")? {
         Some(id) if !id.trim().is_empty() => id,
         _ => {
             return Err(MigratoryError::NotFound(format!(
-                "Docker container ID for machine '{}' not found. Is the container running?",
-                machine_name
+                "Docker container ID for machine '{machine_name}' not found. Is the container running?"
             )));
         }
     };
@@ -94,48 +104,43 @@ pub fn execute(cwd: &Path, args: &DockerLogsArgs) -> Result<(), MigratoryError> 
 
     cmd_args.push(&machine_id);
 
-    run_docker_logs(&cmd_args, &ui, &machine_name)?;
+    run_docker_logs(docker_bin, &cmd_args, &ui, &machine_name)?;
 
     Ok(())
 }
 
-/// Executes the `run_docker_logs` function.
+/// Invokes the `docker logs` subprocess with the constructed argument list.
 ///
 /// # Arguments
 ///
-/// * `cmd_args` - The `cmd_args` argument.
-/// * `ui` - The `ui` argument.
-/// * `machine_name` - The `machine_name` argument.
+/// * `docker_bin` - Executable name or path for `docker`.
+/// * `cmd_args` - Slice of CLI arguments to pass to `docker`.
+/// * `ui` - Synchronized UI handle for emitting warnings.
+/// * `machine_name` - Name of the target machine for UI attribution.
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if spawning `docker` fails or exits non-zero.
 fn run_docker_logs(
+    docker_bin: &str,
     cmd_args: &[&str],
     ui: &crate::ui::ConcurrentUi,
     machine_name: &str,
 ) -> Result<(), MigratoryError> {
-    if cfg!(test) {
-        if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_LOGS_ERROR").is_ok() {
-            ui.warn(machine_name, "Docker logs failed.");
-            return Err(MigratoryError::Generic(
-                "Docker logs failed with exit status".to_string(),
-            ));
-        }
-        return Ok(());
-    }
-
-    let status = Command::new("docker")
+    let status = Command::new(docker_bin)
         .args(cmd_args)
         .status()
         .map_err(map_docker_error)?;
 
     if !status.success() {
         ui.warn(machine_name, "Docker logs failed.");
+        return Err(MigratoryError::Generic(
+            "Docker logs failed with exit status".to_string(),
+        ));
     }
 
     Ok(())
@@ -143,20 +148,13 @@ fn run_docker_logs(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_docker_logs_missing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_logs_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = DockerLogsArgs {
             follow: false,
@@ -169,18 +167,20 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        assert!(
+            map_docker_error(std::io::Error::other("err"))
+                .to_string()
+                .contains("err")
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_logs_container_not_found() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_logs_container_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Write a mock vagrantfile without saved container id
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = DockerLogsArgs {
             follow: false,
@@ -194,20 +194,18 @@ mod tests {
         assert!(
             matches!(result, Err(MigratoryError::NotFound(msg)) if msg.contains("Docker container ID for machine 'default' not found"))
         );
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_logs_saved_id() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_logs_saved_id() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let state_dir = cwd.join(".vagrant/machines/default/docker");
-        fs::create_dir_all(&state_dir).expect("operation should succeed");
-        fs::write(state_dir.join("id"), "saved-docker-id").expect("operation should succeed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "saved-docker-id")?;
 
         let args = DockerLogsArgs {
             follow: true,
@@ -219,14 +217,12 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_logs_custom_machine_in_vagrantfile() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_logs_custom_machine_in_vagrantfile() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vf_content = r#"
@@ -236,10 +232,10 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vf_content).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vf_content)?;
         let state_dir = cwd.join(".vagrant/machines/app/docker");
-        fs::create_dir_all(&state_dir).expect("operation should succeed");
-        fs::write(state_dir.join("id"), "app-container-id").expect("operation should succeed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "app-container-id")?;
 
         let args = DockerLogsArgs {
             follow: false,
@@ -251,24 +247,18 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_logs_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_LOGS_ERROR", "1");
-        }
-
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_docker_logs_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let state_dir = cwd.join(".vagrant/machines/default/docker");
-        fs::create_dir_all(&state_dir).expect("operation should succeed");
-        fs::write(state_dir.join("id"), "saved-docker-id").expect("operation should succeed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "saved-docker-id")?;
 
         let args = DockerLogsArgs {
             follow: false,
@@ -278,12 +268,8 @@ end
             no_follow: false,
             no_prefix: false,
         };
-        let result = execute(cwd, &args);
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_LOGS_ERROR");
-        }
-
+        let result = execute_with_bin(cwd, &args, "false");
         assert!(result.is_err());
+        Ok(())
     }
 }

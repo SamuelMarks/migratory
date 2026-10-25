@@ -1,10 +1,20 @@
 //! Helper utilities and tests for creating mock box archives.
 
+#![allow(clippy::multiple_crate_versions)]
+
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::fs::File;
 
 /// Creates a valid (empty) `.box` tar.gz archive at the given destination path.
+///
+/// # Arguments
+///
+/// * `path` - Destination filesystem path for the created `.box` archive.
+///
+/// # Returns
+///
+/// Returns `Ok(())` when the archive is created and finalized.
 ///
 /// # Errors
 ///

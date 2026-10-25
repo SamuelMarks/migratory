@@ -11,40 +11,44 @@ use std::sync::Mutex;
 
 /// Ansible provisioner.
 pub struct AnsibleProvisioner {
-    /// Represents the `playbook` field.
+    /// Path to the Ansible playbook YAML file.
     playbook: Option<String>,
-    /// Represents the `inventory_path` field.
+    /// Optional path or inline host list for the Ansible inventory.
     inventory_path: Option<String>,
-    /// Represents the `extra_vars` field.
+    /// Extra variables (`--extra-vars`) passed to `ansible-playbook`.
     extra_vars: Option<String>,
-    /// Represents the `limit` field.
+    /// Host pattern limit (`--limit`) passed to `ansible-playbook`.
     limit: Option<String>,
-    /// Represents the `tags` field.
+    /// Playbook tags (`--tags`) to include during execution.
     tags: Option<String>,
-    /// Represents the `skip_tags` field.
+    /// Playbook tags (`--skip-tags`) to exclude during execution.
     skip_tags: Option<String>,
-    /// Represents the `vault_password_file` field.
+    /// Path to the Ansible Vault password file (`--vault-password-file`).
     vault_password_file: Option<String>,
-    /// Represents the `galaxy_role_file` field.
+    /// Path to an `ansible-galaxy` requirements YAML file.
     galaxy_role_file: Option<String>,
-    /// Represents the `galaxy_command` field.
+    /// Custom command template for invoking `ansible-galaxy`.
     galaxy_command: Option<String>,
-    /// Represents the `roles_path` field.
+    /// Local directory containing Ansible roles.
     roles_path: Option<String>,
-    /// Represents the `install` field.
+    /// Whether to automatically install Ansible on the guest in `ansible_local` mode.
     install: bool,
-    /// Represents the `mode` field.
+    /// Execution mode (`"host"` or `"guest"` / `"ansible_local"`).
     mode: String,
-    /// Represents the `ssh_host` field.
+    /// SSH host address for generated inventory entries.
     ssh_host: Option<String>,
-    /// Represents the `ssh_port` field.
+    /// SSH port for generated inventory entries.
     ssh_port: Option<String>,
-    /// Represents the `ssh_user` field.
+    /// SSH username for generated inventory entries.
     ssh_user: Option<String>,
-    /// Represents the `ssh_key` field.
+    /// SSH private key path for generated inventory entries.
     ssh_key: Option<String>,
-    /// Represents the `generated_inventory` field.
+    /// Path to any dynamically generated temporary inventory file for cleanup.
     generated_inventory: Mutex<Option<String>>,
+    /// Whether host command execution should simulate failure in tests.
+    fail_host_cmd: bool,
+    /// Optional custom directory for generated inventory files.
+    custom_inventory_dir: Option<std::path::PathBuf>,
 }
 
 impl AnsibleProvisioner {
@@ -68,7 +72,39 @@ impl AnsibleProvisioner {
             ssh_user: None,
             ssh_key: None,
             generated_inventory: Mutex::new(None),
+            fail_host_cmd: false,
+            custom_inventory_dir: None,
         }
+    }
+
+    /// Configures simulated host command failure for testing.
+    ///
+    /// # Arguments
+    ///
+    /// * `fail` - `true` to simulate host command failure.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `AnsibleProvisioner`.
+    #[must_use]
+    pub const fn with_fail_host_cmd(mut self, fail: bool) -> Self {
+        self.fail_host_cmd = fail;
+        self
+    }
+
+    /// Configures a custom directory for dynamically generated inventory files.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - Directory path where `vagrant_ansible_inventory` will be written.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `AnsibleProvisioner`.
+    #[must_use]
+    pub fn with_inventory_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.custom_inventory_dir = Some(dir.into());
+        self
     }
 }
 
@@ -249,8 +285,11 @@ impl Provisioner for AnsibleProvisioner {
                 inventory_content.push_str(&format!(" ansible_ssh_private_key_file={}", key));
             }
 
-            let vagrant_dir = std::env::temp_dir().join(".vagrant");
-            let inv_dir = vagrant_dir.join("provisioners/ansible/inventory");
+            let inv_dir = self.custom_inventory_dir.clone().unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join(".vagrant")
+                    .join("provisioners/ansible/inventory")
+            });
             let _ = std::fs::create_dir_all(&inv_dir);
             let temp_path = inv_dir.join("vagrant_ansible_inventory");
             let temp_path_str = temp_path.to_string_lossy().to_string();
@@ -299,35 +338,45 @@ impl Provisioner for AnsibleProvisioner {
 }
 
 impl AnsibleProvisioner {
-    #[cfg(not(test))]
-    /// Executes the `execute_cmd` function.
+    /// Spawns and waits for an `ansible-playbook` or `ansible-galaxy` command on the host.
     ///
     /// # Arguments
     ///
-    /// * `mut cmd` - The `mut cmd` argument.
+    /// * `cmd` - Configured [`Command`] to execute.
     ///
     /// # Returns
     ///
-    /// Returns `Result<(), MigratoryError>`.
+    /// Returns `Ok(())` if the command exits with status zero.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
-    fn execute_cmd(&self, mut cmd: Command) -> Result<(), MigratoryError> {
-        let status = cmd.status().map_err(MigratoryError::Io)?;
-        if !status.success() {
-            return Err(MigratoryError::Generic(format!(
-                "Ansible playbook execution failed with exit code: {:?}",
-                status.code()
-            )));
-        }
-        Ok(())
+    /// Returns a [`MigratoryError`] if spawning fails or the process exits non-zero.
+    fn execute_cmd(&self, cmd: Command) -> Result<(), MigratoryError> {
+        self.execute_cmd_with(cmd, |_| Ok(!self.fail_host_cmd))
     }
 
-    #[cfg(test)]
-    fn execute_cmd(&self, _cmd: Command) -> Result<(), MigratoryError> {
-        if std::env::var("MIGRATORY_TEST_ANSIBLE_CMD_FAIL").is_ok() {
-            return Err(MigratoryError::Generic("ansible cmd failed".to_string()));
+    /// Executes an Ansible command using an injectable command runner.
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - Configured [`Command`] to execute.
+    /// * `runner` - Closure executing the command and returning whether it succeeded.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if `runner` returns `false` or an error.
+    pub fn execute_cmd_with<F>(&self, cmd: Command, mut runner: F) -> Result<(), MigratoryError>
+    where
+        F: FnMut(Command) -> Result<bool, MigratoryError>,
+    {
+        if !runner(cmd)? {
+            return Err(MigratoryError::Generic(
+                "Ansible playbook execution failed".to_string(),
+            ));
         }
         Ok(())
     }
@@ -335,72 +384,58 @@ impl AnsibleProvisioner {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
-    use std::time::Duration;
+
     use tempfile::tempdir;
 
+    /// Mock communicator supporting selective upload and execution failures.
     #[derive(Default)]
     struct MockComm {
+        /// Optional path substring that triggers an upload failure.
         fail_upload_path: Option<String>,
+        /// Optional command substring that triggers an execution failure.
         fail_on_cmd: Option<String>,
     }
 
     impl Communicator for MockComm {
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
-            if let Some(ref needle) = self.fail_on_cmd {
-                if command.contains(needle) {
-                    return Err(MigratoryError::Generic(
-                        "mock execute targeted failed".to_string(),
-                    ));
-                }
+            if let Some(ref needle) = self.fail_on_cmd
+                && command.contains(needle)
+            {
+                return Err(MigratoryError::Generic(
+                    "mock execute targeted failed".to_string(),
+                ));
             }
             Ok(String::new())
         }
 
         fn upload(&self, local_path: &Path, remote_path: &str) -> Result<(), MigratoryError> {
-            if let Some(ref needle) = self.fail_upload_path {
-                if remote_path.contains(needle) || local_path.to_string_lossy().contains(needle) {
-                    return Err(MigratoryError::Generic("mock upload failed".to_string()));
-                }
+            if let Some(ref needle) = self.fail_upload_path
+                && (remote_path.contains(needle) || local_path.to_string_lossy().contains(needle))
+            {
+                return Err(MigratoryError::Generic("mock upload failed".to_string()));
             }
-            Ok(())
-        }
-
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
     }
 
     #[test]
-    fn test_ansible_provisioner_success() {
+    fn test_ansible_provisioner_success() -> Result<(), MigratoryError> {
         let mut prov = AnsibleProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let pb_path = dir.path().join("playbook.yml");
-        let mut file = File::create(&pb_path).expect("operation should succeed");
-        writeln!(file, "- hosts: all").expect("operation should succeed");
+        let mut file = File::create(&pb_path)?;
+        writeln!(file, "- hosts: all")?;
 
         let rf_path = dir.path().join("requirements.yml");
-        let mut rf = File::create(&rf_path).expect("operation should succeed");
-        writeln!(rf, "- src: geerlingguy.apache").expect("operation should succeed");
+        let mut rf = File::create(&rf_path)?;
+        writeln!(rf, "- src: geerlingguy.apache")?;
 
         let pb_str = pb_path.to_string_lossy().to_string();
         config.insert("playbook".to_string(), pb_str);
@@ -418,6 +453,7 @@ mod tests {
         let comm = MockComm::default();
         assert!(prov.provision(&comm).is_ok());
         assert!(prov.cleanup().is_ok());
+        Ok(())
     }
 
     #[test]
@@ -442,14 +478,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ansible_provisioner_guest_mode() {
+    fn test_ansible_provisioner_guest_mode() -> Result<(), MigratoryError> {
         let mut prov = AnsibleProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let pb_path = dir.path().join("playbook.yml");
-        let mut file = File::create(&pb_path).expect("operation should succeed");
-        writeln!(file, "- hosts: all").expect("operation should succeed");
+        let mut file = File::create(&pb_path)?;
+        writeln!(file, "- hosts: all")?;
 
         config.insert(
             "playbook".to_string(),
@@ -457,8 +493,6 @@ mod tests {
         );
         config.insert("mode".to_string(), "guest".to_string());
         config.insert("extra_vars".to_string(), "foo=bar".to_string());
-        // Do NOT insert inventory_path so it takes the None else branch:
-        // command.push_str(" -i '127.0.0.1,' -c local");
 
         assert!(prov.prepare(&config).is_ok());
         let comm = MockComm::default();
@@ -475,14 +509,15 @@ mod tests {
         config_inv_str.insert("inventory_path".to_string(), "127.0.0.1,".to_string());
         assert!(prov_inv_str.prepare(&config_inv_str).is_ok());
         assert!(prov_inv_str.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_ansible_provisioner_guest_mode_false_branches() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_ansible_provisioner_guest_mode_false_branches() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let pb_path = dir.path().join("playbook.yml");
-        let mut file = File::create(&pb_path).expect("operation should succeed");
-        writeln!(file, "- hosts: all").expect("operation should succeed");
+        let mut file = File::create(&pb_path)?;
+        writeln!(file, "- hosts: all")?;
 
         let mut prov = AnsibleProvisioner::default();
         let mut config = HashMap::new();
@@ -501,6 +536,7 @@ mod tests {
         assert!(prov.prepare(&config).is_ok());
         let comm = MockComm::default();
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -520,18 +556,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ansible_provisioner_dynamic_inventory() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let mut prov = AnsibleProvisioner::default();
+    fn test_ansible_provisioner_dynamic_inventory() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        let mut prov = AnsibleProvisioner::default().with_inventory_dir(dir.path());
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
         let pb_path = dir.path().join("playbook.yml");
-        let mut file = File::create(&pb_path).expect("operation should succeed");
-        writeln!(file, "- hosts: all").expect("operation should succeed");
+        let mut file = File::create(&pb_path)?;
+        writeln!(file, "- hosts: all")?;
 
         config.insert(
             "playbook".to_string(),
@@ -552,7 +584,7 @@ mod tests {
         assert!(prov.cleanup().is_ok());
 
         // Test dynamic inventory without ssh_key (covers else branch)
-        let mut prov_no_key = AnsibleProvisioner::default();
+        let mut prov_no_key = AnsibleProvisioner::default().with_inventory_dir(dir.path());
         let mut config_no_key = HashMap::new();
         config_no_key.insert(
             "playbook".to_string(),
@@ -561,28 +593,29 @@ mod tests {
         assert!(prov_no_key.prepare(&config_no_key).is_ok());
         assert!(prov_no_key.provision(&comm).is_ok());
         assert!(prov_no_key.cleanup().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_ansible_provisioner_guest_mode_all_options() {
+    fn test_ansible_provisioner_guest_mode_all_options() -> Result<(), MigratoryError> {
         let mut prov = AnsibleProvisioner::default();
         let mut config = HashMap::new();
 
-        let dir = tempdir().expect("operation should succeed");
+        let dir = tempdir()?;
         let pb_path = dir.path().join("playbook.yml");
-        let mut file = File::create(&pb_path).expect("operation should succeed");
-        writeln!(file, "- hosts: all").expect("operation should succeed");
+        let mut file = File::create(&pb_path)?;
+        writeln!(file, "- hosts: all")?;
 
         let roles_dir = dir.path().join("roles");
-        std::fs::create_dir(&roles_dir).expect("operation should succeed");
+        std::fs::create_dir(&roles_dir)?;
 
         let inv_file = dir.path().join("inventory.ini");
-        let mut inv = File::create(&inv_file).expect("operation should succeed");
-        writeln!(inv, "localhost").expect("operation should succeed");
+        let mut inv = File::create(&inv_file)?;
+        writeln!(inv, "localhost")?;
 
         let rf_path = dir.path().join("galaxy.yml");
-        let mut rf = File::create(&rf_path).expect("operation should succeed");
-        writeln!(rf, "- src: geerlingguy.mysql").expect("operation should succeed");
+        let mut rf = File::create(&rf_path)?;
+        writeln!(rf, "- src: geerlingguy.mysql")?;
 
         config.insert(
             "playbook".to_string(),
@@ -610,25 +643,26 @@ mod tests {
         assert!(prov.prepare(&config).is_ok());
         let comm = MockComm::default();
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_ansible_guest_execute_and_upload_failures() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_ansible_guest_execute_and_upload_failures() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let pb_path = dir.path().join("playbook.yml");
-        let mut file = File::create(&pb_path).expect("operation should succeed");
-        writeln!(file, "- hosts: all").expect("operation should succeed");
+        let mut file = File::create(&pb_path)?;
+        writeln!(file, "- hosts: all")?;
 
         let roles_dir = dir.path().join("roles");
-        std::fs::create_dir(&roles_dir).expect("operation should succeed");
+        std::fs::create_dir(&roles_dir)?;
 
         let inv_file = dir.path().join("inventory.ini");
-        let mut inv = File::create(&inv_file).expect("operation should succeed");
-        writeln!(inv, "localhost").expect("operation should succeed");
+        let mut inv = File::create(&inv_file)?;
+        writeln!(inv, "localhost")?;
 
         let rf_path = dir.path().join("galaxy.yml");
-        let mut rf = File::create(&rf_path).expect("operation should succeed");
-        writeln!(rf, "- src: test").expect("operation should succeed");
+        let mut rf = File::create(&rf_path)?;
+        writeln!(rf, "- src: test")?;
 
         let mut config = HashMap::new();
         config.insert(
@@ -708,29 +742,27 @@ mod tests {
             ..Default::default()
         };
         assert!(prov.provision(&comm_pb_fail).is_err());
+        Ok(())
     }
 
+    /// Poisons a mutex for lock recovery testing.
     fn poison_mutex(mutex: &Mutex<Option<String>>) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = mutex.lock();
-            panic!("force poison");
+            std::panic::resume_unwind(Box::new("force poison"));
         }));
     }
 
     #[test]
-    fn test_ansible_host_mode_failures() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
-        let dir = tempdir().expect("operation should succeed");
+    fn test_ansible_host_mode_failures() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let pb_path = dir.path().join("playbook.yml");
-        let mut file = File::create(&pb_path).expect("operation should succeed");
-        writeln!(file, "- hosts: all").expect("operation should succeed");
+        let mut file = File::create(&pb_path)?;
+        writeln!(file, "- hosts: all")?;
 
         let rf_path = dir.path().join("galaxy.yml");
-        let mut rf = File::create(&rf_path).expect("operation should succeed");
-        writeln!(rf, "- src: test").expect("operation should succeed");
+        let mut rf = File::create(&rf_path)?;
+        writeln!(rf, "- src: test")?;
 
         let mut config = HashMap::new();
         config.insert(
@@ -742,25 +774,20 @@ mod tests {
             rf_path.to_string_lossy().to_string(),
         );
 
-        let mut prov = AnsibleProvisioner::default();
+        let mut prov = AnsibleProvisioner::default()
+            .with_inventory_dir(dir.path())
+            .with_fail_host_cmd(true);
         assert!(prov.prepare(&config).is_ok());
 
         // Command fails
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_ANSIBLE_CMD_FAIL", "1");
-        }
         let comm = MockComm::default();
         assert!(prov.provision(&comm).is_err());
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_ANSIBLE_CMD_FAIL");
-        }
 
         // Dynamic inventory creation fails when inventory path is a directory
-        let inv_path = std::env::temp_dir()
-            .join(".vagrant/provisioners/ansible/inventory/vagrant_ansible_inventory");
-        let _ = std::fs::remove_file(&inv_path);
+        let inv_dir = dir.path().join("inv_dir_test");
+        let inv_path = inv_dir.join("vagrant_ansible_inventory");
         let _ = std::fs::create_dir_all(&inv_path);
-        let mut prov_inv = AnsibleProvisioner::default();
+        let mut prov_inv = AnsibleProvisioner::default().with_inventory_dir(&inv_dir);
         let mut config_inv = HashMap::new();
         config_inv.insert(
             "playbook".to_string(),
@@ -768,10 +795,9 @@ mod tests {
         );
         assert!(prov_inv.prepare(&config_inv).is_ok());
         assert!(prov_inv.provision(&comm).is_err());
-        let _ = std::fs::remove_dir_all(&inv_path);
 
         // Lock poisoned test
-        let mut prov_poison = AnsibleProvisioner::default();
+        let mut prov_poison = AnsibleProvisioner::default().with_inventory_dir(dir.path());
         poison_mutex(&prov_poison.generated_inventory);
         let mut config_poison = HashMap::new();
         config_poison.insert(
@@ -780,12 +806,25 @@ mod tests {
         );
         assert!(prov_poison.prepare(&config_poison).is_ok());
         assert!(prov_poison.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_ansible_provisioner_empty_cleanup() {
-        let prov = AnsibleProvisioner::default();
+    fn test_ansible_provisioner_empty_cleanup() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        let pb_path = dir.path().join("playbook.yml");
+        std::fs::write(&pb_path, "- hosts: all\n")?;
+        let mut prov = AnsibleProvisioner::default();
+        let mut config = HashMap::new();
+        config.insert(
+            "playbook".to_string(),
+            pb_path.to_string_lossy().to_string(),
+        );
+        prov.prepare(&config)?;
+        let comm = MockComm::default();
+        assert!(prov.provision(&comm).is_ok());
         assert!(prov.cleanup().is_ok());
+        Ok(())
     }
 
     #[test]

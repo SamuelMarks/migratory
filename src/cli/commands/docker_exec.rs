@@ -5,7 +5,7 @@
 
 use crate::cli::DockerExecArgs;
 use crate::error::MigratoryError;
-use crate::provider::StateManager;
+use crate::state::local::LocalStateManager;
 use crate::ui::{ConsoleUi, Ui};
 use std::path::Path;
 use std::process::Command;
@@ -39,13 +39,38 @@ fn map_docker_error(e: std::io::Error) -> MigratoryError {
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found, the container ID is missing,
 /// or if command execution fails.
 pub fn execute(cwd: &Path, args: &DockerExecArgs) -> Result<(), MigratoryError> {
+    let bin = if cfg!(test) { "echo" } else { "docker" };
+    execute_with_bin(cwd, args, bin)
+}
+
+/// Executes the `docker-exec` command using a custom `docker` binary.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `docker-exec` command.
+/// * `docker_bin` - Executable name or path for `docker`.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found, the container ID is missing,
+/// or if command execution fails.
+pub fn execute_with_bin(
+    cwd: &Path,
+    args: &DockerExecArgs,
+    docker_bin: &str,
+) -> Result<(), MigratoryError> {
     let path = cwd.join("Vagrantfile");
     if !path.exists() {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
     }
 
     let ui = ConsoleUi;
-    let state_mgr = StateManager::new(cwd.join(".vagrant"));
+    let state_mgr = LocalStateManager::new(cwd.join(".vagrant"));
 
     let target_machine = args.name.as_deref().unwrap_or("default");
 
@@ -92,7 +117,7 @@ pub fn execute(cwd: &Path, args: &DockerExecArgs) -> Result<(), MigratoryError> 
         cmd_args.push("sh");
     }
 
-    run_docker_exec(&cmd_args, &ui, target_machine)?;
+    run_docker_exec(docker_bin, &cmd_args, &ui, target_machine)?;
 
     Ok(())
 }
@@ -101,6 +126,7 @@ pub fn execute(cwd: &Path, args: &DockerExecArgs) -> Result<(), MigratoryError> 
 ///
 /// # Arguments
 ///
+/// * `docker_bin` - Executable name or path for `docker`.
 /// * `cmd_args` - The command-line arguments to pass to `docker`.
 /// * `ui` - The console UI interface for emitting warnings/logs.
 /// * `machine_name` - The target machine name for logging.
@@ -113,21 +139,12 @@ pub fn execute(cwd: &Path, args: &DockerExecArgs) -> Result<(), MigratoryError> 
 ///
 /// Returns a `MigratoryError` if spawning the process fails or the process exits with a non-zero status.
 fn run_docker_exec(
+    docker_bin: &str,
     cmd_args: &[&str],
     ui: &ConsoleUi,
     machine_name: &str,
 ) -> Result<(), MigratoryError> {
-    if cfg!(test) {
-        if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_EXEC_ERROR").is_ok() {
-            ui.warn(machine_name, "Docker exec failed.");
-            return Err(MigratoryError::Generic(
-                "Docker exec failed with exit status".to_string(),
-            ));
-        }
-        return Ok(());
-    }
-
-    let status = Command::new("docker")
+    let status = Command::new(docker_bin)
         .args(cmd_args)
         .status()
         .map_err(map_docker_error)?;
@@ -144,36 +161,30 @@ fn run_docker_exec(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
     #[cfg(unix)]
-    fn test_execute_invalid_utf8_path() {
+    fn test_execute_invalid_utf8_path() -> Result<(), MigratoryError> {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        let dir = tempfile::tempdir().expect("operation should succeed");
+        let dir = tempfile::tempdir()?;
         let mut path = dir.path().to_path_buf();
         let invalid_utf8 = vec![0xFF, 0xFF, 0xFF];
         path.push(OsString::from_vec(invalid_utf8));
 
-        let args = Default::default();
+        let args = DockerExecArgs::default();
         let res = super::execute(&path, &args);
         assert!(res.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_exec_missing_vagrantfile() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_docker_exec_missing_vagrantfile() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = DockerExecArgs {
             name: None,
@@ -191,16 +202,14 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_exec_missing_container_id() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_docker_exec_missing_container_id() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = DockerExecArgs {
             name: None,
@@ -218,19 +227,17 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_exec_empty_container_id() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_docker_exec_empty_container_id() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let state_dir = cwd.join(".vagrant/machines/default/docker");
-        fs::create_dir_all(&state_dir).expect("create_dir failed");
-        fs::write(state_dir.join("id"), "   ").expect("write failed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "   ")?;
 
         let args = DockerExecArgs {
             name: None,
@@ -248,20 +255,18 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_exec_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_docker_exec_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let state_dir = cwd.join(".vagrant/machines/default/docker");
-        fs::create_dir_all(&state_dir).expect("create_dir failed");
-        fs::write(state_dir.join("id"), "container-123").expect("write failed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "container-123")?;
 
         let args = DockerExecArgs {
             name: None,
@@ -278,20 +283,18 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_exec_success_no_user() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_docker_exec_success_no_user() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let state_dir = cwd.join(".vagrant/machines/default/docker");
-        fs::create_dir_all(&state_dir).expect("create_dir failed");
-        fs::write(state_dir.join("id"), "container-123").expect("write failed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "container-123")?;
 
         let args = DockerExecArgs {
             name: None,
@@ -308,19 +311,17 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_exec_all_flags() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_docker_exec_all_flags() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let state_dir = cwd.join(".vagrant/machines/test-machine/docker");
-        fs::create_dir_all(&state_dir).expect("create_dir failed");
-        fs::write(state_dir.join("id"), "container-test-machine").expect("write failed");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "container-test-machine")?;
 
         let args = DockerExecArgs {
             name: Some("test-machine".to_string()),
@@ -338,23 +339,17 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_docker_exec_failure_propagation() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_docker_exec_failure_propagation() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
         let state_dir = cwd.join(".vagrant/machines/default/docker");
-        fs::create_dir_all(&state_dir).expect("create_dir failed");
-        fs::write(state_dir.join("id"), "container-123").expect("write failed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_EXEC_ERROR", "1");
-        }
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "container-123")?;
 
         let args = DockerExecArgs {
             name: None,
@@ -370,10 +365,10 @@ mod tests {
             no_prefix: false,
         };
 
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_EXEC_ERROR");
-        }
+        let result = execute_with_bin(cwd, &args, "false");
         assert!(result.is_err());
+        let missing_res = execute_with_bin(cwd, &args, "nonexistent_docker_bin_xyz");
+        assert!(missing_res.is_err());
+        Ok(())
     }
 }

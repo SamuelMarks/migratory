@@ -1856,13 +1856,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use clap::CommandFactory;
 
@@ -1872,27 +1865,30 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_from_success() {
+    fn test_parse_from_success() -> Result<(), clap::Error> {
         let args = vec!["migratory", "status"];
-        let cli = parse_from(args).expect("Failed to parse args");
+        let cli = parse_from(args)?;
         assert!(matches!(cli.command, Some(Commands::Status(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_parse_from_global_flags() {
+    fn test_parse_from_global_flags() -> Result<(), clap::Error> {
         let args = vec!["migratory", "--debug", "--no-tty", "status"];
-        let cli = parse_from(args).expect("Failed to parse args");
+        let cli = parse_from(args)?;
         assert!(cli.debug);
         assert!(cli.no_tty);
         assert!(matches!(cli.command, Some(Commands::Status(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_parse_version_flag() {
+    fn test_parse_version_flag() -> Result<(), clap::Error> {
         let args = vec!["migratory", "-v"];
-        let cli = parse_from(args).expect("Failed to parse args");
+        let cli = parse_from(args)?;
         assert!(cli.version);
         assert!(cli.command.is_none());
+        Ok(())
     }
 
     #[test]

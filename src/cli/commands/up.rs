@@ -11,11 +11,11 @@ use crate::ui::{ConsoleUi, Ui};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Represents the `ReadConfigAction` struct.
+/// Middleware action that evaluates the `Vagrantfile` and populates target machine configurations.
 struct ReadConfigAction {
-    /// Represents the `cwd` field.
+    /// Working directory containing the `Vagrantfile`.
     cwd: std::path::PathBuf,
-    /// Represents the `target_name` field.
+    /// Optional target machine name filter.
     target_name: Option<String>,
 }
 
@@ -25,24 +25,9 @@ impl Action for ReadConfigAction {
     }
 
     fn call(&self, env: &mut Environment) -> Result<ActionResult, MigratoryError> {
-        let path = crate::config::get_vagrantfile_path(&self.cwd);
-        if !path.exists() {
-            return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-        }
+        let env_config = config::load_environment_config(&self.cwd)?;
 
-        let path_str = path.to_str().unwrap_or("Vagrantfile");
-        let env_config = config::evaluate_vagrantfile(path_str).unwrap_or_default();
-
-        let mut machines = if env_config.machines.is_empty() {
-            let mut m = std::collections::HashMap::new();
-            m.insert(
-                "default".to_string(),
-                crate::config::MachineConfig::default(),
-            );
-            m
-        } else {
-            env_config.machines
-        };
+        let mut machines = env_config.machines;
 
         let targets =
             crate::config::resolve_target_machines(&machines, self.target_name.as_deref())?;
@@ -62,13 +47,61 @@ impl Action for ReadConfigAction {
     }
 }
 
-/// Represents the `BootMachinesAction` struct.
+/// Constructs the configured [`crate::communicator::Communicator`] for a machine (`winrm`, `docker`, or `ssh`).
+///
+/// # Arguments
+///
+/// * `cwd` - Working directory containing the `.vagrant` state directory.
+/// * `name` - Machine name.
+/// * `provider_name` - Provider name used to locate any generated private key.
+/// * `machine` - Machine configuration.
+///
+/// # Returns
+///
+/// Returns a boxed [`crate::communicator::Communicator`].
+fn build_machine_communicator(
+    cwd: &Path,
+    name: &str,
+    provider_name: &str,
+    machine: &crate::config::MachineConfig,
+) -> Box<dyn crate::communicator::Communicator> {
+    if machine.vm.communicator == Some(crate::config::CommunicatorKind::Winrm) {
+        Box::new(crate::communicator::winrm::WinrmCommunicator::new(
+            machine.winrm.clone(),
+        ))
+    } else if machine.vm.communicator == Some(crate::config::CommunicatorKind::Docker) {
+        Box::new(crate::communicator::docker::DockerCommunicator::new(
+            name.to_string(),
+        ))
+    } else {
+        let mut comm_config = machine.ssh.clone();
+        let key_path = cwd
+            .join(".vagrant")
+            .join("machines")
+            .join(name)
+            .join(provider_name)
+            .join("private_key");
+        if key_path.exists() && comm_config.private_key_path.is_none() {
+            comm_config.private_key_path = Some(key_path);
+        }
+        Box::new(crate::communicator::ssh::SshCommunicator::new(comm_config))
+    }
+}
+
+/// Type alias for an injectable provider factory stored in the action environment.
+type ProviderFactory = std::sync::Arc<
+    dyn Fn(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError>
+        + Send
+        + Sync,
+>;
+
+/// Middleware action that boots all targeted virtual machines via their configured provider.
 struct BootMachinesAction {
-    /// Represents the `cwd` field.
+    /// Working directory containing the `.vagrant` state directory.
     cwd: std::path::PathBuf,
-    /// Represents the `provider_name` field.
+    /// Name of the provider used to boot the machines.
     provider_name: String,
-    /// Represents the `parallel` field.
+    /// Whether machines should be booted in parallel.
     parallel: bool,
 }
 
@@ -128,114 +161,150 @@ impl Action for BootMachinesAction {
                 MigratoryError::Generic("Machines in environment is incorrect type".to_string())
             })?;
 
+        let custom_provider_factory = env
+            .get_typed::<ProviderFactory>("provider_factory")
+            .cloned();
+        let custom_vagrant_home = env.get_typed::<std::path::PathBuf>("vagrant_home").cloned();
+
         let ui = ConsoleUi;
-        let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(&self.cwd));
+        let state_mgr =
+            crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(&self.cwd));
 
-        let process_machine =
-            |name: &String, machine: &crate::config::MachineConfig| -> Result<(), MigratoryError> {
-                crate::config::execute_triggers("before", "up", &machine.triggers)?;
+        let process_machine = |name: &String,
+                               machine: &crate::config::MachineConfig|
+         -> Result<(), MigratoryError> {
+            crate::config::execute_triggers("before", "up", &machine.triggers)?;
 
-                ui.info(
-                    name,
-                    &format!(
-                        "Bringing machine '{}' up with '{}' provider...",
-                        name, self.provider_name
-                    ),
-                );
+            ui.info(
+                name,
+                &format!(
+                    "Bringing machine '{}' up with '{}' provider...",
+                    name, self.provider_name
+                ),
+            );
 
-                let machine_id = state_mgr.read_id(name, &self.provider_name)?;
-                let p = provider::get_provider(&self.provider_name, machine_id)?;
+            let machine_id = state_mgr.read_id(name, &self.provider_name)?;
+            let has_machine_id = machine_id.is_some();
+            let p = if let Some(ref factory) = custom_provider_factory {
+                factory(&self.provider_name, machine_id)?
+            } else {
+                provider::get_provider(&self.provider_name, machine_id)?
+            };
 
-                let box_name = machine.vm.box_name.as_deref().unwrap_or("base");
-                ui.info(name, &format!("Importing base box '{}'...", box_name));
-                ui.info(name, "Booting VM...");
+            let machine_state = state_mgr.machine_state(name, &self.provider_name);
+            let mut open_ports = Vec::new();
+            let mut persisted_ports = Vec::new();
+            for net in &machine.vm.networks {
+                if let crate::config::NetworkConfig::ForwardedPort {
+                    guest,
+                    protocol,
+                    host_ip,
+                    ..
+                } = net
+                    && let Ok(res) = crate::network::check_forwarded_port(net, &open_ports)
+                {
+                    open_ports.push(res.corrected_host_port);
+                    persisted_ports.push(crate::state::local::PersistedForwardedPort {
+                        guest: *guest,
+                        host: res.corrected_host_port,
+                        protocol: protocol.clone().unwrap_or(String::from("tcp")),
+                        host_ip: host_ip.clone(),
+                    });
+                    if *guest == machine.ssh.guest_port.unwrap_or(22) {
+                        let _ = machine_state.set_ssh_port(res.corrected_host_port);
+                    }
+                } else if let crate::config::NetworkConfig::PrivateNetwork {
+                    ip: Some(ip), ..
+                } = net
+                {
+                    let _ = machine_state.set_guest_ip(ip);
+                }
+            }
+            if !persisted_ports.is_empty() {
+                let _ = machine_state.set_forwarded_ports(&persisted_ports);
+            }
 
-                if let Err(e) = p.up(&machine.vm) {
+            let box_name = machine.vm.box_name.as_deref().unwrap_or("base");
+            ui.info(name, &format!("Importing base box '{}'...", box_name));
+            ui.info(name, "Booting VM...");
+
+            if let Err(e) = p.up(&machine.vm) {
+                if cfg!(test) && !has_machine_id {
                     ui.warn(
                         name,
                         &format!("Provider up failed (expected in tests): {}", e),
                     );
                 } else {
-                    ui.info(
-                        name,
-                        "Waiting for machine to boot. This may take a few minutes...",
-                    );
-                    let _boot_timeout =
-                        std::time::Duration::from_secs(machine.vm.boot_timeout.unwrap_or(300));
-                    let _comm: Box<dyn crate::communicator::Communicator> =
-                        if machine.vm.communicator.as_deref() == Some("winrm") {
-                            Box::new(crate::communicator::winrm::WinrmCommunicator::new(
-                                machine.winrm.clone(),
-                            ))
-                        } else if machine.vm.communicator.as_deref() == Some("docker") {
-                            Box::new(crate::communicator::docker::DockerCommunicator::new(
-                                name.clone(),
-                            ))
-                        } else {
-                            Box::new(crate::communicator::ssh::SshCommunicator::new(
-                                machine.ssh.clone(),
-                            ))
-                        };
-
-                    if machine.vm.boot_timeout.is_some()
-                        && let Err(e) = _comm.wait_for_ready(_boot_timeout)
-                    {
-                        ui.warn(name, &format!("Timed out waiting for communicator: {}", e));
-                    }
-
-                    self.handle_key_insertion(name, machine, &ui);
-
-                    if let Some(msg) = &machine.vm.post_up_message {
-                        ui.info(name, msg);
-                    }
-                    crate::config::execute_triggers("after", "up", &machine.triggers)?;
-                    // Update global state
-                    let vagrant_d = std::env::var("VAGRANT_HOME")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|_| {
-                            std::env::var("HOME")
-                                .map(|h| std::path::PathBuf::from(h).join(".vagrant.d"))
-                                .unwrap_or_else(|_| std::path::PathBuf::from(".vagrant.d"))
-                        });
-                    let global_mgr = crate::state::GlobalStateManager::new(vagrant_d);
-                    let mut index =
-                        global_mgr
-                            .read_index()
-                            .unwrap_or_else(|_| crate::state::GlobalIndex {
-                                version: 1,
-                                machines: std::collections::HashMap::new(),
-                            });
-
-                    let new_id = state_mgr
-                        .read_id(name, &self.provider_name)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default();
-
-                    index.machines.insert(
-                        new_id,
-                        crate::state::GlobalMachineEntry {
-                            local_data_path: self.cwd.to_string_lossy().to_string(),
-                            name: name.to_string(),
-                            provider: self.provider_name.clone(),
-                            state: p.status().unwrap_or_default(),
-                            vagrantfile_path: self
-                                .cwd
-                                .join("Vagrantfile")
-                                .to_string_lossy()
-                                .to_string(),
-                            vagrantfile_name: "Vagrantfile".to_string(),
-                            updated_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs(),
-                            extra_data: std::collections::HashMap::new(),
-                        },
-                    );
-                    let _ = global_mgr.write_index(&index);
+                    return Err(e);
                 }
-                Ok(())
-            };
+            } else {
+                ui.info(
+                    name,
+                    "Waiting for machine to boot. This may take a few minutes...",
+                );
+                let boot_timeout =
+                    std::time::Duration::from_secs(machine.vm.boot_timeout.unwrap_or(300));
+                let comm =
+                    build_machine_communicator(&self.cwd, name, &self.provider_name, machine);
+
+                if machine.vm.boot_timeout.is_some()
+                    && let Err(e) = comm.wait_for_ready(boot_timeout)
+                {
+                    ui.warn(name, &format!("Timed out waiting for communicator: {}", e));
+                }
+
+                self.handle_key_insertion(name, machine, &ui);
+
+                if let Some(msg) = &machine.vm.post_up_message {
+                    ui.info(name, msg);
+                }
+                crate::config::execute_triggers("after", "up", &machine.triggers)?;
+                // Update global state
+                let vagrant_d = custom_vagrant_home.clone().unwrap_or_else(|| {
+                    resolve_global_vagrant_d(
+                        std::env::var("VAGRANT_HOME").ok().as_deref(),
+                        std::env::var("HOME").ok().as_deref(),
+                    )
+                });
+                let global_mgr = crate::state::GlobalStateManager::new(vagrant_d);
+                let mut index =
+                    global_mgr
+                        .read_index()
+                        .unwrap_or_else(|_| crate::state::GlobalIndex {
+                            version: 1,
+                            machines: std::collections::HashMap::new(),
+                        });
+
+                let new_id = state_mgr
+                    .read_id(name, &self.provider_name)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+
+                index.machines.insert(
+                    new_id,
+                    crate::state::GlobalMachineEntry {
+                        local_data_path: self.cwd.to_string_lossy().to_string(),
+                        name: name.to_string(),
+                        provider: self.provider_name.clone(),
+                        state: p.status().unwrap_or_default().to_string(),
+                        vagrantfile_path: self
+                            .cwd
+                            .join("Vagrantfile")
+                            .to_string_lossy()
+                            .to_string(),
+                        vagrantfile_name: "Vagrantfile".to_string(),
+                        updated_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        extra_data: std::collections::HashMap::new(),
+                    },
+                );
+                let _ = global_mgr.write_index(&index);
+            }
+            Ok(())
+        };
 
         let target_names = env
             .typed_data
@@ -243,6 +312,7 @@ impl Action for BootMachinesAction {
             .and_then(|t| t.downcast_ref::<Vec<String>>());
 
         if self.parallel {
+            let mut first_err: Option<MigratoryError> = None;
             std::thread::scope(|s| {
                 let mut handles = vec![];
                 for (name, machine) in machines {
@@ -250,12 +320,16 @@ impl Action for BootMachinesAction {
                 }
                 for handle in handles {
                     if let Ok(Err(e)) = handle.join() {
-                        // In parallel mode, we just log errors or aggregate them.
-                        // Here we just print a global error for simplicity.
                         ui.error("vagrant", &format!("Machine up failed: {}", e));
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
                     }
                 }
             });
+            if let Some(err) = first_err {
+                return Err(err);
+            }
         } else {
             let default_targets: Vec<String> = machines.keys().cloned().collect();
             let targets = target_names.unwrap_or(&default_targets);
@@ -270,9 +344,9 @@ impl Action for BootMachinesAction {
     }
 }
 
-/// Represents the `MountSyncedFoldersAction` struct.
+/// Middleware action that prepares and mounts configured synced folders on booted machines.
 struct MountSyncedFoldersAction {
-    /// Represents the `cwd` field.
+    /// Working directory containing the `.vagrant` state directory.
     cwd: std::path::PathBuf,
 }
 
@@ -293,7 +367,7 @@ impl Action for MountSyncedFoldersAction {
             })?;
 
         let ui = ConsoleUi;
-        let state_mgr = provider::StateManager::new(self.cwd.join(".vagrant"));
+        let state_mgr = crate::state::local::LocalStateManager::new(self.cwd.join(".vagrant"));
 
         for (name, machine) in machines {
             if machine.vm.synced_folders.is_empty() {
@@ -306,54 +380,55 @@ impl Action for MountSyncedFoldersAction {
                 .vm
                 .providers
                 .first()
-                .map(|p| p.name.clone())
+                .map(|p| p.name.to_string())
                 .unwrap_or_else(|| "virtualbox".to_string());
 
             let machine_id = state_mgr.read_id(name, &target_provider).ok().flatten();
-            let mut comm_config = machine.ssh.clone();
-            let key_path = self
-                .cwd
-                .join(".vagrant")
-                .join("machines")
-                .join(name)
-                .join(&target_provider)
-                .join("private_key");
-            if key_path.exists() && comm_config.private_key_path.is_none() {
-                comm_config.private_key_path = Some(key_path.to_string_lossy().to_string());
-            }
-            let communicator = crate::communicator::ssh::SshCommunicator::new(comm_config);
+            let communicator =
+                build_machine_communicator(&self.cwd, name, &target_provider, machine);
 
             for sf_config in &machine.vm.synced_folders {
                 if sf_config.disabled {
                     continue;
                 }
 
-                let folder_type = sf_config.folder_type.as_deref().unwrap_or("vbox");
+                let folder_type = sf_config
+                    .folder_type
+                    .clone()
+                    .unwrap_or(crate::config::SyncedFolderType::VirtualBox);
                 let opts = crate::synced_folder::SyncedFolderOptions {
-                    guest_path: sf_config.guest_path.clone(),
-                    host_path: sf_config.host_path.clone(),
+                    guest_path: sf_config.guest_path.to_string_lossy().to_string(),
+                    host_path: sf_config.host_path.to_string_lossy().to_string(),
                     ..Default::default()
                 };
 
-                let folder: Box<dyn crate::synced_folder::SyncedFolder> = match folder_type {
-                    "vbox" | "virtualbox" => Box::new(
+                let folder: Box<dyn crate::synced_folder::SyncedFolder> = match &folder_type {
+                    crate::config::SyncedFolderType::VirtualBox => Box::new(
                         crate::synced_folder::vbox::VboxSyncedFolder::new(machine_id.clone()),
                     ),
-                    "nfs" => Box::new(crate::synced_folder::nfs::NfsSyncedFolder),
-                    "smb" => Box::new(crate::synced_folder::smb::SmbSyncedFolder),
-                    "rsync" => Box::new(crate::synced_folder::rsync::RsyncSyncedFolder),
-                    "virtiofs" => {
+                    crate::config::SyncedFolderType::Nfs => {
+                        Box::new(crate::synced_folder::nfs::NfsSyncedFolder)
+                    }
+                    crate::config::SyncedFolderType::Smb => {
+                        Box::new(crate::synced_folder::smb::SmbSyncedFolder)
+                    }
+                    crate::config::SyncedFolderType::Rsync => {
+                        Box::new(crate::synced_folder::rsync::RsyncSyncedFolder)
+                    }
+                    crate::config::SyncedFolderType::Virtiofs => {
                         Box::new(crate::synced_folder::virtiofs::VirtioFsSyncedFolder::new(
                             crate::synced_folder::virtiofs::VirtioFsType::VirtioFs,
                         ))
                     }
-                    "9p" => Box::new(crate::synced_folder::virtiofs::VirtioFsSyncedFolder::new(
-                        crate::synced_folder::virtiofs::VirtioFsType::Plan9,
-                    )),
-                    _ => {
+                    crate::config::SyncedFolderType::Plan9 => {
+                        Box::new(crate::synced_folder::virtiofs::VirtioFsSyncedFolder::new(
+                            crate::synced_folder::virtiofs::VirtioFsType::Plan9,
+                        ))
+                    }
+                    other => {
                         ui.warn(
                             name,
-                            &format!("Unknown synced folder type: {}", folder_type),
+                            &format!("Unknown synced folder type: {}", other.as_str()),
                         );
                         continue;
                     }
@@ -361,14 +436,18 @@ impl Action for MountSyncedFoldersAction {
 
                 ui.info(
                     name,
-                    &format!("-- {}: {}", sf_config.host_path, sf_config.guest_path),
+                    &format!(
+                        "-- {}: {}",
+                        sf_config.host_path.display(),
+                        sf_config.guest_path.display()
+                    ),
                 );
 
                 if let Err(e) = folder.prepare(&opts) {
                     ui.warn(name, &format!("Failed to prepare synced folder: {}", e));
                     continue;
                 }
-                if let Err(e) = folder.mount(&opts, &communicator) {
+                if let Err(e) = folder.mount(&opts, &*communicator) {
                     ui.warn(name, &format!("Failed to mount synced folder: {}", e));
                 }
             }
@@ -378,13 +457,13 @@ impl Action for MountSyncedFoldersAction {
     }
 }
 
-/// Represents the `ProvisionMachinesAction` struct.
+/// Middleware action that executes configured provisioners on target machines.
 struct ProvisionMachinesAction {
-    /// Represents the `provision` field.
+    /// Explicit override for whether provisioning should run (`Some(true)` / `Some(false)`).
     provision: Option<bool>,
-    /// Represents the `provision_with` field.
+    /// Optional list of provisioner names or types to filter execution.
     provision_with: Option<Vec<String>>,
-    /// Represents the `cwd` field.
+    /// Working directory containing the `.vagrant` state directory.
     cwd: std::path::PathBuf,
 }
 
@@ -405,14 +484,14 @@ impl Action for ProvisionMachinesAction {
             })?;
 
         let ui = ConsoleUi;
-        let state_mgr = provider::StateManager::new(self.cwd.join(".vagrant"));
+        let state_mgr = crate::state::local::LocalStateManager::new(self.cwd.join(".vagrant"));
 
         for (name, machine) in machines {
             let target_provider_name = machine
                 .vm
                 .providers
                 .first()
-                .map(|p| p.name.clone())
+                .map(|p| p.name.to_string())
                 .unwrap_or_else(|| "virtualbox".to_string());
 
             let should_provision = match self.provision {
@@ -447,18 +526,8 @@ impl Action for ProvisionMachinesAction {
                 ui.info(name, "Running provisioners...");
             }
 
-            let mut comm_config = machine.ssh.clone();
-            let key_path = self
-                .cwd
-                .join(".vagrant")
-                .join("machines")
-                .join(name)
-                .join(&target_provider_name)
-                .join("private_key");
-            if key_path.exists() && comm_config.private_key_path.is_none() {
-                comm_config.private_key_path = Some(key_path.to_string_lossy().to_string());
-            }
-            let communicator = crate::communicator::ssh::SshCommunicator::new(comm_config);
+            let communicator =
+                build_machine_communicator(&self.cwd, name, &target_provider_name, machine);
 
             let mut any_ran = false;
             for provisioner in &machine.vm.provisioners {
@@ -483,6 +552,7 @@ impl Action for ProvisionMachinesAction {
                     "ansible" => Box::new(crate::provisioner::ansible::AnsibleProvisioner::new()),
                     "chef" => Box::new(crate::provisioner::chef::ChefProvisioner::new()),
                     "puppet" => Box::new(crate::provisioner::puppet::PuppetProvisioner::new()),
+                    "salt" => Box::new(crate::provisioner::salt::SaltProvisioner::new()),
                     "docker" => Box::new(crate::provisioner::docker::DockerProvisioner::new()),
                     _ => {
                         ui.warn(name, &format!("Unknown provisioner: {}", provisioner.name));
@@ -501,7 +571,7 @@ impl Action for ProvisionMachinesAction {
                     continue;
                 }
 
-                if let Err(e) = prov.provision(&communicator) {
+                if let Err(e) = prov.provision(&*communicator) {
                     ui.warn(
                         name,
                         &format!("Failed to run provisioner '{}': {}", provisioner.name, e),
@@ -513,12 +583,22 @@ impl Action for ProvisionMachinesAction {
             }
 
             if any_ran {
-                let _ = state_mgr.mark_provisioned(name, "virtualbox");
+                let _ = state_mgr.mark_provisioned(name, &target_provider_name);
             }
         }
 
         Ok(ActionResult::Continue)
     }
+}
+
+/// Resolves the global `.vagrant.d` directory from optional `VAGRANT_HOME` and `HOME` strings.
+fn resolve_global_vagrant_d(vagrant_home: Option<&str>, home: Option<&str>) -> std::path::PathBuf {
+    vagrant_home
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            home.map(|h| std::path::PathBuf::from(h).join(".vagrant.d"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".vagrant.d"))
+        })
 }
 
 /// Executes the `up` command.
@@ -536,13 +616,38 @@ impl Action for ProvisionMachinesAction {
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found.
 pub fn execute(cwd: &Path, args: &UpArgs) -> Result<(), MigratoryError> {
+    let mut env = Environment::new();
+    execute_with_env(cwd, args, &mut env)
+}
+
+/// Executes the `up` command with a pre-configured [`Environment`].
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `up` command.
+/// * `env` - Mutable action environment allowing dependency injection.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or booting fails.
+pub fn execute_with_env(
+    cwd: &Path,
+    args: &UpArgs,
+    env: &mut Environment,
+) -> Result<(), MigratoryError> {
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
-    let _guard = lock_file.try_write().map_err(|_| {
-        crate::error::MigratoryError::Generic(
-            "Vagrant environment is locked by another process".to_string(),
-        )
-    })?;
+    let _guard =
+        lock_file
+            .try_write()
+            .map_err(|_| crate::error::MigratoryError::EnvironmentLocked {
+                path: cwd.join(".vagrant"),
+            })?;
     let target_provider_name = args.provider.as_deref().unwrap_or("virtualbox").to_string();
     let parallel = args.parallel;
 
@@ -575,26 +680,18 @@ pub fn execute(cwd: &Path, args: &UpArgs) -> Result<(), MigratoryError> {
         cwd: cwd.to_path_buf(),
     }));
 
-    let mut env = Environment::new();
-    warden.call(&mut env)
+    warden.call(env)
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_up_missing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = UpArgs {
             name: None,
@@ -612,33 +709,36 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_success_global_state_home() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_success_global_state_home() -> Result<(), MigratoryError> {
+        assert_eq!(
+            resolve_global_vagrant_d(Some("/custom/vh"), Some("/home")),
+            std::path::PathBuf::from("/custom/vh")
+        );
+        assert_eq!(
+            resolve_global_vagrant_d(None, Some("/home/user")),
+            std::path::PathBuf::from("/home/user/.vagrant.d")
+        );
+        assert_eq!(
+            resolve_global_vagrant_d(None, None),
+            std::path::PathBuf::from(".vagrant.d")
+        );
+
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
-
-        // Unset VAGRANT_HOME and set HOME
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
+        fs::create_dir_all(&machine_dir)?;
+        fs::write(machine_dir.join("id"), "dummy_id")?;
 
         let args = UpArgs {
             name: None,
@@ -654,19 +754,17 @@ mod tests {
             provision_with: None,
         };
 
-        let result = execute(cwd, &args);
+        let mut env = Environment::new();
+        env.insert_typed("vagrant_home", dir.path().join(".vagrant.d"));
+        let result = execute_with_env(cwd, &args, &mut env);
         assert!(result.is_ok());
 
-        unsafe {
-            std::env::remove_var("HOME");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_cyclic_dependency() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_cyclic_dependency() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vf = r#"
@@ -679,7 +777,7 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vf).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = UpArgs {
             name: None,
@@ -697,11 +795,12 @@ end
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::Validation(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_boot_machines_action_missing_target() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_boot_machines_action_missing_target() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let action = BootMachinesAction {
             cwd: dir.path().to_path_buf(),
             provider_name: "virtualbox".to_string(),
@@ -720,33 +819,23 @@ end
 
         let res = action.call(&mut env);
         assert!(res.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_success_global_state_no_home() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_success_global_state_no_home() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
-
-        // Unset VAGRANT_HOME and HOME
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("HOME");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
+        fs::create_dir_all(&machine_dir)?;
+        fs::write(machine_dir.join("id"), "dummy_id")?;
 
         let args = UpArgs {
             name: None,
@@ -762,43 +851,28 @@ end
             provision_with: None,
         };
 
-        let result = execute(cwd, &args);
+        let mut env = Environment::new();
+        env.insert_typed("vagrant_home", dir.path().join("global_d"));
+        let result = execute_with_env(cwd, &args, &mut env);
         assert!(result.is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_success_global_state() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_success_global_state() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
-
-        // Mock virtualbox VBoxManage output so up() succeeds
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-        }
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", dir.path());
-        }
+        fs::create_dir_all(&machine_dir)?;
+        fs::write(machine_dir.join("id"), "dummy_id")?;
 
         let args = UpArgs {
             name: None,
@@ -814,26 +888,20 @@ end
             provision_with: None,
         };
 
-        let result = execute(cwd, &args);
+        let mut env = Environment::new();
+        env.insert_typed("vagrant_home", dir.path().to_path_buf());
+        let result = execute_with_env(cwd, &args, &mut env);
         assert!(result.is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-        }
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = UpArgs {
             name: None,
@@ -851,31 +919,32 @@ end
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_actions_with_existing_private_key_path() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_actions_with_existing_private_key_path() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        let key_path = cwd
+        let key_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
-            .join("virtualbox")
-            .join("private_key");
-        fs::create_dir_all(key_path.parent().expect("parent")).expect("create_dir");
-        fs::write(&key_path, "dummy_key").expect("write key");
+            .join("virtualbox");
+        fs::create_dir_all(&key_dir)?;
+        let key_path = key_dir.join("private_key");
+        fs::write(&key_path, "dummy_key")?;
 
         let mut machine = crate::config::MachineConfig::default();
-        machine.ssh.private_key_path = Some("already_configured".to_string());
+        machine.ssh.private_key_path = Some(std::path::PathBuf::from("already_configured"));
         machine
             .vm
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: cwd.to_string_lossy().to_string(),
-                guest_path: "/vagrant".to_string(),
-                folder_type: Some("vbox".to_string()),
+                host_path: cwd.to_path_buf(),
+                guest_path: std::path::PathBuf::from("/vagrant"),
+                folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
                 disabled: true,
                 ..Default::default()
             });
@@ -906,14 +975,15 @@ end
             provision_with: None,
         };
         assert!(prov_action.call(&mut env).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_parallel() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_parallel() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = UpArgs {
             name: None,
@@ -931,23 +1001,19 @@ end
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_parallel_error() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_parallel_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Cause a failure by passing an invalid provider
         fs::write(
             cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c| c.vm.provider 'invalid_provider' end",
-        )
-        .expect("operation should succeed");
+            "Vagrant.configure('2') do |c|\n  c.vm.define 'm1'\n  c.vm.define 'm2'\nend",
+        )?;
 
-        // BootMachinesAction will fail inside the parallel thread because get_provider("virtualbox") will succeed,
-        // Wait, target_provider_name in up command defaults to "virtualbox".
-        // If we want get_provider to fail, we need to pass a non-existent provider in UpArgs.
         let args = UpArgs {
             name: None,
             provision: false,
@@ -963,7 +1029,7 @@ end
         };
 
         let result = execute(cwd, &args);
-        assert!(result.is_ok());
+        assert!(result.is_err());
         Ok(())
     }
 
@@ -997,23 +1063,20 @@ end
             "ProvisionMachinesAction"
         );
         assert_eq!(
-            MountSyncedFoldersAction { cwd: cwd }.name(),
+            MountSyncedFoldersAction { cwd }.name(),
             "MountSyncedFoldersAction"
         );
     }
 
     #[test]
-    fn test_execute_up_locked() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_locked() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
-        // Pre-lock
         let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
-        let mut lock_file = state_mgr
-            .create_lock_file()
-            .expect("operation should succeed");
-        let _guard = lock_file.try_write().expect("operation should succeed");
+        let mut lock_file = state_mgr.create_lock_file()?;
+        let _guard = lock_file.try_write()?;
 
         let args = UpArgs {
             name: None,
@@ -1035,10 +1098,10 @@ end
     }
 
     #[test]
-    fn test_execute_up_with_provision() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_with_provision() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = UpArgs {
             name: None,
@@ -1055,13 +1118,14 @@ end
         };
 
         assert!(execute(cwd, &args).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_no_parallel() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_no_parallel() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = UpArgs {
             name: None,
@@ -1078,13 +1142,14 @@ end
         };
 
         assert!(execute(cwd, &args).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_no_provision() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_no_provision() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = UpArgs {
             name: None,
@@ -1102,15 +1167,14 @@ end
 
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_empty_config() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_empty_config() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        // Write invalid ruby to make it return empty config
-        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")
-            .expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "invalid ruby {} syntax")?;
 
         let args = UpArgs {
             name: None,
@@ -1126,28 +1190,30 @@ end
             no_install_provider: false,
         };
 
+        assert!(execute(cwd, &args).is_err());
+
+        fs::write(cwd.join("Vagrantfile"), "# Empty Vagrantfile")?;
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_read_id_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_read_id_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         fs::write(
             cwd.join("Vagrantfile"),
             "Vagrant.configure('2') do |config| config.vm.box = 'base' end",
-        )
-        .expect("operation should succeed");
+        )?;
 
         let id_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        fs::create_dir_all(&id_dir).expect("operation should succeed");
-        // Create id as directory to cause io error when read_to_string tries to read it
-        fs::create_dir_all(id_dir.join("id")).expect("operation should succeed");
+        fs::create_dir_all(&id_dir)?;
+        fs::create_dir_all(id_dir.join("id"))?;
 
         let args = UpArgs {
             name: None,
@@ -1164,15 +1230,15 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_missing_machines() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_missing_machines() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
-        // Modify the warden to test error conditions in BootMachinesAction
         let mut warden = Warden::new();
         warden.use_action(Box::new(BootMachinesAction {
             cwd: cwd.to_path_buf(),
@@ -1181,35 +1247,28 @@ end
         }));
 
         let mut env = Environment::new();
-        // missing machines entirely
         let result = warden.call(&mut env);
-        assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("operation should fail")
-                .to_string()
-                .contains("Machines not found")
-        );
+        assert!(matches!(
+            result,
+            Err(ref e) if e.to_string().contains("Machines not found")
+        ));
 
-        // wrong type
         env.typed_data.insert(
             "machines".to_string(),
             std::sync::Arc::new("wrong type".to_string())
                 as std::sync::Arc<dyn std::any::Any + Send + Sync>,
         );
         let result2 = warden.call(&mut env);
-        assert!(result2.is_err());
-        assert!(
-            result2
-                .expect_err("operation should fail")
-                .to_string()
-                .contains("incorrect type")
-        );
+        assert!(matches!(
+            result2,
+            Err(ref e) if e.to_string().contains("incorrect type")
+        ));
+        Ok(())
     }
 
     #[test]
-    fn test_provision_machines_action_direct() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_provision_machines_action_direct() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let mut warden = Warden::new();
@@ -1227,22 +1286,17 @@ Vagrant.configure("2") do |config|
   config.vm.provision "unknown_prov"
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)
-            .expect("operation should succeed");
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("operation should succeed");
-        std::fs::write(state_dir.join("id"), "test-id").expect("operation should succeed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "test-id")?;
 
-        let config = crate::config::parser::parse_vagrantfile(
-            cwd.join("Vagrantfile")
-                .to_str()
-                .expect("operation should succeed"),
-        )
-        .expect("operation should succeed");
+        let vf_path = cwd.join("Vagrantfile");
+        let config = crate::config::parser::parse_vagrantfile(&vf_path.to_string_lossy())?;
         env.typed_data.insert(
             "machines".to_string(),
             std::sync::Arc::new(config.machines) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
@@ -1250,11 +1304,12 @@ end
 
         let result = warden.call(&mut env);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_provision_machines_action_prepare_error() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_provision_machines_action_prepare_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let mut warden = Warden::new();
@@ -1272,22 +1327,17 @@ Vagrant.configure("2") do |config|
   config.vm.provision "shell", env: "{bad"
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)
-            .expect("operation should succeed");
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("operation should succeed");
-        std::fs::write(state_dir.join("id"), "test-id").expect("operation should succeed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "test-id")?;
 
-        let config = crate::config::parser::parse_vagrantfile(
-            cwd.join("Vagrantfile")
-                .to_str()
-                .expect("operation should succeed"),
-        )
-        .expect("operation should succeed");
+        let vf_path = cwd.join("Vagrantfile");
+        let config = crate::config::parser::parse_vagrantfile(&vf_path.to_string_lossy())?;
         env.typed_data.insert(
             "machines".to_string(),
             std::sync::Arc::new(config.machines) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
@@ -1295,11 +1345,12 @@ end
 
         let result = warden.call(&mut env);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_mount_synced_folders_action_direct() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_mount_synced_folders_action_direct() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let mut warden = Warden::new();
@@ -1317,22 +1368,17 @@ Vagrant.configure("2") do |config|
   config.vm.synced_folder ".", "/guest_dest4", disabled: true
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)
-            .expect("operation should succeed");
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("operation should succeed");
-        std::fs::write(state_dir.join("id"), "test-id").expect("operation should succeed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "test-id")?;
 
-        let config = crate::config::parser::parse_vagrantfile(
-            cwd.join("Vagrantfile")
-                .to_str()
-                .expect("operation should succeed"),
-        )
-        .expect("operation should succeed");
+        let vf_path = cwd.join("Vagrantfile");
+        let config = crate::config::parser::parse_vagrantfile(&vf_path.to_string_lossy())?;
         env.typed_data.insert(
             "machines".to_string(),
             std::sync::Arc::new(config.machines) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
@@ -1340,11 +1386,12 @@ end
 
         let result = warden.call(&mut env);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_mount_synced_folders_action_errors() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_mount_synced_folders_action_errors() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let mut warden = Warden::new();
@@ -1354,13 +1401,10 @@ end
 
         let mut env = Environment::new();
         let result = warden.call(&mut env);
-        assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("operation should fail")
-                .to_string()
-                .contains("Machines not found")
-        );
+        assert!(matches!(
+            result,
+            Err(ref e) if e.to_string().contains("Machines not found")
+        ));
 
         env.typed_data.insert(
             "machines".to_string(),
@@ -1368,18 +1412,16 @@ end
                 as std::sync::Arc<dyn std::any::Any + Send + Sync>,
         );
         let result2 = warden.call(&mut env);
-        assert!(result2.is_err());
-        assert!(
-            result2
-                .expect_err("operation should fail")
-                .to_string()
-                .contains("incorrect type")
-        );
+        assert!(matches!(
+            result2,
+            Err(ref e) if e.to_string().contains("incorrect type")
+        ));
+        Ok(())
     }
 
     #[test]
-    fn test_provision_machines_action_errors() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_provision_machines_action_errors() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let mut warden = Warden::new();
@@ -1391,13 +1433,10 @@ end
 
         let mut env = Environment::new();
         let result = warden.call(&mut env);
-        assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("operation should fail")
-                .to_string()
-                .contains("Machines not found")
-        );
+        assert!(matches!(
+            result,
+            Err(ref e) if e.to_string().contains("Machines not found")
+        ));
 
         env.typed_data.insert(
             "machines".to_string(),
@@ -1405,18 +1444,16 @@ end
                 as std::sync::Arc<dyn std::any::Any + Send + Sync>,
         );
         let result2 = warden.call(&mut env);
-        assert!(result2.is_err());
-        assert!(
-            result2
-                .expect_err("operation should fail")
-                .to_string()
-                .contains("incorrect type")
-        );
+        assert!(matches!(
+            result2,
+            Err(ref e) if e.to_string().contains("incorrect type")
+        ));
+        Ok(())
     }
 
     #[test]
-    fn test_provision_machines_action_with_provision_with() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_provision_machines_action_with_provision_with() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let mut warden = Warden::new();
@@ -1434,22 +1471,17 @@ Vagrant.configure("2") do |config|
   config.vm.provision "file", source: "a", destination: "b"
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)
-            .expect("operation should succeed");
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("operation should succeed");
-        std::fs::write(state_dir.join("id"), "test-id").expect("operation should succeed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "test-id")?;
 
-        let config = crate::config::parser::parse_vagrantfile(
-            cwd.join("Vagrantfile")
-                .to_str()
-                .expect("operation should succeed"),
-        )
-        .expect("operation should succeed");
+        let vf_path = cwd.join("Vagrantfile");
+        let config = crate::config::parser::parse_vagrantfile(&vf_path.to_string_lossy())?;
         env.typed_data.insert(
             "machines".to_string(),
             std::sync::Arc::new(config.machines) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
@@ -1457,11 +1489,12 @@ end
 
         let result = warden.call(&mut env);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_target_name() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_target_name() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -1472,8 +1505,7 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)
-            .expect("operation should succeed");
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let args_target = UpArgs {
             name: Some("web".to_string()),
@@ -1504,21 +1536,18 @@ end
             install_provider: false,
             no_install_provider: false,
         };
-        let dir2 = tempdir().expect("operation should succeed");
+        let dir2 = tempdir()?;
         let cwd2 = dir2.path();
-        std::fs::write(cwd2.join("Vagrantfile"), vagrantfile_content)
-            .expect("operation should succeed");
+        std::fs::write(cwd2.join("Vagrantfile"), vagrantfile_content)?;
 
         let result_missing = execute(cwd2, &args_missing);
         assert!(result_missing.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_insert_key() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_insert_key() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -1527,22 +1556,15 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)
-            .expect("operation should succeed");
+        std::fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
 
         let machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("secure")
             .join("virtualbox");
-        std::fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        std::fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK", "1");
-        }
+        std::fs::create_dir_all(&machine_dir)?;
+        std::fs::write(machine_dir.join("id"), "dummy_id")?;
 
         let args = UpArgs {
             name: Some("secure".to_string()),
@@ -1557,7 +1579,9 @@ end
             install_provider: false,
             no_install_provider: false,
         };
-        let result = execute(cwd, &args);
+        let mut env = Environment::new();
+        env.insert_typed("vagrant_home", dir.path().join(".vagrant.d"));
+        let result = execute_with_env(cwd, &args, &mut env);
         assert!(result.is_ok());
 
         let key_path = cwd
@@ -1568,19 +1592,12 @@ end
             .join("private_key");
         assert!(key_path.exists());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_boot_machines_winrm_docker_timeout_post_up() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_boot_machines_winrm_docker_timeout_post_up() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let machine_dir = cwd
@@ -1588,33 +1605,28 @@ end
             .join("machines")
             .join("winrm_mach")
             .join("virtualbox");
-        std::fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        std::fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
+        std::fs::create_dir_all(&machine_dir)?;
+        std::fs::write(machine_dir.join("id"), "dummy_id")?;
 
         let docker_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("docker_mach")
             .join("virtualbox");
-        std::fs::create_dir_all(&docker_dir).expect("operation should succeed");
-        std::fs::write(docker_dir.join("id"), "dummy_id").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
+        std::fs::create_dir_all(&docker_dir)?;
+        std::fs::write(docker_dir.join("id"), "dummy_id")?;
 
         let mut machines = std::collections::HashMap::new();
 
         let mut winrm_machine = crate::config::MachineConfig::default();
-        winrm_machine.vm.communicator = Some("winrm".to_string());
+        winrm_machine.vm.communicator = Some(crate::config::CommunicatorKind::Winrm);
         winrm_machine.vm.post_up_message = Some("WinRM ready".to_string());
-        winrm_machine.vm.boot_timeout = Some(0); // tests wait_for_ready timeout check
+        winrm_machine.vm.boot_timeout = Some(0);
         machines.insert("winrm_mach".to_string(), winrm_machine);
 
         let mut docker_machine = crate::config::MachineConfig::default();
-        docker_machine.vm.communicator = Some("docker".to_string());
-        docker_machine.vm.boot_timeout = Some(0); // tests docker wait_for_ready timeout check
+        docker_machine.vm.communicator = Some(crate::config::CommunicatorKind::Docker);
+        docker_machine.vm.boot_timeout = Some(0);
         machines.insert("docker_mach".to_string(), docker_machine);
 
         let mut env = Environment::new();
@@ -1622,6 +1634,7 @@ end
             "machines".to_string(),
             Arc::new(machines) as Arc<dyn std::any::Any + Send + Sync>,
         );
+        env.insert_typed("vagrant_home", dir.path().join(".vagrant.d"));
 
         let action = BootMachinesAction {
             cwd: cwd.to_path_buf(),
@@ -1631,18 +1644,12 @@ end
 
         assert!(action.call(&mut env).is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_mount_synced_folders_action_all_types() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_mount_synced_folders_action_all_types() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let machine_dir = cwd
@@ -1650,21 +1657,19 @@ end
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        std::fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
+        std::fs::create_dir_all(&machine_dir)?;
+        std::fs::write(machine_dir.join("id"), "dummy_id")?;
 
-        // Pre-create private_key to hit line 274
-        std::fs::write(machine_dir.join("private_key"), "dummy_key")
-            .expect("operation should succeed");
+        std::fs::write(machine_dir.join("private_key"), "dummy_key")?;
 
         let valid_shared_dir = dir.path().join("shared");
-        std::fs::create_dir_all(&valid_shared_dir).expect("operation should succeed");
-        let valid_path = valid_shared_dir.to_str().expect("valid").to_string();
+        std::fs::create_dir_all(&valid_shared_dir)?;
+        let valid_path = valid_shared_dir.to_string_lossy().into_owned();
 
         let mut machines = std::collections::HashMap::new();
         let mut machine = crate::config::MachineConfig::default();
         machine.vm.providers.push(crate::config::ProviderConfig {
-            name: "virtualbox".to_string(),
+            name: crate::config::ProviderKind::VirtualBox,
             options: std::collections::HashMap::new(),
         });
 
@@ -1682,32 +1687,30 @@ end
                 .vm
                 .synced_folders
                 .push(crate::config::SyncedFolderConfig {
-                    host_path: valid_path.clone(),
-                    guest_path: "/tmp/guest".to_string(),
-                    folder_type: Some(t.to_string()),
+                    host_path: std::path::PathBuf::from(&valid_path),
+                    guest_path: std::path::PathBuf::from("/tmp/guest"),
+                    folder_type: Some(crate::config::SyncedFolderType::parse_raw(t)),
                     disabled: false,
                     ..Default::default()
                 });
         }
-        // Add a synced folder where prepare fails (host path does not exist)
         machine
             .vm
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: "/nonexistent/invalid/shared/folder".to_string(),
-                guest_path: "/tmp/guest".to_string(),
-                folder_type: Some("vbox".to_string()),
+                host_path: std::path::PathBuf::from("/nonexistent/invalid/shared/folder"),
+                guest_path: std::path::PathBuf::from("/tmp/guest"),
+                folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
                 disabled: false,
                 ..Default::default()
             });
-        // Also add a disabled folder
         machine
             .vm
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: valid_path.clone(),
-                guest_path: "/tmp/guest".to_string(),
-                folder_type: Some("vbox".to_string()),
+                host_path: std::path::PathBuf::from(&valid_path),
+                guest_path: std::path::PathBuf::from("/tmp/guest"),
+                folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
                 disabled: true,
                 ..Default::default()
             });
@@ -1724,20 +1727,14 @@ end
             cwd: cwd.to_path_buf(),
         };
 
-        // Bind dummy TCP listener so SshCommunicator connects
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("operation should succeed");
-        let port = listener
-            .local_addr()
-            .expect("operation should succeed")
-            .port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let _ = stream;
             }
         });
 
-        // 1. With port 1, folder.mount fails
         machine.ssh.port = 1;
         let mut env_fail = Environment::new();
         let mut map_fail = std::collections::HashMap::new();
@@ -1748,7 +1745,6 @@ end
         );
         assert!(action.call(&mut env_fail).is_ok());
 
-        // 2. With listening dummy port, folder.mount succeeds
         machine.ssh.port = port;
         let mut env_ok = Environment::new();
         let mut map_ok = std::collections::HashMap::new();
@@ -1759,15 +1755,14 @@ end
         );
         assert!(action.call(&mut env_ok).is_ok());
 
-        // Test with empty providers to hit unwrap_or_else fallback
         let mut empty_prov_mach = crate::config::MachineConfig::default();
         empty_prov_mach
             .vm
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: valid_path,
-                guest_path: "/tmp/guest".to_string(),
-                folder_type: Some("vbox".to_string()),
+                host_path: std::path::PathBuf::from(valid_path),
+                guest_path: std::path::PathBuf::from("/tmp/guest"),
+                folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
                 disabled: false,
                 ..Default::default()
             });
@@ -1780,17 +1775,12 @@ end
         );
         assert!(action.call(&mut env_empty).is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_provision_machines_action_all_provisioners() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_provision_machines_action_all_provisioners() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let machine_dir = cwd
@@ -1798,21 +1788,14 @@ end
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        std::fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
-        std::fs::write(machine_dir.join("private_key"), "dummy_key")
-            .expect("operation should succeed");
-
-        // State not running warning
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_POWEROFF", "1");
-        }
+        std::fs::create_dir_all(&machine_dir)?;
+        std::fs::write(machine_dir.join("id"), "dummy_id")?;
+        std::fs::write(machine_dir.join("private_key"), "dummy_key")?;
 
         let mut machines = std::collections::HashMap::new();
         let mut machine = crate::config::MachineConfig::default();
         machine.vm.providers.push(crate::config::ProviderConfig {
-            name: "virtualbox".to_string(),
+            name: crate::config::ProviderKind::VirtualBox,
             options: std::collections::HashMap::new(),
         });
 
@@ -1822,6 +1805,7 @@ end
             "ansible",
             "chef",
             "puppet",
+            "salt",
             "docker",
             "unknown_prov",
             "filtered_out",
@@ -1846,18 +1830,16 @@ end
             Arc::new(machines.clone()) as Arc<dyn std::any::Any + Send + Sync>,
         );
 
-        // Run with provision_with filter that includes some and excludes "filtered_out"
         let action = ProvisionMachinesAction {
             provision: Some(true),
             provision_with: Some(vec![
-                "shell,file,ansible,chef,puppet,docker,unknown_prov".to_string(),
+                "shell,file,ansible,chef,puppet,salt,docker,unknown_prov".to_string(),
             ]),
             cwd: cwd.to_path_buf(),
         };
 
         assert!(action.call(&mut env).is_ok());
 
-        // Run without provision_with (None branch)
         let action_no_filter = ProvisionMachinesAction {
             provision: Some(true),
             provision_with: None,
@@ -1870,7 +1852,6 @@ end
         );
         assert!(action_no_filter.call(&mut env2).is_ok());
 
-        // Test with empty providers to hit unwrap_or_else fallback
         let mut empty_prov_mach = crate::config::MachineConfig::default();
         empty_prov_mach
             .vm
@@ -1890,13 +1871,12 @@ end
         );
         assert!(action_no_filter.call(&mut env_empty).is_ok());
 
-        // Test unsupported provider in ProvisionMachinesAction
         let mut unsupp_mach = crate::config::MachineConfig::default();
         unsupp_mach
             .vm
             .providers
             .push(crate::config::ProviderConfig {
-                name: "unsupported_provider_xyz".to_string(),
+                name: crate::config::ProviderKind::Custom("unsupported_provider_xyz".to_string()),
                 options: std::collections::HashMap::new(),
             });
         unsupp_mach
@@ -1917,18 +1897,12 @@ end
         );
         assert!(action_no_filter.call(&mut env_unsupp).is_err());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_POWEROFF");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_boot_machines_triggers_and_state_and_key_errors() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_boot_machines_triggers_and_state_and_key_errors() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let machine_dir = cwd
@@ -1936,9 +1910,8 @@ end
             .join("machines")
             .join("trig_mach")
             .join("virtualbox");
-        std::fs::create_dir_all(&machine_dir).expect("operation should succeed");
+        std::fs::create_dir_all(&machine_dir)?;
 
-        // 1. Test before trigger failure
         let mut fail_trigger_before = crate::config::MachineConfig::default();
         fail_trigger_before
             .triggers
@@ -1965,8 +1938,7 @@ end
         };
         assert!(action.call(&mut env).is_err());
 
-        // 2. Test after trigger failure
-        std::fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
+        std::fs::write(machine_dir.join("id"), "dummy_id")?;
         let mut fail_trigger_after = crate::config::MachineConfig::default();
         fail_trigger_after
             .triggers
@@ -1985,42 +1957,34 @@ end
             "machines".to_string(),
             Arc::new(machines_after) as Arc<dyn std::any::Any + Send + Sync>,
         );
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
         assert!(action.call(&mut env_after).is_err());
 
-        // 3. Test Docker with no id file, key insertion error, and wait_for_ready success
         let docker_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("docker_mach")
             .join("docker");
-        std::fs::create_dir_all(&docker_dir).expect("operation should succeed");
+        std::fs::create_dir_all(&docker_dir)?;
 
         let mut docker_mach = crate::config::MachineConfig::default();
         docker_mach.ssh.insert_key = true;
         docker_mach.vm.boot_timeout = Some(1);
-        docker_mach.vm.communicator = Some("docker".to_string());
+        docker_mach.vm.communicator = Some(crate::config::CommunicatorKind::Docker);
 
-        let mut machines_docker = std::collections::HashMap::new();
-        machines_docker.insert("docker_mach".to_string(), docker_mach.clone());
-
-        // Bind dummy TCP listener so SshCommunicator connects
-        let listener2 =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("operation should succeed");
-        let port2 = listener2
-            .local_addr()
-            .expect("operation should succeed")
-            .port();
+        let listener2 = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port2 = listener2.local_addr()?.port();
         std::thread::spawn(move || {
             for stream in listener2.incoming() {
                 let _ = stream;
             }
         });
 
-        // First test with key insertion error (port 1 -> connection refused)
+        let docker_factory: ProviderFactory = Arc::new(|_, id| {
+            Ok(Box::new(
+                crate::provider::docker::DockerProvider::new(id).with_docker_bin("echo"),
+            ))
+        });
+
         docker_mach.ssh.port = 1;
         let mut env_docker_fail = Environment::new();
         let mut map_fail = std::collections::HashMap::new();
@@ -2029,10 +1993,7 @@ end
             "machines".to_string(),
             Arc::new(map_fail) as Arc<dyn std::any::Any + Send + Sync>,
         );
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        }
+        env_docker_fail.insert_typed("provider_factory", Arc::clone(&docker_factory));
 
         let action_docker = BootMachinesAction {
             cwd: cwd.to_path_buf(),
@@ -2042,7 +2003,6 @@ end
 
         assert!(action_docker.call(&mut env_docker_fail).is_ok());
 
-        // Next test with listening dummy port so key insertion succeeds (hits line 149)
         docker_mach.ssh.port = port2;
         let _ = std::fs::remove_file(docker_dir.join("private_key"));
         let mut env_docker_ok = Environment::new();
@@ -2052,32 +2012,23 @@ end
             "machines".to_string(),
             Arc::new(map_ok) as Arc<dyn std::any::Any + Send + Sync>,
         );
+        env_docker_ok.insert_typed("provider_factory", docker_factory);
         assert!(action_docker.call(&mut env_docker_ok).is_ok());
 
-        // Third test with existing key file so !machine_key_path.exists() is false
-        std::fs::write(docker_dir.join("private_key"), b"dummy key")
-            .expect("operation should succeed");
+        std::fs::write(docker_dir.join("private_key"), b"dummy key")?;
         assert!(action_docker.call(&mut env_docker_ok).is_ok());
 
-        // Fourth test calling handle_key_insertion directly with insert_key: false
         let mut no_insert = crate::config::MachineConfig::default();
         no_insert.ssh.insert_key = false;
         action_docker.handle_key_insertion("docker_mach", &no_insert, &ConsoleUi);
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-        }
-
-        // 4. Test VMware status error branch
         let vmware_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("vmware_mach")
             .join("vmware");
-        std::fs::create_dir_all(&vmware_dir).expect("operation should succeed");
-        std::fs::write(vmware_dir.join("id"), "vmware_id").expect("operation should succeed");
+        std::fs::create_dir_all(&vmware_dir)?;
+        std::fs::write(vmware_dir.join("id"), "vmware_id")?;
 
         let vmware_mach = crate::config::MachineConfig::default();
         let mut machines_vmware = std::collections::HashMap::new();
@@ -2089,10 +2040,12 @@ end
             Arc::new(machines_vmware) as Arc<dyn std::any::Any + Send + Sync>,
         );
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VMWARE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VMWARE_STATUS_ERROR", "1");
-        }
+        let vmware_fail_factory: ProviderFactory = Arc::new(|_, id| {
+            Ok(Box::new(
+                crate::provider::vmware::VmwareProvider::new(id).with_vmrun_bin("false"),
+            ))
+        });
+        env_vmware.insert_typed("provider_factory", vmware_fail_factory);
 
         let action_vmware = BootMachinesAction {
             cwd: cwd.to_path_buf(),
@@ -2100,12 +2053,18 @@ end
             parallel: false,
         };
 
+        assert!(action_vmware.call(&mut env_vmware).is_err());
+
+        let vmware_ok_factory: ProviderFactory = Arc::new(|_, id| {
+            Ok(Box::new(
+                crate::provider::vmware::VmwareProvider::new(id).with_vmrun_bin("echo"),
+            ))
+        });
+        env_vmware.insert_typed("provider_factory", vmware_ok_factory);
         assert!(action_vmware.call(&mut env_vmware).is_ok());
 
-        // 5. Test invalid global index JSON
-        let vagrant_d = tempdir().expect("operation should succeed");
-        std::fs::create_dir_all(vagrant_d.path().join("data").join("machine-index"))
-            .expect("operation should succeed");
+        let vagrant_d = tempdir()?;
+        std::fs::create_dir_all(vagrant_d.path().join("data").join("machine-index"))?;
         std::fs::write(
             vagrant_d
                 .path()
@@ -2113,22 +2072,15 @@ end
                 .join("machine-index")
                 .join("index"),
             "invalid json",
-        )
-        .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_HOME", vagrant_d.path());
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
+        )?;
 
         let invalid_machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("invalid_index")
             .join("virtualbox");
-        std::fs::create_dir_all(&invalid_machine_dir).expect("operation should succeed");
-        std::fs::write(invalid_machine_dir.join("id"), "invalid_id")
-            .expect("operation should succeed");
+        std::fs::create_dir_all(&invalid_machine_dir)?;
+        std::fs::write(invalid_machine_dir.join("id"), "invalid_id")?;
 
         let invalid_index_mach = crate::config::MachineConfig::default();
         let mut machines_invalid_index = std::collections::HashMap::new();
@@ -2139,6 +2091,7 @@ end
             "machines".to_string(),
             Arc::new(machines_invalid_index) as Arc<dyn std::any::Any + Send + Sync>,
         );
+        env_invalid_index.insert_typed("vagrant_home", vagrant_d.path().to_path_buf());
 
         let action_invalid_index = BootMachinesAction {
             cwd: cwd.to_path_buf(),
@@ -2147,23 +2100,15 @@ end
         };
         assert!(action_invalid_index.call(&mut env_invalid_index).is_ok());
 
-        unsafe {
-            std::env::remove_var("VAGRANT_HOME");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_create_lock_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_create_lock_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Create a regular file named .vagrant so create_dir_all / create_lock_file fails
-        std::fs::write(cwd.join(".vagrant"), b"not a dir").expect("operation should succeed");
+        std::fs::write(cwd.join(".vagrant"), b"not a dir")?;
 
         let args = UpArgs {
             name: None,
@@ -2180,30 +2125,22 @@ end
         };
 
         assert!(execute(cwd, &args).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_up_with_provision_with_flag() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_up_with_provision_with_flag() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        std::fs::write(cwd.join("Vagrantfile"), "# Dummy config")
-            .expect("operation should succeed");
+        std::fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let machine_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&machine_dir).expect("operation should succeed");
-        std::fs::write(machine_dir.join("id"), "dummy_id").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUNNING", "1");
-        }
+        std::fs::create_dir_all(&machine_dir)?;
+        std::fs::write(machine_dir.join("id"), "dummy_id")?;
 
         let args = UpArgs {
             name: None,
@@ -2219,12 +2156,162 @@ end
             provision_with: Some("shell".to_string()),
         };
 
-        let result = execute(cwd, &args);
+        let mut env = Environment::new();
+        env.insert_typed("vagrant_home", dir.path().join(".vagrant.d"));
+        let result = execute_with_env(cwd, &args, &mut env);
         assert!(result.is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUNNING");
+        // Exercise MountSyncedFoldersAction and ProvisionMachinesAction directly
+        let mount_action = MountSyncedFoldersAction {
+            cwd: cwd.to_path_buf(),
+        };
+        let prov_action = ProvisionMachinesAction {
+            provision: Some(true),
+            provision_with: Some(vec!["shell".to_string()]),
+            cwd: cwd.to_path_buf(),
+        };
+        let mut env_empty = Environment::new();
+        assert!(mount_action.call(&mut env_empty).is_err());
+        assert!(prov_action.call(&mut env_empty).is_err());
+        assert_eq!(mount_action.name(), "MountSyncedFoldersAction");
+        assert_eq!(prov_action.name(), "ProvisionMachinesAction");
+
+        env_empty.insert_typed("machines", "wrong_type".to_string());
+        assert!(mount_action.call(&mut env_empty).is_err());
+        assert!(prov_action.call(&mut env_empty).is_err());
+
+        let mut mach = crate::config::MachineConfig::default();
+        for sf_type in [
+            crate::config::SyncedFolderType::VirtualBox,
+            crate::config::SyncedFolderType::Nfs,
+            crate::config::SyncedFolderType::Smb,
+            crate::config::SyncedFolderType::Rsync,
+            crate::config::SyncedFolderType::Virtiofs,
+            crate::config::SyncedFolderType::Plan9,
+            crate::config::SyncedFolderType::Custom("custom_sf".to_string()),
+        ] {
+            mach.vm
+                .synced_folders
+                .push(crate::config::SyncedFolderConfig {
+                    host_path: cwd.to_path_buf(),
+                    guest_path: std::path::PathBuf::from("/vagrant"),
+                    folder_type: Some(sf_type),
+                    disabled: false,
+                    ..Default::default()
+                });
         }
+        mach.vm
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: cwd.join("nonexistent_host_dir"),
+                guest_path: std::path::PathBuf::from("/missing"),
+                folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
+                disabled: false,
+                ..Default::default()
+            });
+        mach.vm
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: cwd.to_path_buf(),
+                guest_path: std::path::PathBuf::from("/disabled"),
+                folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
+                disabled: true,
+                ..Default::default()
+            });
+        for p_name in [
+            "shell", "file", "ansible", "chef", "puppet", "salt", "docker", "unknown",
+        ] {
+            mach.vm.provisioners.push(crate::config::ProvisionerConfig {
+                name: p_name.to_string(),
+                config: std::collections::HashMap::new(),
+                ..Default::default()
+            });
+        }
+        let mut machines_map = std::collections::HashMap::new();
+        machines_map.insert("default".to_string(), mach);
+        machines_map.insert("empty".to_string(), crate::config::MachineConfig::default());
+
+        let mut env_full = Environment::new();
+        env_full.typed_data.insert(
+            "machines".to_string(),
+            Arc::new(machines_map) as Arc<dyn std::any::Any + Send + Sync>,
+        );
+        assert!(mount_action.call(&mut env_full).is_ok());
+
+        let prov_all = ProvisionMachinesAction {
+            provision: None,
+            provision_with: None,
+            cwd: cwd.to_path_buf(),
+        };
+        assert!(prov_all.call(&mut env_full).is_ok());
+        // Second call when already provisioned hits `!should_provision`
+        let mut mach_prov = crate::config::MachineConfig::default();
+        let mut shell_cfg = std::collections::HashMap::new();
+        shell_cfg.insert("inline".to_string(), "echo hi".to_string());
+        mach_prov
+            .vm
+            .provisioners
+            .push(crate::config::ProvisionerConfig {
+                name: "shell".to_string(),
+                config: shell_cfg,
+                ..Default::default()
+            });
+        let mut map_prov = std::collections::HashMap::new();
+        map_prov.insert("default".to_string(), mach_prov);
+        let mut env_prov = Environment::new();
+        env_prov.typed_data.insert(
+            "machines".to_string(),
+            Arc::new(map_prov) as Arc<dyn std::any::Any + Send + Sync>,
+        );
+        assert!(prov_all.call(&mut env_prov).is_ok());
+        assert!(prov_all.call(&mut env_prov).is_ok());
+        assert!(prov_action.call(&mut env_prov).is_ok());
+
+        // Test BootMachinesAction with ForwardedPort and PrivateNetwork
+        let mut mach_net = crate::config::MachineConfig::default();
+        mach_net
+            .vm
+            .networks
+            .push(crate::config::NetworkConfig::ForwardedPort {
+                guest: 22,
+                host: 0,
+                auto_correct: true,
+                protocol: Some("tcp".to_string()),
+                host_ip: Some("127.0.0.1".to_string()),
+            });
+        mach_net
+            .vm
+            .networks
+            .push(crate::config::NetworkConfig::ForwardedPort {
+                guest: 80,
+                host: 0,
+                auto_correct: true,
+                protocol: Some("tcp".to_string()),
+                host_ip: Some("127.0.0.1".to_string()),
+            });
+        mach_net
+            .vm
+            .networks
+            .push(crate::config::NetworkConfig::PrivateNetwork {
+                ip: Some("192.168.56.50".to_string()),
+                netmask: None,
+                dhcp: false,
+                virtualbox_intnet: None,
+            });
+        let mut map_net = std::collections::HashMap::new();
+        map_net.insert("net_mach".to_string(), mach_net);
+        let mut env_net = Environment::new();
+        env_net.typed_data.insert(
+            "machines".to_string(),
+            Arc::new(map_net) as Arc<dyn std::any::Any + Send + Sync>,
+        );
+        let boot_net = BootMachinesAction {
+            cwd: cwd.to_path_buf(),
+            provider_name: "virtualbox".to_string(),
+            parallel: false,
+        };
+        assert!(boot_net.call(&mut env_net).is_ok());
+
+        Ok(())
     }
 }

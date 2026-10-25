@@ -1,7 +1,6 @@
 //! Cloud command implementation.
 //!
-//! Handles the `cloud` subcommand and its various operations such as
-//! `auth`, `box`, `provider`, `publish`, `search`, and `version`.
+//! Handles the `cloud` subcommand and its sub-operations (`auth`, `box`, `provider`, `publish`, `search`, `version`).
 
 use crate::cli::{
     CloudAuthCommands, CloudBoxCommands, CloudCommands, CloudProviderCommands, CloudVersionCommands,
@@ -9,11 +8,11 @@ use crate::cli::{
 use crate::error::MigratoryError;
 use std::io::Write;
 
-/// Executes the `cloud` command cluster.
+/// Executes the `cloud` command.
 ///
 /// # Arguments
 ///
-/// * `cmd` - The parsed `CloudCommands` subcommand enum.
+/// * `cmd` - The parsed `CloudCommands` subcommand.
 /// * `writer` - A writable destination for output (e.g. stdout).
 ///
 /// # Returns
@@ -23,30 +22,56 @@ use std::io::Write;
 /// # Errors
 ///
 /// Returns a `MigratoryError` if writing to the output stream fails.
-pub fn execute(cmd: &CloudCommands, writer: &mut dyn Write) -> Result<(), MigratoryError> {
+pub fn execute(cmd: &CloudCommands, mut writer: impl Write) -> Result<(), MigratoryError> {
+    let client = crate::cloud::CloudClient::new()?;
+    let home_dir = std::env::var("VAGRANT_HOME").unwrap_or_else(|_| ".vagrant.d".to_string());
+    execute_with_client(cmd, &mut writer, &client, std::path::Path::new(&home_dir))
+}
+
+/// Executes the `cloud` command using an explicitly provided [`crate::cloud::CloudClient`] and Vagrant home directory.
+///
+/// # Arguments
+///
+/// * `cmd` - The `CloudCommands` subcommand to execute.
+/// * `writer` - A mutable reference to a trait object writer.
+/// * `client` - Configured [`crate::cloud::CloudClient`] instance.
+/// * `home_dir` - Base directory for Vagrant global state.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on successful execution, or a `MigratoryError` on failure.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if an API call or output write fails.
+pub fn execute_with_client(
+    cmd: &CloudCommands,
+    writer: &mut dyn Write,
+    client: &crate::cloud::CloudClient,
+    home_dir: &std::path::Path,
+) -> Result<(), MigratoryError> {
     match cmd {
-        CloudCommands::Auth(auth_cmd) => execute_auth(auth_cmd, writer)?,
-        CloudCommands::Box(box_cmd) => execute_box(box_cmd, writer)?,
-        CloudCommands::Provider(provider_cmd) => execute_provider(provider_cmd, writer)?,
+        CloudCommands::Auth(auth_cmd) => execute_auth(auth_cmd, writer, client, home_dir)?,
+        CloudCommands::Box(box_cmd) => execute_box(box_cmd, writer, client)?,
+        CloudCommands::Provider(provider_cmd) => execute_provider(provider_cmd, writer, client)?,
         CloudCommands::Publish(args) => {
-            let box_name = args.name.as_deref().unwrap_or("test/box");
-            let version = args.version.as_deref().unwrap_or("1.0.0");
-            let provider = args.provider.as_deref().unwrap_or("virtualbox");
+            let name = args.name.as_deref().unwrap_or("");
+            let version = args.version.as_deref().unwrap_or("");
+            let provider = args.provider.as_deref().unwrap_or("");
 
             writeln!(
                 writer,
                 "Publishing box {} v{} for provider {}...",
-                box_name, version, provider
+                name, version, provider
             )?;
 
-            let client = crate::cloud::CloudClient::new()?;
-
             client.create_box(
-                box_name,
+                name,
                 args.description.as_deref(),
                 args.short_description.as_deref(),
             )?;
-            client.create_version(box_name, version, args.version_description.as_deref())?;
+
+            client.create_version(name, version, args.version_description.as_deref())?;
 
             let default_arch = if args.default_architecture {
                 Some(true)
@@ -57,7 +82,7 @@ pub fn execute(cmd: &CloudCommands, writer: &mut dyn Write) -> Result<(), Migrat
             };
 
             client.create_provider(
-                box_name,
+                name,
                 version,
                 provider,
                 args.architecture.as_deref(),
@@ -66,7 +91,7 @@ pub fn execute(cmd: &CloudCommands, writer: &mut dyn Write) -> Result<(), Migrat
 
             if args.checksum.is_some() || args.checksum_type.is_some() {
                 client.update_provider(
-                    box_name,
+                    name,
                     version,
                     provider,
                     args.checksum.as_deref(),
@@ -75,53 +100,55 @@ pub fn execute(cmd: &CloudCommands, writer: &mut dyn Write) -> Result<(), Migrat
             }
 
             if let Some(file_path) = &args.file_path {
-                let upload_url = client.get_upload_url(box_name, version, provider)?;
+                let upload_url = client.get_upload_url(name, version, provider)?;
                 client.upload_file(&upload_url, std::path::Path::new(file_path))?;
             }
 
             if args.release {
-                client.release_version(box_name, version)?;
+                client.release_version(name, version)?;
             }
 
             writeln!(writer, "Box published successfully!")?;
         }
         CloudCommands::Search(args) => {
             let query = args.query.as_deref().unwrap_or("");
-            let client = crate::cloud::CloudClient::new()?;
-
             writeln!(writer, "Searching for boxes matching '{}'...", query)?;
-
-            let results = client.search_boxes(query)?;
-
-            if results.is_empty() {
+            let boxes = client.search_boxes(query)?;
+            if boxes.is_empty() {
                 writeln!(writer, "No boxes found.")?;
             } else {
-                for b in results.iter().take(args.limit.unwrap_or(usize::MAX)) {
+                for b in boxes {
                     writeln!(writer, "{} - {}", b.name, b.short_description)?;
                 }
             }
         }
-        CloudCommands::Version(version_cmd) => execute_version(version_cmd, writer)?,
+        CloudCommands::Version(version_cmd) => execute_version(version_cmd, writer, client)?,
     }
     Ok(())
 }
 
-/// Executes the `execute_auth` function.
+/// Executes a `cloud auth` subcommand (`login`, `logout`, `whoami`).
 ///
 /// # Arguments
 ///
-/// * `cmd` - The `cmd` argument.
-/// * `writer` - The `writer` argument.
+/// * `cmd` - The `CloudAuthCommands` subcommand to execute.
+/// * `writer` - Output writer.
+/// * `client` - Configured [`crate::cloud::CloudClient`].
+/// * `home_dir` - Base directory for Vagrant global state.
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
-fn execute_auth(cmd: &CloudAuthCommands, writer: &mut dyn Write) -> Result<(), MigratoryError> {
-    let client = crate::cloud::CloudClient::new()?;
+/// Returns a `MigratoryError` if authentication or output writing fails.
+fn execute_auth(
+    cmd: &CloudAuthCommands,
+    writer: &mut dyn Write,
+    client: &crate::cloud::CloudClient,
+    home_dir: &std::path::Path,
+) -> Result<(), MigratoryError> {
     match cmd {
         CloudAuthCommands::Login(args) => {
             let login_args = crate::cli::LoginArgs {
@@ -130,38 +157,53 @@ fn execute_auth(cmd: &CloudAuthCommands, writer: &mut dyn Write) -> Result<(), M
                 token: args.token.clone(),
                 description: args.description.clone(),
             };
-            crate::cli::commands::login::execute(&login_args)?;
-            writeln!(writer, "Authentication completed successfully.")
-                .map_err(|e| MigratoryError::Generic(e.to_string()))?;
+            let err_fn = |_: &str| {
+                Err(MigratoryError::Generic(
+                    "Interactive prompt disabled".to_string(),
+                ))
+            };
+            let client_fn = || Ok(client.clone());
+            let _ = client_fn();
+            crate::cli::commands::login::execute_with_deps(
+                &login_args,
+                home_dir,
+                err_fn,
+                client_fn,
+            )?;
+            writeln!(writer, "Authentication completed successfully.")?;
         }
         CloudAuthCommands::Logout => {
             client.delete_token()?;
             writeln!(writer, "Logged out successfully.")?;
         }
         CloudAuthCommands::Whoami => {
-            let user = client.whoami()?;
-            writeln!(writer, "Currently logged in as: {}", user)?;
+            let username = client.whoami()?;
+            writeln!(writer, "Currently logged in as: {}", username)?;
         }
     };
     Ok(())
 }
 
-/// Executes the `execute_box` function.
+/// Executes a `cloud box` subcommand (`create`, `delete`, `show`, `update`).
 ///
 /// # Arguments
 ///
-/// * `cmd` - The `cmd` argument.
-/// * `writer` - The `writer` argument.
+/// * `cmd` - The `CloudBoxCommands` subcommand to execute.
+/// * `writer` - Output writer.
+/// * `client` - Configured [`crate::cloud::CloudClient`].
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
-fn execute_box(cmd: &CloudBoxCommands, writer: &mut dyn Write) -> Result<(), MigratoryError> {
-    let client = crate::cloud::CloudClient::new()?;
+/// Returns a `MigratoryError` if the API call or output write fails.
+fn execute_box(
+    cmd: &CloudBoxCommands,
+    writer: &mut dyn Write,
+    client: &crate::cloud::CloudClient,
+) -> Result<(), MigratoryError> {
     match cmd {
         CloudBoxCommands::Create(args) => {
             let name = args.name.as_deref().unwrap_or("");
@@ -179,10 +221,10 @@ fn execute_box(cmd: &CloudBoxCommands, writer: &mut dyn Write) -> Result<(), Mig
         }
         CloudBoxCommands::Show(args) => {
             let name = args.name.as_deref().unwrap_or("");
-            let meta = client.fetch_metadata(name)?;
-            writeln!(writer, "Box: {}", meta.name)?;
-            writeln!(writer, "Description: {}", meta.short_description)?;
-            for v in meta.versions {
+            let metadata = client.fetch_metadata(name)?;
+            writeln!(writer, "Box: {}", metadata.name)?;
+            writeln!(writer, "Description: {}", metadata.short_description)?;
+            for v in metadata.versions {
                 writeln!(writer, "  Version: {}", v.version)?;
                 for p in v.providers {
                     writeln!(writer, "    Provider: {}", p.name)?;
@@ -202,25 +244,26 @@ fn execute_box(cmd: &CloudBoxCommands, writer: &mut dyn Write) -> Result<(), Mig
     Ok(())
 }
 
-/// Executes the `execute_provider` function.
+/// Executes a `cloud provider` subcommand (`create`, `delete`, `update`, `upload`).
 ///
 /// # Arguments
 ///
-/// * `cmd` - The `cmd` argument.
-/// * `writer` - The `writer` argument.
+/// * `cmd` - The `CloudProviderCommands` subcommand to execute.
+/// * `writer` - Output writer.
+/// * `client` - Configured [`crate::cloud::CloudClient`].
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a `MigratoryError` if the API call or output write fails.
 fn execute_provider(
     cmd: &CloudProviderCommands,
     writer: &mut dyn Write,
+    client: &crate::cloud::CloudClient,
 ) -> Result<(), MigratoryError> {
-    let client = crate::cloud::CloudClient::new()?;
     match cmd {
         CloudProviderCommands::Create(args) => {
             let name = args.name.as_deref().unwrap_or("");
@@ -265,25 +308,26 @@ fn execute_provider(
     Ok(())
 }
 
-/// Executes the `execute_version` function.
+/// Executes a `cloud version` subcommand (`create`, `delete`, `release`, `revoke`, `update`).
 ///
 /// # Arguments
 ///
-/// * `cmd` - The `cmd` argument.
-/// * `writer` - The `writer` argument.
+/// * `cmd` - The `CloudVersionCommands` subcommand to execute.
+/// * `writer` - Output writer.
+/// * `client` - Configured [`crate::cloud::CloudClient`].
 ///
 /// # Returns
 ///
-/// Returns `Result<(), MigratoryError>`.
+/// Returns `Ok(())` on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a `MigratoryError` if the API call or output write fails.
 fn execute_version(
     cmd: &CloudVersionCommands,
     writer: &mut dyn Write,
+    client: &crate::cloud::CloudClient,
 ) -> Result<(), MigratoryError> {
-    let client = crate::cloud::CloudClient::new()?;
     match cmd {
         CloudVersionCommands::Create(args) => {
             let name = args.name.as_deref().unwrap_or("");
@@ -321,19 +365,15 @@ fn execute_version(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use httpmock::prelude::*;
 
+    /// Writer implementation that fails conditionally or unconditionally during tests.
     #[derive(Default)]
     pub(crate) struct FailingWriter {
+        /// Optional substring that triggers a write failure when encountered.
         pub fail_on_content: Option<String>,
+        /// Accumulated written bytes decoded as UTF-8.
         pub accumulated: String,
     }
 
@@ -342,16 +382,10 @@ mod tests {
             self.accumulated.push_str(&String::from_utf8_lossy(buf));
             if let Some(ref needle) = self.fail_on_content {
                 if self.accumulated.contains(needle) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "write failed",
-                    ));
+                    return Err(std::io::Error::other("write failed"));
                 }
             } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "write failed",
-                ));
+                return Err(std::io::Error::other("write failed"));
             }
             Ok(buf.len())
         }
@@ -360,6 +394,7 @@ mod tests {
         }
     }
 
+    /// Creates default `CloudPublishArgs` for tests.
     pub(crate) fn mock_publish_args() -> crate::cli::CloudPublishArgs {
         crate::cli::CloudPublishArgs {
             name: Some("test/box".to_string()),
@@ -386,6 +421,7 @@ mod tests {
         }
     }
 
+    /// Creates default `CloudSearchArgs` for tests.
     pub(crate) fn mock_search_args() -> crate::cli::CloudSearchArgs {
         crate::cli::CloudSearchArgs {
             query: Some("test".to_string()),
@@ -402,21 +438,22 @@ mod tests {
         }
     }
 
+    pub(crate) fn exec_test(
+        server: &MockServer,
+        cmd: &CloudCommands,
+        out: &mut dyn Write,
+    ) -> Result<(), MigratoryError> {
+        let client = crate::cloud::CloudClient::with_config(crate::cloud::CloudClientConfig {
+            base_url: server.url("/api/v2"),
+            token: Some("test-token".to_string()),
+        })?;
+        let dir = tempfile::tempdir()?;
+        execute_with_client(cmd, out, &client, dir.path())
+    }
+
     #[test]
-    fn test_execute_cloud_auth() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_cloud_auth() -> Result<(), MigratoryError> {
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         let mock_delete = server.mock(|when, then| {
             when.method(DELETE).path("/api/v2/authenticate");
@@ -434,7 +471,8 @@ mod tests {
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Auth(CloudAuthCommands::Login(crate::cli::CloudAuthLoginArgs {
                     token: Some("mock-token-123".to_string()),
                     username: None,
@@ -449,25 +487,39 @@ mod tests {
         assert_eq!(output_str.trim(), "Authentication completed successfully.");
 
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Logout), &mut out).is_ok());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Auth(CloudAuthCommands::Logout),
+                &mut out
+            )
+            .is_ok()
+        );
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(output_str.trim(), "Logged out successfully.");
         mock_delete.assert();
 
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Whoami), &mut out).is_ok());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Auth(CloudAuthCommands::Whoami),
+                &mut out
+            )
+            .is_ok()
+        );
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(output_str.trim(), "Currently logged in as: testuser");
         mock_whoami.assert();
+        Ok(())
     }
 
     #[test]
     fn test_execute_cloud_auth_write_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+        let server = MockServer::start();
         let mut out = FailingWriter::default();
-        let result = execute(
+        let result = exec_test(
+            &server,
             &CloudCommands::Auth(CloudAuthCommands::Login(crate::cli::CloudAuthLoginArgs {
                 token: Some("mock-token-123".to_string()),
                 username: None,
@@ -481,11 +533,10 @@ mod tests {
 
     #[test]
     fn test_execute_cloud_auth_login_check() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+        let server = MockServer::start();
         let mut out = Vec::new();
-        let result = execute(
+        let result = exec_test(
+            &server,
             &CloudCommands::Auth(CloudAuthCommands::Login(crate::cli::CloudAuthLoginArgs {
                 token: None,
                 username: None,
@@ -499,19 +550,7 @@ mod tests {
 
     #[test]
     fn test_execute_cloud_box() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         let mock_create = server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
@@ -547,7 +586,8 @@ mod tests {
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Box(CloudBoxCommands::Create(crate::cli::CloudBoxCreateArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -562,7 +602,8 @@ mod tests {
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Box(CloudBoxCommands::Delete(crate::cli::CloudBoxDeleteArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -577,7 +618,8 @@ mod tests {
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Box(CloudBoxCommands::Show(crate::cli::CloudBoxShowArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -598,7 +640,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Box(CloudBoxCommands::Update(crate::cli::CloudBoxUpdateArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -614,19 +657,7 @@ Description: short
 
     #[test]
     fn test_execute_cloud_box_write_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -642,7 +673,8 @@ Description: short
         });
 
         let mut out = FailingWriter::default();
-        let result = execute(
+        let result = exec_test(
+            &server,
             &CloudCommands::Box(CloudBoxCommands::Create(crate::cli::CloudBoxCreateArgs {
                 name: Some("test/box".to_string()),
                 ..Default::default()
@@ -653,20 +685,8 @@ Description: short
     }
 
     #[test]
-    fn test_execute_cloud_provider() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_cloud_provider() -> Result<(), MigratoryError> {
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         let mock_create = server.mock(|when, then| {
             when.method(POST)
@@ -701,7 +721,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Create(
                     crate::cli::CloudProviderCreateArgs {
                         name: Some("test/box".to_string()),
@@ -720,7 +741,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Delete(
                     crate::cli::CloudProviderDeleteArgs {
                         name: Some("test/box".to_string()),
@@ -739,7 +761,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Update(
                     crate::cli::CloudProviderUpdateArgs {
                         name: Some("test/box".to_string()),
@@ -758,7 +781,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Upload(
                     crate::cli::CloudProviderUploadArgs {
                         name: Some("test/box".to_string()),
@@ -777,13 +801,14 @@ Description: short
         mock_upload_put.assert_calls(0);
 
         use std::io::Write as _;
-        let mut tf = tempfile::NamedTempFile::new().expect("operation should succeed");
-        tf.write_all(b"test").expect("operation should succeed");
+        let mut tf = tempfile::NamedTempFile::new()?;
+        tf.write_all(b"test")?;
         let path_str = tf.path().to_string_lossy().to_string();
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Upload(
                     crate::cli::CloudProviderUploadArgs {
                         name: Some("test/box".to_string()),
@@ -800,23 +825,12 @@ Description: short
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(output_str.trim(), "Provider upload successful.");
         mock_upload_put.assert_calls(1);
+        Ok(())
     }
 
     #[test]
     fn test_execute_cloud_provider_write_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(POST)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers");
@@ -824,7 +838,8 @@ Description: short
         });
 
         let mut out = FailingWriter::default();
-        let result = execute(
+        let result = exec_test(
+            &server,
             &CloudCommands::Provider(CloudProviderCommands::Create(
                 crate::cli::CloudProviderCreateArgs {
                     name: Some("test/box".to_string()),
@@ -840,19 +855,7 @@ Description: short
 
     #[test]
     fn test_execute_cloud_version() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         let mock_create = server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes/test/box/versions");
@@ -885,7 +888,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Create(
                     crate::cli::CloudVersionCreateArgs {
                         name: Some("test/box".to_string()),
@@ -903,7 +907,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Delete(
                     crate::cli::CloudVersionDeleteArgs {
                         name: Some("test/box".to_string()),
@@ -921,7 +926,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Release(
                     crate::cli::CloudVersionReleaseArgs {
                         name: Some("test/box".to_string()),
@@ -939,7 +945,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Revoke(
                     crate::cli::CloudVersionRevokeArgs {
                         name: Some("test/box".to_string()),
@@ -957,7 +964,8 @@ Description: short
 
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Update(
                     crate::cli::CloudVersionUpdateArgs {
                         name: Some("test/box".to_string()),
@@ -976,26 +984,15 @@ Description: short
 
     #[test]
     fn test_execute_cloud_version_write_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes/test/box/versions");
             then.status(200);
         });
 
         let mut out = FailingWriter::default();
-        let result = execute(
+        let result = exec_test(
+            &server,
             &CloudCommands::Version(CloudVersionCommands::Create(
                 crate::cli::CloudVersionCreateArgs {
                     name: Some("test/box".to_string()),
@@ -1010,19 +1007,7 @@ Description: short
 
     #[test]
     fn test_execute_cloud_search() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         server.mock(|when, then| {
             when.method(GET)
@@ -1041,23 +1026,21 @@ Description: short
         });
 
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Search(mock_search_args()), &mut out).is_ok());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Search(mock_search_args()),
+                &mut out
+            )
+            .is_ok()
+        );
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("Searching for boxes matching 'test'"));
     }
 
     #[test]
     fn test_execute_cloud_search_empty() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         server.mock(|when, then| {
             when.method(GET)
@@ -1069,50 +1052,37 @@ Description: short
         });
 
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Search(mock_search_args()), &mut out).is_ok());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Search(mock_search_args()),
+                &mut out
+            )
+            .is_ok()
+        );
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("No boxes found."));
     }
 
     #[test]
     fn test_execute_cloud_search_write_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(GET).path("/api/v2/search");
             then.status(200).json_body(serde_json::json!({"boxes": []}));
         });
         let mut out = FailingWriter::default();
-        let result = execute(&CloudCommands::Search(mock_search_args()), &mut out);
+        let result = exec_test(
+            &server,
+            &CloudCommands::Search(mock_search_args()),
+            &mut out,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_execute_cloud_publish() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
@@ -1129,23 +1099,21 @@ Description: short
         });
 
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Publish(mock_publish_args()), &mut out).is_ok());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Publish(mock_publish_args()),
+                &mut out
+            )
+            .is_ok()
+        );
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("Publishing box test/box v1.0.0 for provider virtualbox..."));
     }
 
     #[test]
-    fn test_execute_cloud_publish_with_file() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_cloud_publish_with_file() -> Result<(), MigratoryError> {
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
@@ -1176,14 +1144,15 @@ Description: short
         let mut args = mock_publish_args();
 
         use std::io::Write as _;
-        let mut tf = tempfile::NamedTempFile::new().expect("operation should succeed");
-        tf.write_all(b"test").expect("operation should succeed");
+        let mut tf = tempfile::NamedTempFile::new()?;
+        tf.write_all(b"test")?;
         args.file_path = Some(tf.path().to_string_lossy().to_string());
 
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args), &mut out).is_ok());
+        assert!(exec_test(&server, &CloudCommands::Publish(args), &mut out).is_ok());
         let output_str = String::from_utf8(out).unwrap_or_default();
         assert!(output_str.contains("Box published successfully!"));
+        Ok(())
     }
 
     #[test]
@@ -1195,16 +1164,7 @@ Description: short
 
     #[test]
     fn test_execute_cloud_box_create_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         let mock_create = server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
@@ -1212,7 +1172,8 @@ Description: short
         });
 
         let mut out = Vec::new();
-        let res = execute(
+        let res = exec_test(
+            &server,
             &CloudCommands::Box(CloudBoxCommands::Create(crate::cli::CloudBoxCreateArgs {
                 name: Some("test/box".to_string()),
                 ..Default::default()
@@ -1225,16 +1186,7 @@ Description: short
 
     #[test]
     fn test_execute_cloud_box_update_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         let mock_update = server.mock(|when, then| {
             when.method(PUT).path("/api/v2/boxes/test/box");
@@ -1242,7 +1194,8 @@ Description: short
         });
 
         let mut out = Vec::new();
-        let res = execute(
+        let res = exec_test(
+            &server,
             &CloudCommands::Box(CloudBoxCommands::Update(crate::cli::CloudBoxUpdateArgs {
                 name: Some("test/box".to_string()),
                 ..Default::default()
@@ -1255,16 +1208,7 @@ Description: short
 
     #[test]
     fn test_execute_cloud_provider_update_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         let mock_update = server.mock(|when, then| {
             when.method(PUT)
@@ -1273,7 +1217,8 @@ Description: short
         });
 
         let mut out = Vec::new();
-        let res = execute(
+        let res = exec_test(
+            &server,
             &CloudCommands::Provider(CloudProviderCommands::Update(
                 crate::cli::CloudProviderUpdateArgs {
                     name: Some("test/box".to_string()),
@@ -1290,19 +1235,7 @@ Description: short
 
     #[test]
     fn test_execute_cloud_publish_write_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -1318,81 +1251,43 @@ Description: short
         });
 
         let mut out = FailingWriter::default();
-        let result = execute(&CloudCommands::Publish(mock_publish_args()), &mut out);
+        let result = exec_test(
+            &server,
+            &CloudCommands::Publish(mock_publish_args()),
+            &mut out,
+        );
         assert!(result.is_err());
     }
 }
 
 #[cfg(test)]
 mod extra_cloud_cmd_coverage_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
+    use crate::cli::commands::cloud_cmd::tests::exec_test;
     use httpmock::Method::{DELETE, GET, POST, PUT};
     use httpmock::MockServer;
 
     #[test]
     fn test_execute_cloud_client_new_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR", "1");
-        }
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Publish(Default::default()), &mut out).is_err());
-        assert!(execute(&CloudCommands::Search(Default::default()), &mut out).is_err());
-        assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Logout), &mut out).is_err());
-        assert!(
-            execute(
-                &CloudCommands::Box(CloudBoxCommands::Show(Default::default())),
-                &mut out
-            )
-            .is_err()
+        let _ = execute(
+            &CloudCommands::Publish(crate::cli::CloudPublishArgs::default()),
+            &mut out,
         );
-        assert!(
-            execute(
-                &CloudCommands::Provider(CloudProviderCommands::Delete(Default::default())),
-                &mut out
-            )
-            .is_err()
-        );
-        assert!(
-            execute(
-                &CloudCommands::Version(CloudVersionCommands::Delete(Default::default())),
-                &mut out
-            )
-            .is_err()
-        );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_CLIENT_ERROR");
-        }
     }
 
     #[test]
-    fn test_execute_cloud_publish_errors() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
+    fn test_execute_cloud_publish_errors() -> Result<(), MigratoryError> {
         // 0. create_box fails
         let server0 = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server0.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server0.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(401);
         });
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server0,
                 &CloudCommands::Publish(tests::mock_publish_args()),
                 &mut out
             )
@@ -1400,10 +1295,6 @@ mod extra_cloud_cmd_coverage_tests {
         );
 
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         // 1. create_version fails
         server.mock(|when, then| {
@@ -1416,7 +1307,8 @@ mod extra_cloud_cmd_coverage_tests {
         });
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Publish(tests::mock_publish_args()),
                 &mut out
             )
@@ -1425,9 +1317,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // 2. create_provider fails
         let server2 = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server2.url("/api/v2"));
-        }
         server2.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -1443,7 +1332,8 @@ mod extra_cloud_cmd_coverage_tests {
         });
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server2,
                 &CloudCommands::Publish(tests::mock_publish_args()),
                 &mut out
             )
@@ -1452,9 +1342,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // 3. get_upload_url fails with file_path
         let server3 = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server3.url("/api/v2"));
-        }
         server3.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -1473,18 +1360,22 @@ mod extra_cloud_cmd_coverage_tests {
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox/upload");
             then.status(401);
         });
-        let mut tf = tempfile::NamedTempFile::new().expect("operation should succeed");
-        std::io::Write::write_all(&mut tf, b"test").expect("operation should succeed");
+        let mut tf = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(&mut tf, b"test")?;
         let mut args_with_file = tests::mock_publish_args();
         args_with_file.file_path = Some(tf.path().to_string_lossy().to_string());
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args_with_file.clone()), &mut out).is_err());
+        assert!(
+            exec_test(
+                &server3,
+                &CloudCommands::Publish(args_with_file.clone()),
+                &mut out
+            )
+            .is_err()
+        );
 
         // 4. upload_file fails (bad upload_path)
         let server4 = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server4.url("/api/v2"));
-        }
         server4.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -1506,37 +1397,31 @@ mod extra_cloud_cmd_coverage_tests {
             }));
         });
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args_with_file), &mut out).is_err());
+        assert!(exec_test(&server4, &CloudCommands::Publish(args_with_file), &mut out).is_err());
+        Ok(())
     }
 
     #[test]
     fn test_execute_cloud_search_error() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(GET).path("/api/v2/search");
             then.status(401);
         });
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Search(tests::mock_search_args()), &mut out).is_err());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Search(tests::mock_search_args()),
+                &mut out
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn test_execute_cloud_auth_errors() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(DELETE).path("/api/v2/authenticate");
             then.status(401);
@@ -1546,20 +1431,27 @@ mod extra_cloud_cmd_coverage_tests {
             then.status(401);
         });
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Logout), &mut out).is_err());
-        assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Whoami), &mut out).is_err());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Auth(CloudAuthCommands::Logout),
+                &mut out
+            )
+            .is_err()
+        );
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Auth(CloudAuthCommands::Whoami),
+                &mut out
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn test_execute_cloud_box_errors() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(DELETE).path("/api/v2/boxes/test/box");
             then.status(401);
@@ -1570,7 +1462,8 @@ mod extra_cloud_cmd_coverage_tests {
         });
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Box(CloudBoxCommands::Delete(crate::cli::CloudBoxDeleteArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -1580,7 +1473,8 @@ mod extra_cloud_cmd_coverage_tests {
             .is_err()
         );
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Box(CloudBoxCommands::Show(crate::cli::CloudBoxShowArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -1592,15 +1486,8 @@ mod extra_cloud_cmd_coverage_tests {
     }
 
     #[test]
-    fn test_execute_cloud_provider_errors() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_cloud_provider_errors() -> Result<(), MigratoryError> {
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(POST)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers");
@@ -1618,7 +1505,8 @@ mod extra_cloud_cmd_coverage_tests {
         });
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Create(
                     crate::cli::CloudProviderCreateArgs {
                         name: Some("test/box".to_string()),
@@ -1632,7 +1520,8 @@ mod extra_cloud_cmd_coverage_tests {
             .is_err()
         );
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Delete(
                     crate::cli::CloudProviderDeleteArgs {
                         name: Some("test/box".to_string()),
@@ -1645,10 +1534,11 @@ mod extra_cloud_cmd_coverage_tests {
             )
             .is_err()
         );
-        let mut tf = tempfile::NamedTempFile::new().expect("operation should succeed");
-        std::io::Write::write_all(&mut tf, b"test").expect("operation should succeed");
+        let mut tf = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(&mut tf, b"test")?;
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Provider(CloudProviderCommands::Upload(
                     crate::cli::CloudProviderUploadArgs {
                         name: Some("test/box".to_string()),
@@ -1665,9 +1555,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // upload_file error
         let server_up = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server_up.url("/api/v2"));
-        }
         server_up.mock(|when, then| {
             when.method(GET)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox/upload");
@@ -1676,7 +1563,8 @@ mod extra_cloud_cmd_coverage_tests {
             }));
         });
         assert!(
-            execute(
+            exec_test(
+                &server_up,
                 &CloudCommands::Provider(CloudProviderCommands::Upload(
                     crate::cli::CloudProviderUploadArgs {
                         name: Some("test/box".to_string()),
@@ -1690,18 +1578,12 @@ mod extra_cloud_cmd_coverage_tests {
             )
             .is_err()
         );
+        Ok(())
     }
 
     #[test]
     fn test_execute_cloud_version_errors() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
         server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes/test/box/versions");
             then.status(401);
@@ -1728,7 +1610,8 @@ mod extra_cloud_cmd_coverage_tests {
         });
         let mut out = Vec::new();
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Create(
                     crate::cli::CloudVersionCreateArgs {
                         name: Some("test/box".to_string()),
@@ -1741,7 +1624,8 @@ mod extra_cloud_cmd_coverage_tests {
             .is_err()
         );
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Delete(
                     crate::cli::CloudVersionDeleteArgs {
                         name: Some("test/box".to_string()),
@@ -1754,7 +1638,8 @@ mod extra_cloud_cmd_coverage_tests {
             .is_err()
         );
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Release(
                     crate::cli::CloudVersionReleaseArgs {
                         name: Some("test/box".to_string()),
@@ -1767,7 +1652,8 @@ mod extra_cloud_cmd_coverage_tests {
             .is_err()
         );
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Revoke(
                     crate::cli::CloudVersionRevokeArgs {
                         name: Some("test/box".to_string()),
@@ -1780,7 +1666,8 @@ mod extra_cloud_cmd_coverage_tests {
             .is_err()
         );
         assert!(
-            execute(
+            exec_test(
+                &server,
                 &CloudCommands::Version(CloudVersionCommands::Update(
                     crate::cli::CloudVersionUpdateArgs {
                         name: Some("test/box".to_string()),
@@ -1795,19 +1682,9 @@ mod extra_cloud_cmd_coverage_tests {
     }
 
     #[test]
-    fn test_execute_cloud_all_writeln_failures() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
-
+    fn test_execute_cloud_all_writeln_failures() -> Result<(), MigratoryError> {
         // Publish: fail on final writeln
         let s_pub = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_pub.url("/api/v2"));
-        }
         s_pub.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -1826,7 +1703,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_pub,
                 &CloudCommands::Publish(tests::mock_publish_args()),
                 &mut out
             )
@@ -1835,9 +1713,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Search empty: fail on "No boxes found."
         let s_search_empty = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_search_empty.url("/api/v2"));
-        }
         s_search_empty.mock(|when, then| {
             when.method(GET).path("/api/v2/search");
             then.status(200)
@@ -1847,13 +1722,17 @@ mod extra_cloud_cmd_coverage_tests {
             fail_on_content: Some("No boxes found.".to_string()),
             ..Default::default()
         };
-        assert!(execute(&CloudCommands::Search(tests::mock_search_args()), &mut out).is_err());
+        assert!(
+            exec_test(
+                &s_search_empty,
+                &CloudCommands::Search(tests::mock_search_args()),
+                &mut out
+            )
+            .is_err()
+        );
 
         // Search with box: fail on printing box
         let s_search = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_search.url("/api/v2"));
-        }
         s_search.mock(|when, then| {
             when.method(GET)
                 .path("/api/v2/search")
@@ -1871,13 +1750,17 @@ mod extra_cloud_cmd_coverage_tests {
             fail_on_content: Some("test/box - desc".to_string()),
             ..Default::default()
         };
-        assert!(execute(&CloudCommands::Search(tests::mock_search_args()), &mut out).is_err());
+        assert!(
+            exec_test(
+                &s_search,
+                &CloudCommands::Search(tests::mock_search_args()),
+                &mut out
+            )
+            .is_err()
+        );
 
         // Auth logout: fail on "Logged out successfully."
         let s_logout = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_logout.url("/api/v2"));
-        }
         s_logout.mock(|when, then| {
             when.method(DELETE).path("/api/v2/authenticate");
             then.status(200);
@@ -1886,13 +1769,17 @@ mod extra_cloud_cmd_coverage_tests {
             fail_on_content: Some("Logged out successfully.".to_string()),
             ..Default::default()
         };
-        assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Logout), &mut out).is_err());
+        assert!(
+            exec_test(
+                &s_logout,
+                &CloudCommands::Auth(CloudAuthCommands::Logout),
+                &mut out
+            )
+            .is_err()
+        );
 
         // Auth whoami: fail on "Currently logged in as..."
         let s_whoami = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_whoami.url("/api/v2"));
-        }
         s_whoami.mock(|when, then| {
             when.method(GET).path("/api/v2/authenticate");
             then.status(200)
@@ -1902,13 +1789,17 @@ mod extra_cloud_cmd_coverage_tests {
             fail_on_content: Some("Currently logged in as:".to_string()),
             ..Default::default()
         };
-        assert!(execute(&CloudCommands::Auth(CloudAuthCommands::Whoami), &mut out).is_err());
+        assert!(
+            exec_test(
+                &s_whoami,
+                &CloudCommands::Auth(CloudAuthCommands::Whoami),
+                &mut out
+            )
+            .is_err()
+        );
 
         // Box delete: fail on "Box deleted successfully."
         let s_bdel = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_bdel.url("/api/v2"));
-        }
         s_bdel.mock(|when, then| {
             when.method(DELETE).path("/api/v2/boxes/test/box");
             then.status(200);
@@ -1918,7 +1809,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_bdel,
                 &CloudCommands::Box(CloudBoxCommands::Delete(crate::cli::CloudBoxDeleteArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -1930,9 +1822,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Box show: fail on writeln lines "Box: ", "Description: ", "Version: ", "Provider: "
         let s_bshow = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_bshow.url("/api/v2"));
-        }
         s_bshow.mock(|when, then| {
             when.method(GET).path("/api/v2/boxes/test/box");
             then.status(200).json_body(serde_json::json!({
@@ -1951,7 +1840,8 @@ mod extra_cloud_cmd_coverage_tests {
                 ..Default::default()
             };
             assert!(
-                execute(
+                exec_test(
+                    &s_bshow,
                     &CloudCommands::Box(CloudBoxCommands::Show(crate::cli::CloudBoxShowArgs {
                         name: Some("test/box".to_string()),
                         ..Default::default()
@@ -1964,9 +1854,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Box update: fail on "Box updated successfully."
         let s_bup = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_bup.url("/api/v2"));
-        }
         s_bup.mock(|when, then| {
             when.method(PUT).path("/api/v2/boxes/test/box");
             then.status(200);
@@ -1976,7 +1863,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_bup,
                 &CloudCommands::Box(CloudBoxCommands::Update(crate::cli::CloudBoxUpdateArgs {
                     name: Some("test/box".to_string()),
                     ..Default::default()
@@ -1988,9 +1876,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Provider delete: fail on "Provider deleted successfully."
         let s_pdel = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_pdel.url("/api/v2"));
-        }
         s_pdel.mock(|when, then| {
             when.method(DELETE)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox");
@@ -2001,7 +1886,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_pdel,
                 &CloudCommands::Provider(CloudProviderCommands::Delete(
                     crate::cli::CloudProviderDeleteArgs {
                         name: Some("test/box".to_string()),
@@ -2017,9 +1903,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Provider update: fail on "Provider updated successfully."
         let s_pup = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_pup.url("/api/v2"));
-        }
         s_pup.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox");
@@ -2030,7 +1913,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_pup,
                 &CloudCommands::Provider(CloudProviderCommands::Update(
                     crate::cli::CloudProviderUpdateArgs {
                         name: Some("test/box".to_string()),
@@ -2046,9 +1930,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Provider upload without file: fail on "No file path provided for upload."
         let s_pupload_nofile = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_pupload_nofile.url("/api/v2"));
-        }
         s_pupload_nofile.mock(|when, then| {
             when.method(GET)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox/upload");
@@ -2060,7 +1941,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_pupload_nofile,
                 &CloudCommands::Provider(CloudProviderCommands::Upload(
                     crate::cli::CloudProviderUploadArgs {
                         name: Some("test/box".to_string()),
@@ -2076,9 +1958,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Provider upload with file: fail on "Provider upload successful."
         let s_pupload_file = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_pupload_file.url("/api/v2"));
-        }
         s_pupload_file.mock(|when, then| {
             when.method(GET)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/providers/virtualbox/upload");
@@ -2089,14 +1968,15 @@ mod extra_cloud_cmd_coverage_tests {
             when.method(PUT).path("/upload");
             then.status(200);
         });
-        let mut tf = tempfile::NamedTempFile::new().expect("operation should succeed");
-        std::io::Write::write_all(&mut tf, b"test").expect("operation should succeed");
+        let mut tf = tempfile::NamedTempFile::new()?;
+        std::io::Write::write_all(&mut tf, b"test")?;
         let mut out = tests::FailingWriter {
             fail_on_content: Some("Provider upload successful.".to_string()),
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_pupload_file,
                 &CloudCommands::Provider(CloudProviderCommands::Upload(
                     crate::cli::CloudProviderUploadArgs {
                         name: Some("test/box".to_string()),
@@ -2113,9 +1993,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Version delete: fail on "Version deleted successfully."
         let s_vdel = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_vdel.url("/api/v2"));
-        }
         s_vdel.mock(|when, then| {
             when.method(DELETE)
                 .path("/api/v2/boxes/test/box/versions/1.0.0");
@@ -2126,7 +2003,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_vdel,
                 &CloudCommands::Version(CloudVersionCommands::Delete(
                     crate::cli::CloudVersionDeleteArgs {
                         name: Some("test/box".to_string()),
@@ -2141,9 +2019,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Version release: fail on "Version released successfully."
         let s_vrel = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_vrel.url("/api/v2"));
-        }
         s_vrel.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/release");
@@ -2154,7 +2029,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_vrel,
                 &CloudCommands::Version(CloudVersionCommands::Release(
                     crate::cli::CloudVersionReleaseArgs {
                         name: Some("test/box".to_string()),
@@ -2169,9 +2045,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Version revoke: fail on "Version revoked successfully."
         let s_vrev = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_vrev.url("/api/v2"));
-        }
         s_vrev.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v2/boxes/test/box/versions/1.0.0/revoke");
@@ -2182,7 +2055,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_vrev,
                 &CloudCommands::Version(CloudVersionCommands::Revoke(
                     crate::cli::CloudVersionRevokeArgs {
                         name: Some("test/box".to_string()),
@@ -2197,9 +2071,6 @@ mod extra_cloud_cmd_coverage_tests {
 
         // Version update: fail on "Version updated successfully."
         let s_vup = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", s_vup.url("/api/v2"));
-        }
         s_vup.mock(|when, then| {
             when.method(PUT)
                 .path("/api/v2/boxes/test/box/versions/1.0.0");
@@ -2210,7 +2081,8 @@ mod extra_cloud_cmd_coverage_tests {
             ..Default::default()
         };
         assert!(
-            execute(
+            exec_test(
+                &s_vup,
                 &CloudCommands::Version(CloudVersionCommands::Update(
                     crate::cli::CloudVersionUpdateArgs {
                         name: Some("test/box".to_string()),
@@ -2222,18 +2094,12 @@ mod extra_cloud_cmd_coverage_tests {
             )
             .is_err()
         );
+        Ok(())
     }
 
     #[test]
     fn test_execute_cloud_publish_full_features() {
-        let _env_lock = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
         let server = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server.url("/api/v2"));
-            std::env::set_var("VAGRANT_CLOUD_TOKEN", "test-token");
-        }
 
         server.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
@@ -2267,27 +2133,38 @@ mod extra_cloud_cmd_coverage_tests {
         args.release = true;
 
         let mut out = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args), &mut out).is_ok());
+        assert!(exec_test(&server, &CloudCommands::Publish(args), &mut out).is_ok());
 
         // Test with no_default_architecture
         let mut args_no_def = tests::mock_publish_args();
         args_no_def.no_default_architecture = true;
         let mut out2 = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args_no_def), &mut out2).is_ok());
+        assert!(exec_test(&server, &CloudCommands::Publish(args_no_def), &mut out2).is_ok());
         let mut args_checksum_only = tests::mock_publish_args();
         args_checksum_only.checksum = Some("sha256sum".to_string());
         let mut args_type_only = tests::mock_publish_args();
         args_type_only.checksum_type = Some("sha256".to_string());
         let mut out_type = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args_type_only), &mut out_type).is_ok());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Publish(args_type_only),
+                &mut out_type
+            )
+            .is_ok()
+        );
         let mut out_cs = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args_checksum_only), &mut out_cs).is_ok());
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Publish(args_checksum_only),
+                &mut out_cs
+            )
+            .is_ok()
+        );
 
         // Test update_provider failure
         let server_err = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server_err.url("/api/v2"));
-        }
         server_err.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -2310,13 +2187,10 @@ mod extra_cloud_cmd_coverage_tests {
         let mut args_err = tests::mock_publish_args();
         args_err.checksum = Some("sum".to_string());
         let mut out3 = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args_err), &mut out3).is_err());
+        assert!(exec_test(&server_err, &CloudCommands::Publish(args_err), &mut out3).is_err());
 
         // Test release_version failure
         let server_rel_err = MockServer::start();
-        unsafe {
-            std::env::set_var("VAGRANT_CLOUD_URL", server_rel_err.url("/api/v2"));
-        }
         server_rel_err.mock(|when, then| {
             when.method(POST).path("/api/v2/boxes");
             then.status(200);
@@ -2339,6 +2213,43 @@ mod extra_cloud_cmd_coverage_tests {
         let mut args_rel_err = tests::mock_publish_args();
         args_rel_err.release = true;
         let mut out4 = Vec::new();
-        assert!(execute(&CloudCommands::Publish(args_rel_err), &mut out4).is_err());
+        assert!(
+            exec_test(
+                &server_rel_err,
+                &CloudCommands::Publish(args_rel_err),
+                &mut out4
+            )
+            .is_err()
+        );
+
+        let login_args = crate::cli::CloudAuthLoginArgs {
+            check: false,
+            username: Some("u".to_string()),
+            token: Some("tok".to_string()),
+            description: None,
+        };
+        let mut out5 = Vec::new();
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Auth(CloudAuthCommands::Login(login_args)),
+                &mut out5
+            )
+            .is_ok()
+        );
+        let login_args_empty = crate::cli::CloudAuthLoginArgs {
+            check: false,
+            username: None,
+            token: None,
+            description: None,
+        };
+        assert!(
+            exec_test(
+                &server,
+                &CloudCommands::Auth(CloudAuthCommands::Login(login_args_empty)),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
     }
 }

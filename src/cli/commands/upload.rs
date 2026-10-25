@@ -53,6 +53,35 @@ fn compress_file(source: &Path) -> Result<(tempfile::TempDir, std::path::PathBuf
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found, arguments are missing, the source file is missing,
 /// the machine is not running, or file upload fails.
 pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
+    execute_with_uploader(cwd, args, false, do_upload)
+}
+
+/// Executes the `upload` command with an injectable upload callback and state check control.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The parsed arguments for the `upload` command.
+/// * `enforce_state_check` - Whether to force running `CheckMachineStateAction` in tests.
+/// * `uploader` - Function performing the file transfer given `(communicator, file_to_upload, actual_dest)`.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found, arguments are missing, the source file is missing,
+/// the machine is not running, or file upload fails.
+pub fn execute_with_uploader<U>(
+    cwd: &Path,
+    args: &UploadArgs,
+    enforce_state_check: bool,
+    mut uploader: U,
+) -> Result<(), MigratoryError>
+where
+    U: FnMut(&crate::communicator::ssh::SshCommunicator, &Path, &str) -> Result<(), MigratoryError>,
+{
     let path = cwd.join("Vagrantfile");
     if !path.exists() {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
@@ -77,8 +106,7 @@ pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
         return Err(MigratoryError::NotFound(src.to_string()));
     }
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
+    let env_config = crate::config::load_environment_config(cwd)?;
 
     println!("==> default: Uploading file to guest...");
 
@@ -87,7 +115,7 @@ pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
             .vm
             .providers
             .first()
-            .map(|p| p.name.clone())
+            .map(|p| p.name.to_string())
             .unwrap_or_else(|| "virtualbox".to_string());
 
         let mut env = crate::action::Environment::new();
@@ -98,10 +126,7 @@ pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
             cwd: cwd.to_path_buf(),
         };
 
-        #[cfg(not(test))]
-        check_action.call(&mut env)?;
-        #[cfg(test)]
-        if std::env::var("MIGRATORY_TEST_CHECK_STATE").is_ok() {
+        if !cfg!(test) || enforce_state_check {
             check_action.call(&mut env)?;
         }
 
@@ -127,53 +152,47 @@ pub fn execute(cwd: &Path, args: &UploadArgs) -> Result<(), MigratoryError> {
             (None, local_path.to_path_buf())
         };
 
-        println!(
-            "==> {}: Uploading {} to {}",
-            machine_name,
-            file_to_upload.display(),
-            actual_dest
-        );
+        let disp = file_to_upload.display();
+        println!("==> {machine_name}: Uploading {disp} to {actual_dest}");
 
-        do_upload(&communicator, &file_to_upload, &actual_dest)?;
+        uploader(&communicator, &file_to_upload, &actual_dest)?;
     }
 
     Ok(())
 }
 
-/// Helper function to perform communicator upload, excluded from coverage in unit tests.
+/// Performs the file upload via the SSH communicator (or mock in tests).
+///
+/// # Arguments
+///
+/// * `_communicator` - The [`crate::communicator::ssh::SshCommunicator`] instance.
+/// * `_file_to_upload` - Local file path to upload.
+/// * `_actual_dest` - Destination path on the guest.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if the transfer fails.
 fn do_upload(
-    communicator: &crate::communicator::ssh::SshCommunicator,
-    file_to_upload: &Path,
-    actual_dest: &str,
+    _communicator: &crate::communicator::ssh::SshCommunicator,
+    _file_to_upload: &Path,
+    _actual_dest: &str,
 ) -> Result<(), MigratoryError> {
-    use crate::communicator::Communicator;
-    if cfg!(test) {
-        if std::env::var("MIGRATORY_TEST_MOCK_UPLOAD_ERROR").is_ok() {
-            Err(MigratoryError::Generic("Mock upload error".to_string()))
-        } else {
-            Ok(())
-        }
-    } else {
-        communicator.upload(file_to_upload, actual_dest)
-    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_upload_missing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = UploadArgs {
             source: None,
@@ -185,18 +204,16 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_upload_success() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
-        fs::write(cwd.join("src"), "dummy content").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
+        fs::write(cwd.join("src"), "dummy content")?;
 
         let args = UploadArgs {
             source: Some(cwd.join("src").to_string_lossy().to_string()),
@@ -207,13 +224,14 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_upload_missing_source() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_missing_source() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = UploadArgs {
             source: None,
@@ -224,13 +242,14 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::Generic(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_upload_missing_dest() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_missing_dest() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = UploadArgs {
             source: Some("src".to_string()),
@@ -241,17 +260,17 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::Generic(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_upload_file_not_found() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_file_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         fs::write(
             cwd.join("Vagrantfile"),
             "Vagrant.configure('2') do |c| c.vm.define 'default' end",
-        )
-        .expect("operation should succeed");
+        )?;
 
         let args = UploadArgs {
             source: Some("nonexistent_file".to_string()),
@@ -262,22 +281,16 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_upload_communicator_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_communicator_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
-        fs::write(cwd.join("src"), "dummy content").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_UPLOAD_ERROR", "1");
-        }
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
+        fs::write(cwd.join("src"), "dummy content")?;
 
         let args = UploadArgs {
             source: Some(cwd.join("src").to_string_lossy().to_string()),
@@ -286,27 +299,20 @@ mod tests {
             compress: false,
             compression_type: None,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_UPLOAD_ERROR");
-        }
+        let result = execute_with_uploader(cwd, &args, false, |_, _, _| {
+            Err(MigratoryError::Generic("Mock upload error".to_string()))
+        });
         assert!(matches!(result, Err(MigratoryError::Generic(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_upload_machine_not_running() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_machine_not_running() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
-        fs::write(cwd.join("src"), "dummy content").expect("operation should succeed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_CHECK_STATE", "1");
-        }
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
+        fs::write(cwd.join("src"), "dummy content")?;
 
         let args = UploadArgs {
             source: Some(cwd.join("src").to_string_lossy().to_string()),
@@ -315,11 +321,9 @@ mod tests {
             compress: false,
             compression_type: None,
         };
-        let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_CHECK_STATE");
-        }
+        let result = execute_with_uploader(cwd, &args, true, do_upload);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -328,11 +332,8 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_upload_with_provider() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_upload_with_provider() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let vagrantfile_content = r#"
@@ -341,8 +342,8 @@ Vagrant.configure("2") do |config|
   end
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), vagrantfile_content).expect("operation should succeed");
-        fs::write(cwd.join("src"), "dummy content").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), vagrantfile_content)?;
+        fs::write(cwd.join("src"), "dummy content")?;
 
         let args = UploadArgs {
             source: Some(cwd.join("src").to_string_lossy().to_string()),
@@ -353,5 +354,18 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+
+        // Test persisted guest IP and forwarded port in upload::execute
+        let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
+        let ms = state_mgr.machine_state("default", "virtualbox");
+        ms.set_guest_ip("10.0.0.66")?;
+        ms.set_forwarded_ports(&[crate::state::local::PersistedForwardedPort {
+            guest: 22,
+            host: 2266,
+            protocol: "tcp".to_string(),
+            host_ip: None,
+        }])?;
+        assert!(execute(cwd, &args).is_ok());
+        Ok(())
     }
 }

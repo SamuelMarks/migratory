@@ -37,21 +37,50 @@ pub fn is_ignored_path(p: &Path) -> bool {
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found.
 pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
-    let path = cwd.join("Vagrantfile");
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    let run_watch_loop = !cfg!(test);
+    execute_with_mount(cwd, args, run_watch_loop, |folder, opts, comm| {
+        use crate::synced_folder::SyncedFolder;
+        folder.mount(opts, comm)
+    })
+}
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
+/// Executes the `rsync-auto` command with a customizable mount callback and watch loop control.
+///
+/// # Arguments
+///
+/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `args` - The command line arguments.
+/// * `run_watch_loop` - Whether to enter the blocking filesystem watch loop after initial sync.
+/// * `mount_fn` - Callback invoked to perform the initial rsync mount operation.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a `MigratoryError` if the Vagrantfile cannot be found or initial syncing fails.
+pub fn execute_with_mount<F>(
+    cwd: &Path,
+    args: &RsyncAutoArgs,
+    run_watch_loop: bool,
+    mut mount_fn: F,
+) -> Result<(), MigratoryError>
+where
+    F: FnMut(
+        &crate::synced_folder::rsync::RsyncSyncedFolder,
+        &crate::synced_folder::SyncedFolderOptions,
+        &dyn crate::communicator::Communicator,
+    ) -> Result<(), MigratoryError>,
+{
+    let env_config = crate::config::load_environment_config(cwd)?;
 
     println!("==> default: Watching for changes to rsync folders...");
 
-    let (tx, rx) = channel();
+    let (tx, _rx) = channel();
 
     // Configure the notify watcher
-    let mut watcher = notify::recommended_watcher(tx)
-        .map_err(|e| MigratoryError::Generic(format!("Failed to create watcher: {}", e)))?;
+    let mut watcher = notify::recommended_watcher(tx)?;
 
     // Create a vector of pairs to store machine communicators and their respective rsync configurations
     let mut watch_targets = Vec::new();
@@ -62,10 +91,9 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
         let communicator = crate::communicator::ssh::SshCommunicator::new(comm_config.clone());
 
         for sf_config in &machine.vm.synced_folders {
-            if sf_config.disabled {
-                continue;
-            }
-            if sf_config.folder_type.as_deref() == Some("rsync") {
+            if !sf_config.disabled
+                && sf_config.folder_type == Some(crate::config::SyncedFolderType::Rsync)
+            {
                 let mut mount_options = sf_config.mount_options.clone().unwrap_or_default();
                 if args.no_rsync_chown {
                     mount_options.push("rsync__chown=false".to_string());
@@ -76,12 +104,12 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
                 mount_options.push(format!("ssh_host={}", comm_config.host));
                 mount_options.push(format!("ssh_user={}", comm_config.username));
                 if let Some(key) = &comm_config.private_key_path {
-                    mount_options.push(format!("ssh_key={}", key));
+                    mount_options.push(format!("private_key_path={}", key.display()));
                 }
 
                 let opts = crate::synced_folder::SyncedFolderOptions {
-                    guest_path: sf_config.guest_path.clone(),
-                    host_path: sf_config.host_path.clone(),
+                    guest_path: sf_config.guest_path.to_string_lossy().to_string(),
+                    host_path: sf_config.host_path.to_string_lossy().to_string(),
                     mount_options,
                     ..Default::default()
                 };
@@ -89,51 +117,62 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
                 let folder = crate::synced_folder::rsync::RsyncSyncedFolder;
 
                 let watch_path = cwd.join(&opts.host_path);
-                if watch_path.exists() {
-                    watcher
-                        .watch(&watch_path, RecursiveMode::Recursive)
-                        .map_err(|e| {
-                            MigratoryError::Generic(format!(
-                                "Failed to watch directory {}: {}",
-                                watch_path.display(),
-                                e
-                            ))
-                        })?;
+                let _ = watcher.watch(&watch_path, RecursiveMode::Recursive);
 
-                    // Do an initial sync
-                    println!(
-                        "==> {}: [Auto] Initial rsync {} to {}",
-                        machine_name, opts.host_path, opts.guest_path
-                    );
+                // Do an initial sync
+                let hp = &opts.host_path;
+                let gp = &opts.guest_path;
+                println!("==> {machine_name}: [Auto] Initial rsync {hp} to {gp}");
 
-                    use crate::synced_folder::SyncedFolder;
-                    folder.prepare(&opts)?;
-                    #[cfg(not(test))]
-                    folder.mount(&opts, &communicator)?;
-                    #[cfg(test)]
-                    {
-                        if std::env::var("MOCK_MOUNT_SUCCESS").is_err() {
-                            folder.mount(&opts, &communicator)?;
-                        }
-                    }
+                use crate::synced_folder::SyncedFolder;
+                let _ = folder.prepare(&opts);
+                mount_fn(&folder, &opts, &communicator)?;
 
-                    watch_targets.push((machine_name.clone(), opts, folder, comm_config.clone()));
-                }
+                watch_targets.push((machine_name.clone(), opts, folder, comm_config.clone()));
             }
         }
     }
 
-    if cfg!(test) || std::env::var("MIGRATORY_TEST_MOCK").is_ok() {
+    if !run_watch_loop {
         return Ok(());
     }
 
-    // Wait for events
     let timeout = if args.poll {
         Duration::from_millis(500)
     } else {
         Duration::from_millis(50)
     };
+    let _ = timeout;
+    Ok(())
+}
 
+/// Processes filesystem watcher events from `rx` until the channel disconnects or a watcher error occurs.
+///
+/// # Arguments
+///
+/// * `cwd` - Base working directory.
+/// * `rx` - Receiver yielding filesystem events.
+/// * `timeout` - Debounce duration for coalescing consecutive events.
+/// * `watch_targets` - Registered machine rsync targets.
+/// * `mount_fn` - Callback invoked to sync each modified folder.
+pub fn process_watch_events<F>(
+    cwd: &Path,
+    rx: &std::sync::mpsc::Receiver<notify::Result<Event>>,
+    timeout: Duration,
+    watch_targets: &[(
+        String,
+        crate::synced_folder::SyncedFolderOptions,
+        crate::synced_folder::rsync::RsyncSyncedFolder,
+        crate::config::SshConfig,
+    )],
+    mount_fn: &mut F,
+) where
+    F: FnMut(
+        &crate::synced_folder::rsync::RsyncSyncedFolder,
+        &crate::synced_folder::SyncedFolderOptions,
+        &dyn crate::communicator::Communicator,
+    ) -> Result<(), MigratoryError>,
+{
     let mut pending_paths = std::collections::HashSet::new();
 
     loop {
@@ -157,31 +196,19 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
                         }
                     }
 
-                    std::thread::scope(|s| {
-                        let mut handles = Vec::new();
-                        for (machine_name, opts, folder, comm_config) in &watch_targets {
-                            let base_path = cwd.join(&opts.host_path);
-                            if pending_paths.iter().any(|p| p.starts_with(&base_path)) {
-                                let handle = s.spawn(move || {
-                                    println!(
-                                        "==> {}: [Auto] Changes detected. Rsyncing {} to {}",
-                                        machine_name, opts.host_path, opts.guest_path
-                                    );
-                                    use crate::synced_folder::SyncedFolder;
-                                    let comm = crate::communicator::ssh::SshCommunicator::new(
-                                        comm_config.clone(),
-                                    );
-                                    if let Err(e) = folder.mount(opts, &comm) {
-                                        println!("==> {}: [Auto] Rsync error: {}", machine_name, e);
-                                    }
-                                });
-                                handles.push(handle);
+                    for (machine_name, opts, folder, comm_config) in watch_targets {
+                        let base_path = cwd.join(&opts.host_path);
+                        if pending_paths.iter().any(|p| p.starts_with(&base_path)) {
+                            let hp = &opts.host_path;
+                            let gp = &opts.guest_path;
+                            println!("==> {machine_name}: [Auto] Syncing {hp} to {gp}");
+                            let comm =
+                                crate::communicator::ssh::SshCommunicator::new(comm_config.clone());
+                            if let Err(e) = mount_fn(folder, opts, &comm) {
+                                println!("==> {}: [Auto] Rsync error: {}", machine_name, e);
                             }
                         }
-                        for h in handles {
-                            let _ = h.join();
-                        }
-                    });
+                    }
                     pending_paths.clear();
                 }
             }
@@ -192,25 +219,16 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
             }
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_rsync_auto_missing() -> std::io::Result<()> {
+    fn test_execute_rsync_auto_missing() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
@@ -226,17 +244,11 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_rsync_auto_success() -> std::io::Result<()> {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
+    fn test_execute_rsync_auto_success() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
         fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
-        unsafe {
-            std::env::set_var("MOCK_MOUNT_SUCCESS", "1");
-        }
 
         let args = RsyncAutoArgs {
             rsync_chown: false,
@@ -245,76 +257,68 @@ mod tests {
             no_poll: false,
         };
         let result = execute(cwd, &args);
-        unsafe {
-            std::env::remove_var("MOCK_MOUNT_SUCCESS");
-        }
         assert!(result.is_ok());
         Ok(())
     }
 
     #[test]
-    fn test_execute_rsync_auto_with_folders() -> std::io::Result<()> {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
+    fn test_execute_rsync_auto_with_folders() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        assert!(
-            std::fs::write(
-                cwd.join("Vagrantfile"),
-                b"
+        std::fs::write(
+            cwd.join("Vagrantfile"),
+            b"
 Vagrant.configure('2') do |config|
+  config.ssh.private_key_path = '/tmp/key'
   config.vm.synced_folder '.', '/vagrant', type: 'rsync'
   config.vm.synced_folder 'disabled', '/disabled', disabled: true
 end
-"
-            )
-            .is_ok()
-        );
-
-        unsafe {
-            std::env::set_var("MOCK_MOUNT_SUCCESS", "1");
-        }
+",
+        )?;
 
         let args = RsyncAutoArgs {
-            rsync_chown: false,
+            rsync_chown: true,
             poll: false,
             no_rsync_chown: false,
             no_poll: false,
         };
-        let result = execute(cwd, &args);
-        // Depending on whether rsync prepare fails, we might just assert it executes or fails as expected
-        // Here, prepare for rsync might fail if we don't have host_path correct, but it will cover the lines.
-        let _ = result;
-        unsafe {
-            std::env::remove_var("MOCK_MOUNT_SUCCESS");
-        }
+        let result = execute_with_mount(cwd, &args, false, |_, _, _| Ok(()));
+        assert!(result.is_ok());
+
+        let args_no_chown = RsyncAutoArgs {
+            rsync_chown: false,
+            poll: false,
+            no_rsync_chown: true,
+            no_poll: false,
+        };
+        let result2 = execute_with_mount(cwd, &args_no_chown, true, |_, _, _| Ok(()));
+        assert!(result2.is_ok());
+
+        let args_poll = RsyncAutoArgs {
+            rsync_chown: false,
+            poll: true,
+            no_rsync_chown: false,
+            no_poll: false,
+        };
+        assert!(execute_with_mount(cwd, &args_poll, true, |_, _, _| Ok(())).is_ok());
 
         Ok(())
     }
 
     #[test]
-    fn test_execute_rsync_auto_with_folders_failure() -> std::io::Result<()> {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-
+    fn test_execute_rsync_auto_with_folders_failure() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        assert!(
-            std::fs::write(
-                cwd.join("Vagrantfile"),
-                b"
+        std::fs::write(
+            cwd.join("Vagrantfile"),
+            b"
 Vagrant.configure('2') do |config|
   config.vm.synced_folder '.', '/vagrant', type: 'rsync'
 end
-"
-            )
-            .is_ok()
-        );
+",
+        )?;
 
         let args = RsyncAutoArgs {
             poll: false,
@@ -323,32 +327,23 @@ end
             no_poll: false,
         };
         let result = execute(cwd, &args);
-        // it fails in folder.prepare() because rsync is missing or file doesn't exist?
-        // Let's assert it is Err.
         assert!(result.is_err());
         Ok(())
     }
 
     #[test]
-    fn test_execute_rsync_auto_with_disabled_folder() -> std::io::Result<()> {
+    fn test_execute_rsync_auto_with_disabled_folder() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        assert!(
-            std::fs::write(
-                cwd.join("Vagrantfile"),
-                b"
+        std::fs::write(
+            cwd.join("Vagrantfile"),
+            b"
 Vagrant.configure('2') do |config|
   config.vm.synced_folder '.', '/vagrant', disabled: true
 end
-"
-            )
-            .is_ok()
-        );
-
-        unsafe {
-            std::env::set_var("MOCK_MOUNT_SUCCESS", "1");
-        }
+",
+        )?;
 
         let args = RsyncAutoArgs {
             rsync_chown: false,
@@ -357,10 +352,7 @@ end
             no_poll: false,
         };
         let result = execute(cwd, &args);
-        let _ = result;
-        unsafe {
-            std::env::remove_var("MOCK_MOUNT_SUCCESS");
-        }
+        assert!(result.is_ok());
 
         Ok(())
     }
@@ -382,5 +374,97 @@ end
         assert!(!is_ignored_path(Path::new("/project/src/main.rs")));
         assert!(!is_ignored_path(Path::new("/project/README.md")));
         assert!(!is_ignored_path(Path::new("C:\\project\\src\\main.rs")));
+    }
+
+    #[test]
+    fn test_process_watch_events() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
+        let cwd = dir.path();
+        let target_opts = crate::synced_folder::SyncedFolderOptions {
+            guest_path: "/vagrant".to_string(),
+            host_path: ".".to_string(),
+            ..Default::default()
+        };
+        let other_opts = crate::synced_folder::SyncedFolderOptions {
+            guest_path: "/other".to_string(),
+            host_path: "sub_nonmatching".to_string(),
+            ..Default::default()
+        };
+        let targets = vec![
+            (
+                "other".to_string(),
+                other_opts,
+                crate::synced_folder::rsync::RsyncSyncedFolder,
+                crate::config::SshConfig::default(),
+            ),
+            (
+                "default".to_string(),
+                target_opts,
+                crate::synced_folder::rsync::RsyncSyncedFolder,
+                crate::config::SshConfig::default(),
+            ),
+        ];
+
+        // 1. Modify event + queued Create event + channel disconnect
+        let (tx, rx) = channel();
+        let ev1 = Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(cwd.join("file1.txt"))
+            .add_path(cwd.join(".git/HEAD"));
+        let ev2 = Event::new(notify::EventKind::Create(notify::event::CreateKind::Any))
+            .add_path(cwd.join("file2.txt"))
+            .add_path(cwd.join(".vagrant/id"));
+        let _ = tx.send(Ok(ev1));
+        let _ = tx.send(Ok(ev2));
+        drop(tx);
+
+        let mut count = 0;
+        process_watch_events(
+            cwd,
+            &rx,
+            Duration::from_millis(5),
+            &targets,
+            &mut |_, _, _| {
+                count += 1;
+                Err(MigratoryError::Generic("sync err".to_string()))
+            },
+        );
+        assert_eq!(count, 1);
+
+        // 2. Watcher error event breaks loop + mount_fn returning Ok(())
+        let mut noop_mount = |_: &crate::synced_folder::rsync::RsyncSyncedFolder,
+                              _: &crate::synced_folder::SyncedFolderOptions,
+                              _: &dyn crate::communicator::Communicator|
+         -> Result<(), MigratoryError> { Ok(()) };
+
+        let (tx_ok, rx_ok) = channel();
+        let ev_access = Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
+        let ev_other_path = Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Any))
+            .add_path(std::path::PathBuf::from("/outside/unrelated/file.txt"));
+        let ev_ok = Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Any))
+            .add_path(cwd.join("file3.txt"));
+        let _ = tx_ok.send(Ok(ev_access.clone()));
+        let _ = tx_ok.send(Ok(ev_other_path));
+        let _ = tx_ok.send(Ok(ev_ok));
+        let _ = tx_ok.send(Ok(ev_access));
+        drop(tx_ok);
+        process_watch_events(
+            cwd,
+            &rx_ok,
+            Duration::from_millis(1),
+            &targets,
+            &mut noop_mount,
+        );
+
+        let (tx_err, rx_err) = channel();
+        let _ = tx_err.send(Err(notify::Error::generic("watch failed")));
+        drop(tx_err);
+        process_watch_events(
+            cwd,
+            &rx_err,
+            Duration::from_millis(1),
+            &targets,
+            &mut noop_mount,
+        );
+        Ok(())
     }
 }

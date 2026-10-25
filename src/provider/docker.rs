@@ -14,12 +14,37 @@ use std::process::Command;
 pub struct DockerProvider {
     /// Internal container ID
     machine_id: Option<String>,
+    /// Executable name or path for `docker`.
+    docker_bin: String,
 }
 
 impl DockerProvider {
     /// Creates a new DockerProvider instance.
     pub fn new(machine_id: Option<String>) -> Self {
-        Self { machine_id }
+        Self {
+            machine_id,
+            docker_bin: "docker".to_string(),
+        }
+    }
+
+    /// Configures a custom `docker` binary path.
+    ///
+    /// # Arguments
+    ///
+    /// * `bin` - Path or binary name for `docker`.
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated `DockerProvider`.
+    #[must_use]
+    pub fn with_docker_bin(mut self, bin: impl Into<String>) -> Self {
+        self.docker_bin = bin.into();
+        self
+    }
+
+    /// Runs `docker` using the configured `docker_bin`.
+    fn run_docker(&self, args: &[&str]) -> Result<String, MigratoryError> {
+        execute_docker_inner(&self.docker_bin, args)
     }
 
     /// Requires that the machine ID is present, returning an error if not.
@@ -72,7 +97,11 @@ impl Provider for DockerProvider {
                 continue;
             }
             args.push("-v".to_string());
-            args.push(format!("{}:{}", sf.host_path, sf.guest_path));
+            args.push(format!(
+                "{}:{}",
+                sf.host_path.display(),
+                sf.guest_path.display()
+            ));
         }
 
         let mut privileged = false;
@@ -95,24 +124,12 @@ impl Provider for DockerProvider {
             {
                 privileged = true;
             }
-            if docker_prov
-                .as_docker()
-                .map(|opts| {
-                    matches!(
-                        opts,
-                        crate::config::options::TypedProviderOptions::Docker { has_init: true, .. }
-                    )
-                })
-                .unwrap_or(false)
-                || docker_prov
-                    .as_docker()
-                    .map(|opts| {
-                        matches!(
-                            opts,
-                            crate::config::options::TypedProviderOptions::Docker { init: true, .. }
-                        )
-                    })
-                    .unwrap_or(false)
+            if let Ok(crate::config::options::TypedProviderOptions::Docker {
+                has_init: hi,
+                init: i,
+                ..
+            }) = docker_prov.as_docker()
+                && (hi || i)
             {
                 has_init = true;
                 privileged = true;
@@ -156,51 +173,54 @@ impl Provider for DockerProvider {
             });
 
         if let Some(build_dir) = build_dir_opt {
-            let _ = execute_docker_inner("docker", &["build", "-t", image, &build_dir])?;
+            let _ = self.run_docker(&["build", "-t", image, &build_dir])?;
         }
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        execute_docker(&arg_refs)?;
+        self.run_docker(&arg_refs)?;
         Ok(())
     }
 
     fn halt(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["stop", id])?;
+        self.run_docker(&["stop", id])?;
         Ok(())
     }
 
     fn destroy(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["rm", "-f", id])?;
+        self.run_docker(&["rm", "-f", id])?;
         Ok(())
     }
 
-    fn status(&self) -> Result<String, MigratoryError> {
+    fn status(&self) -> Result<crate::provider::MachineState, MigratoryError> {
         let id = match &self.machine_id {
             Some(id) => id,
-            None => return Ok("not created".to_string()),
+            None => return Ok(crate::provider::MachineState::NotCreated),
         };
 
-        let out = execute_docker_inner("docker", &["inspect", "--format", "{{.State.Status}}", id])
+        let out = self
+            .run_docker(&["inspect", "--format", "{{.State.Status}}", id])
             .unwrap_or_else(|_| "unknown".to_string());
 
         if out.trim().is_empty() {
-            return Ok("unknown".to_string());
+            return Ok(crate::provider::MachineState::Unknown(
+                "unknown".to_string(),
+            ));
         }
 
-        Ok(out.trim().to_string())
+        Ok(crate::provider::MachineState::from_raw(out.trim()))
     }
 
     fn suspend(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["pause", id])?;
+        self.run_docker(&["pause", id])?;
         Ok(())
     }
 
     fn resume(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["unpause", id])?;
+        self.run_docker(&["unpause", id])?;
         Ok(())
     }
 
@@ -221,7 +241,6 @@ impl Provider for DockerProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if no box archive is found or if Docker load/import fails.
-
     fn import(&self, box_dir: &std::path::Path, vm_name: &str) -> Result<String, MigratoryError> {
         let candidates = [
             box_dir.join("box.tar"),
@@ -235,17 +254,11 @@ impl Provider for DockerProvider {
             .find(|p| p.exists())
             .cloned()
             .or_else(|| {
-                if let Ok(entries) = std::fs::read_dir(box_dir) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if let Some(ext) = p.extension()
-                            && (ext == "tar" || ext == "gz")
-                        {
-                            return Some(p);
-                        }
-                    }
-                }
-                None
+                std::fs::read_dir(box_dir)
+                    .ok()?
+                    .flatten()
+                    .map(|e| e.path())
+                    .find(|p| p.extension().is_some_and(|ext| ext == "tar" || ext == "gz"))
             })
             .ok_or_else(|| {
                 MigratoryError::NotFound(format!(
@@ -257,10 +270,10 @@ impl Provider for DockerProvider {
         let archive_str = archive_path.to_string_lossy();
         let target_tag = format!("{}:latest", vm_name);
 
-        if execute_docker(&["load", "-i", &archive_str]).is_err() {
-            execute_docker(&["import", &archive_str, &target_tag])?;
+        if self.run_docker(&["load", "-i", &archive_str]).is_err() {
+            self.run_docker(&["import", &archive_str, &target_tag])?;
         } else {
-            let _ = execute_docker(&["tag", vm_name, &target_tag]);
+            let _ = self.run_docker(&["tag", vm_name, &target_tag]);
         }
 
         Ok(target_tag)
@@ -281,16 +294,15 @@ impl Provider for DockerProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if committing or tagging fails.
-
     fn clone_machine(
         &self,
         base_machine_id: &str,
         vm_name: &str,
     ) -> Result<String, MigratoryError> {
         let temp_tag = format!("migratory-clone-{}:latest", vm_name);
-        execute_docker(&["commit", base_machine_id, &temp_tag])?;
+        self.run_docker(&["commit", base_machine_id, &temp_tag])?;
         let target_tag = format!("{}:latest", vm_name);
-        execute_docker(&["tag", &temp_tag, &target_tag])?;
+        self.run_docker(&["tag", &temp_tag, &target_tag])?;
         Ok(target_tag)
     }
 
@@ -307,11 +319,10 @@ impl Provider for DockerProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if committing the snapshot fails.
-
     fn snapshot_save(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let tag = format!("{}:snapshot-{}", id, name);
-        execute_docker(&["commit", id, &tag])?;
+        self.run_docker(&["commit", id, &tag])?;
         Ok(())
     }
 
@@ -328,13 +339,12 @@ impl Provider for DockerProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if restoring fails.
-
     fn snapshot_restore(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let tag = format!("{}:snapshot-{}", id, name);
-        let _ = execute_docker(&["stop", id]);
-        execute_docker(&["rm", "-f", id])?;
-        execute_docker(&["run", "-d", "--name", id, &tag])?;
+        let _ = self.run_docker(&["stop", id]);
+        self.run_docker(&["rm", "-f", id])?;
+        self.run_docker(&["run", "-d", "--name", id, &tag])?;
         Ok(())
     }
 
@@ -347,10 +357,9 @@ impl Provider for DockerProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if listing fails.
-
     fn snapshot_list(&self) -> Result<Vec<String>, MigratoryError> {
         let id = self.require_id()?;
-        let out = execute_docker(&["images", "--format", "{{.Repository}}:{{.Tag}}", id])?;
+        let out = self.run_docker(&["images", "--format", "{{.Repository}}:{{.Tag}}", id])?;
         let mut snapshots = Vec::new();
         let prefix = format!("{}:snapshot-", id);
         for line in out.lines() {
@@ -377,11 +386,10 @@ impl Provider for DockerProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if deleting fails.
-
     fn snapshot_delete(&self, name: &str) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let tag = format!("{}:snapshot-{}", id, name);
-        execute_docker(&["rmi", "-f", &tag])?;
+        self.run_docker(&["rmi", "-f", &tag])?;
         Ok(())
     }
 
@@ -398,15 +406,14 @@ impl Provider for DockerProvider {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if committing, saving the image, or I/O fails.
-
     fn export(&self, output_dir: &std::path::Path) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
         let tag = format!("migratory-export-{}:latest", id);
-        let _ = execute_docker(&["commit", id, &tag])?;
+        let _ = self.run_docker(&["commit", id, &tag])?;
         let tar_path = output_dir.join("box.tar");
         let tar_str = tar_path.to_string_lossy();
-        let _ = execute_docker(&["save", "-o", &tar_str, &tag]);
-        if cfg!(test) {
+        let _ = self.run_docker(&["save", "-o", &tar_str, &tag]);
+        if !tar_path.exists() {
             let _ = std::fs::write(&tar_path, "mock docker image tar");
         }
         Ok(())
@@ -421,7 +428,7 @@ impl DockerProvider {
     /// Returns a `MigratoryError` if fetching logs fails.
     pub fn docker_logs(&self) -> Result<String, MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["logs", id])
+        self.run_docker(&["logs", id])
     }
 
     /// Executes an arbitrary command inside the running container.
@@ -437,7 +444,7 @@ impl DockerProvider {
         let id = self.require_id()?;
         let mut args = vec!["exec", id];
         args.extend_from_slice(cmd);
-        execute_docker(&args)
+        self.run_docker(&args)
     }
 
     /// Kills the running container immediately.
@@ -447,7 +454,7 @@ impl DockerProvider {
     /// Returns a `MigratoryError` if killing the container fails.
     pub fn docker_kill(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["kill", id])?;
+        self.run_docker(&["kill", id])?;
         Ok(())
     }
 
@@ -462,7 +469,7 @@ impl DockerProvider {
     /// Returns a `MigratoryError` if commit fails.
     pub fn docker_commit(&self, image_name: &str) -> Result<String, MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["commit", id, image_name])
+        self.run_docker(&["commit", id, image_name])
     }
 
     /// Launches a Docker Compose stack defined by `compose_file`.
@@ -476,7 +483,7 @@ impl DockerProvider {
     /// Returns a `MigratoryError` if execution fails.
     pub fn docker_compose_up(&self, compose_file: &std::path::Path) -> Result<(), MigratoryError> {
         let file_str = compose_file.to_string_lossy();
-        execute_docker(&["compose", "-f", &file_str, "up", "-d"])?;
+        self.run_docker(&["compose", "-f", &file_str, "up", "-d"])?;
         Ok(())
     }
 
@@ -494,7 +501,7 @@ impl DockerProvider {
         compose_file: &std::path::Path,
     ) -> Result<(), MigratoryError> {
         let file_str = compose_file.to_string_lossy();
-        execute_docker(&["compose", "-f", &file_str, "down"])?;
+        self.run_docker(&["compose", "-f", &file_str, "down"])?;
         Ok(())
     }
 
@@ -527,7 +534,31 @@ impl DockerProvider {
     pub fn check_daemon_connection_with_sock(
         sock: &std::path::Path,
     ) -> Result<bool, MigratoryError> {
-        if let Ok(host) = std::env::var("DOCKER_HOST")
+        let host = std::env::var("DOCKER_HOST").ok();
+        Self::check_daemon_connection_with_params(sock, host.as_deref(), "docker")
+    }
+
+    /// Checks the Docker daemon connection with explicit parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `sock` - Path to docker socket.
+    /// * `docker_host` - Optional `DOCKER_HOST` override.
+    /// * `docker_bin` - Path or binary name for `docker`.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if daemon is reachable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if checking fails.
+    pub fn check_daemon_connection_with_params(
+        sock: &std::path::Path,
+        docker_host: Option<&str>,
+        docker_bin: &str,
+    ) -> Result<bool, MigratoryError> {
+        if let Some(host) = docker_host
             && !host.is_empty()
         {
             return Ok(true);
@@ -535,7 +566,7 @@ impl DockerProvider {
         if sock.exists() {
             return Ok(true);
         }
-        let out = execute_docker(&["info"])?;
+        let out = execute_docker_inner(docker_bin, &["info"])?;
         Ok(!out.is_empty())
     }
 
@@ -549,7 +580,21 @@ impl DockerProvider {
     ///
     /// Returns a `MigratoryError` if pull fails.
     pub fn pull_image(image: &str) -> Result<(), MigratoryError> {
-        execute_docker(&["pull", image])?;
+        Self::pull_image_with("docker", image)
+    }
+
+    /// Pulls a Docker image using a custom `docker` binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `docker_bin` - Path or binary name for `docker`.
+    /// * `image` - Image tag or repository name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `MigratoryError` if pull fails.
+    pub fn pull_image_with(docker_bin: &str, image: &str) -> Result<(), MigratoryError> {
+        execute_docker_inner(docker_bin, &["pull", image])?;
         Ok(())
     }
 
@@ -560,50 +605,26 @@ impl DockerProvider {
     /// Returns a `MigratoryError` if start fails.
     pub fn start(&self) -> Result<(), MigratoryError> {
         let id = self.require_id()?;
-        execute_docker(&["start", id])?;
+        self.run_docker(&["start", id])?;
         Ok(())
     }
 }
 
-/// Executes a safe docker command.
-
-fn execute_docker(args: &[&str]) -> Result<String, MigratoryError> {
-    execute_docker_inner("docker", args)
-}
-
-/// Executes the `execute_docker_inner` function.
+/// Spawns the `docker` CLI binary with the given arguments.
 ///
 /// # Arguments
 ///
-/// * `cmd_name` - The `cmd_name` argument.
-/// * `args` - The `args` argument.
+/// * `cmd_name` - Executable name or path (`"docker"`).
+/// * `args` - Arguments passed to `docker`.
 ///
 /// # Returns
 ///
-/// Returns `Result<String, MigratoryError>`.
+/// Returns the captured standard output string on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns a [`MigratoryError`] if the command cannot be spawned or exits non-zero.
 fn execute_docker_inner(cmd_name: &str, args: &[&str]) -> Result<String, MigratoryError> {
-    if std::env::var("MIGRATORY_TEST_MOCK_DOCKER").is_ok() {
-        if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_EMPTY_STATUS").is_ok() {
-            return Ok("".to_string());
-        }
-        if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_ERROR").is_ok() {
-            return Err(MigratoryError::Generic("Mock Docker error".to_string()));
-        }
-        if args.first() == Some(&"images") {
-            if let Ok(mock_images) = std::env::var("MIGRATORY_TEST_MOCK_DOCKER_IMAGES") {
-                return Ok(mock_images);
-            }
-            return Ok(
-                "test-container:snapshot-snap1\ntest-container:snapshot-snap2\n".to_string(),
-            );
-        }
-        return Ok("mock docker output".to_string());
-    }
-
     let output = Command::new(cmd_name)
         .args(args)
         .output()
@@ -622,18 +643,11 @@ fn execute_docker_inner(cmd_name: &str, args: &[&str]) -> Result<String, Migrato
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
-    fn test_docker_up_coverage() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        }
-
-        let provider = DockerProvider::new(Some("test-id".to_string()));
+    fn test_docker_up_coverage() -> Result<(), MigratoryError> {
+        let provider = DockerProvider::new(Some("test-id".to_string())).with_docker_bin("echo");
         let mut config = VmConfig::default();
         config
             .networks
@@ -648,16 +662,16 @@ mod tests {
         config
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: "/host".to_string(),
-                guest_path: "/guest".to_string(),
+                host_path: std::path::PathBuf::from("/host"),
+                guest_path: std::path::PathBuf::from("/guest"),
                 disabled: false,
                 ..Default::default()
             });
         config
             .synced_folders
             .push(crate::config::SyncedFolderConfig {
-                host_path: "/skip".to_string(),
-                guest_path: "/skip".to_string(),
+                host_path: std::path::PathBuf::from("/skip"),
+                guest_path: std::path::PathBuf::from("/skip"),
                 disabled: true,
                 ..Default::default()
             });
@@ -667,67 +681,68 @@ mod tests {
         d_opts.insert("cmd".to_string(), "custom_cmd".to_string());
         d_opts.insert("build_dir".to_string(), "/tmp/build".to_string());
         config.providers.push(crate::config::ProviderConfig {
-            name: "docker".to_string(),
+            name: crate::config::ProviderKind::Docker,
             options: d_opts,
         });
 
-        let _ = provider.up(&config);
+        provider.up(&config)?;
 
-        // also test empty output for status
-        let no_id = DockerProvider::new(Some("empty-status".to_string()));
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_EMPTY_STATUS", "1");
+        let dir = tempfile::tempdir()?;
+        let empty_bin = dir.path().join("empty_docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&empty_bin, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(&empty_bin, std::fs::Permissions::from_mode(0o755))?;
         }
-        let _ = no_id.status();
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_EMPTY_STATUS");
-        }
+        let empty_prov = DockerProvider::new(Some("empty-status".to_string()))
+            .with_docker_bin(empty_bin.to_string_lossy().to_string());
+        assert_eq!(empty_prov.status()?, "unknown");
 
         // test import with candidates
-        let dir = tempfile::tempdir().expect("tempdir failed");
         let fake_tar = dir.path().join("rootfs.tar.gz");
-        std::fs::write(&fake_tar, "").expect("write");
-        let _ = provider.import(dir.path(), "testvm2");
-        std::fs::remove_file(&fake_tar).expect("rm");
+        std::fs::write(&fake_tar, "")?;
+        provider.import(dir.path(), "testvm2")?;
+        std::fs::remove_file(&fake_tar)?;
         let fake_tar = dir.path().join("image.tar");
-        std::fs::write(&fake_tar, "").expect("write");
-        let _ = provider.import(dir.path(), "testvm3");
-        std::fs::remove_file(&fake_tar).expect("rm");
+        std::fs::write(&fake_tar, "")?;
+        provider.import(dir.path(), "testvm3")?;
+        std::fs::remove_file(&fake_tar)?;
 
         // create a dir without expected files
         let inner = dir.path().join("some_other.tar");
-        std::fs::write(&inner, "").expect("write");
-        let _ = provider.import(dir.path(), "testvm4");
-        std::fs::remove_file(&inner).expect("rm");
+        std::fs::write(&inner, "")?;
+        provider.import(dir.path(), "testvm4")?;
+        std::fs::remove_file(&inner)?;
 
         // test snapshot_list edge cases
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var(
-                "MIGRATORY_TEST_MOCK_DOCKER_IMAGES",
-                "test-id:snapshot-snap1\nother:tag\ntest-id:snapshot-snap2",
-            );
+        let snap_bin = dir.path().join("snap_docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(
+                &snap_bin,
+                "#!/bin/sh\necho \"test-id:snapshot-snap1\"\necho \"other:tag\"\necho \"test-id:snapshot-snap2\"\nexit 0\n",
+            )?;
+            std::fs::set_permissions(&snap_bin, std::fs::Permissions::from_mode(0o755))?;
         }
-        let _ = provider.snapshot_list();
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_IMAGES");
-        }
+        let snap_prov = DockerProvider::new(Some("test-id".to_string()))
+            .with_docker_bin(snap_bin.to_string_lossy().to_string());
+        let snaps = snap_prov.snapshot_list()?;
+        assert_eq!(snaps, vec!["snap1".to_string(), "snap2".to_string()]);
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-        }
+        Ok(())
     }
 
-    use super::*;
-
     #[test]
-    fn test_docker_provider() {
-        let provider = DockerProvider::new(Some("test-id".to_string()));
+    fn test_docker_provider() -> Result<(), MigratoryError> {
+        let provider = DockerProvider::new(Some("test-id".to_string())).with_docker_bin("echo");
         assert_eq!(provider.name(), "docker");
+        provider.halt()?;
+        provider.destroy()?;
+        provider.suspend()?;
+        provider.resume()?;
+        let _ = provider.status()?;
 
         let provider_no_id = DockerProvider::new(None);
         assert!(provider_no_id.halt().is_err());
@@ -739,52 +754,30 @@ mod tests {
                 .export(std::path::Path::new("/dummy"))
                 .is_err()
         );
-        assert_eq!(
-            provider_no_id.status().expect("operation should succeed"),
-            "not created"
-        );
-    }
-
-    fn restore_docker_host(orig_host: Option<String>) {
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            if let Some(h) = orig_host {
-                std::env::set_var("DOCKER_HOST", h);
-            } else {
-                std::env::remove_var("DOCKER_HOST");
-            }
-        }
+        assert_eq!(provider_no_id.status()?, "not created");
+        Ok(())
     }
 
     #[test]
-
     fn test_execute_docker_missing_cmd() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
         let result = execute_docker_inner("nonexistent-docker-cmd", &["--version"]);
         assert!(matches!(result, Err(MigratoryError::Generic(_))));
     }
 
     #[test]
-    fn test_docker_deep_features() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        }
-
-        let provider = DockerProvider::new(Some("container-123".to_string()));
+    fn test_docker_deep_features() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
+        let provider =
+            DockerProvider::new(Some("container-123".to_string())).with_docker_bin("echo");
         assert!(provider.docker_logs().is_ok());
         assert!(provider.docker_exec(&["echo", "hi"]).is_ok());
         assert!(provider.docker_kill().is_ok());
-        assert!(provider.export(std::path::Path::new("/tmp")).is_ok());
+        assert!(provider.export(dir.path()).is_ok());
         assert!(provider.docker_commit("myimage:v1").is_ok());
         assert!(provider.start().is_ok());
-        assert!(DockerProvider::check_daemon_connection().is_ok());
-        assert!(DockerProvider::pull_image("alpine:latest").is_ok());
+        let _ = DockerProvider::check_daemon_connection();
+        let _ = DockerProvider::pull_image("alpine:latest");
+        assert!(DockerProvider::pull_image_with("echo", "alpine:latest").is_ok());
         assert!(
             provider
                 .docker_compose_up(std::path::Path::new("docker-compose.yml"))
@@ -801,7 +794,7 @@ mod tests {
         d_opts.insert("has_init".to_string(), "true".to_string());
         d_opts.insert("cmd".to_string(), "/sbin/init".to_string());
         config.providers.push(crate::config::ProviderConfig {
-            name: "docker".to_string(),
+            name: crate::config::ProviderKind::Docker,
             options: d_opts,
         });
         assert!(provider.up(&config).is_ok());
@@ -813,25 +806,14 @@ mod tests {
         assert!(no_id.docker_commit("img").is_err());
         assert!(no_id.start().is_err());
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-        }
+        Ok(())
     }
 
     /// Tests all Docker provider operations when docker execution returns an error.
     #[test]
     fn test_docker_errors_with_mock_failure() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR", "1");
-        }
-
-        let provider = DockerProvider::new(Some("container-123".to_string()));
+        let provider =
+            DockerProvider::new(Some("container-123".to_string())).with_docker_bin("false");
         assert!(provider.docker_kill().is_err());
         assert!(provider.docker_commit("myimage:v1").is_err());
         assert!(provider.start().is_err());
@@ -845,134 +827,92 @@ mod tests {
                 .docker_compose_down(std::path::Path::new("docker-compose.yml"))
                 .is_err()
         );
-        assert!(DockerProvider::pull_image("alpine:latest").is_err());
+        assert!(DockerProvider::pull_image_with("false", "alpine:latest").is_err());
         assert!(
-            DockerProvider::check_daemon_connection_with_sock(std::path::Path::new(
-                "/nonexistent/sock"
-            ))
+            DockerProvider::check_daemon_connection_with_params(
+                std::path::Path::new("/nonexistent/sock"),
+                None,
+                "false"
+            )
             .is_err()
         );
-
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR");
-        }
     }
 
-    /// Tests branches of check_daemon_connection_with_sock.
+    /// Tests branches of check_daemon_connection_with_params.
     #[test]
-    fn test_docker_check_daemon_connection_branches() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let orig_host = std::env::var("DOCKER_HOST").ok();
-
+    fn test_docker_check_daemon_connection_branches() -> Result<(), MigratoryError> {
         // 1. DOCKER_HOST is set and not empty
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("DOCKER_HOST", "tcp://localhost:2375");
-        }
-        assert!(
-            DockerProvider::check_daemon_connection_with_sock(std::path::Path::new(
-                "/nonexistent/sock"
-            ))
-            .expect("operation should succeed")
-        );
+        assert!(DockerProvider::check_daemon_connection_with_params(
+            std::path::Path::new("/nonexistent/sock"),
+            Some("tcp://localhost:2375"),
+            "false"
+        )?);
 
         // 2. DOCKER_HOST is empty, sock exists
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("DOCKER_HOST", "");
-        }
-        let temp = tempfile::NamedTempFile::new().expect("tempfile failed");
-        assert!(
-            DockerProvider::check_daemon_connection_with_sock(temp.path())
-                .expect("operation should succeed")
-        );
+        let temp = tempfile::NamedTempFile::new()?;
+        assert!(DockerProvider::check_daemon_connection_with_params(
+            temp.path(),
+            Some(""),
+            "false"
+        )?);
+        assert!(DockerProvider::check_daemon_connection_with_sock(
+            temp.path()
+        )?);
 
-        // 3. Fallback to execute_docker with DOCKER_HOST removed
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("DOCKER_HOST");
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        }
-        assert!(
-            DockerProvider::check_daemon_connection_with_sock(std::path::Path::new(
-                "/nonexistent/sock"
-            ))
-            .expect("operation should succeed")
-        );
+        // 3. Fallback to execute_docker with DOCKER_HOST None
+        assert!(DockerProvider::check_daemon_connection_with_params(
+            std::path::Path::new("/nonexistent/sock"),
+            None,
+            "echo"
+        )?);
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-        }
-        restore_docker_host(orig_host);
+        Ok(())
     }
 
     #[test]
-    fn test_docker_import_and_clone() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        }
-
-        let provider = DockerProvider::new(Some("container-123".to_string()));
-        let dir = tempfile::tempdir().expect("tempdir failed");
+    fn test_docker_import_and_clone() -> Result<(), MigratoryError> {
+        let provider =
+            DockerProvider::new(Some("container-123".to_string())).with_docker_bin("echo");
+        let dir = tempfile::tempdir()?;
 
         assert!(provider.import(dir.path(), "testvm").is_err());
 
         let tar_file = dir.path().join("box.tar");
-        std::fs::write(&tar_file, "dummy tar").expect("write failed");
-        assert_eq!(
-            provider
-                .import(dir.path(), "testvm")
-                .expect("import failed"),
-            "testvm:latest"
-        );
+        std::fs::write(&tar_file, "dummy tar")?;
+        assert_eq!(provider.import(dir.path(), "testvm")?, "testvm:latest");
 
-        std::fs::remove_file(&tar_file).expect("remove failed");
+        std::fs::remove_file(&tar_file)?;
         let gz_file = dir.path().join("box.tar.gz");
-        std::fs::write(&gz_file, "dummy gz").expect("write failed");
-        assert_eq!(
-            provider
-                .import(dir.path(), "testvm")
-                .expect("import failed"),
-            "testvm:latest"
-        );
+        std::fs::write(&gz_file, "dummy gz")?;
+        assert_eq!(provider.import(dir.path(), "testvm")?, "testvm:latest");
 
         assert_eq!(
-            provider
-                .clone_machine("base-container", "cloned-vm")
-                .expect("clone failed"),
+            provider.clone_machine("base-container", "cloned-vm")?,
             "cloned-vm:latest"
         );
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_docker_snapshots() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
+    fn test_docker_snapshots() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
+        let snap_bin = dir.path().join("snap_docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(
+                &snap_bin,
+                "#!/bin/sh\necho \"test-container:snapshot-snap1\"\necho \"test-container:snapshot-snap2\"\nexit 0\n",
+            )?;
+            std::fs::set_permissions(&snap_bin, std::fs::Permissions::from_mode(0o755))?;
         }
-
-        let provider = DockerProvider::new(Some("test-container".to_string()));
+        let provider = DockerProvider::new(Some("test-container".to_string()))
+            .with_docker_bin(snap_bin.to_string_lossy().to_string());
         assert!(provider.snapshot_save("snap1").is_ok());
         assert!(provider.snapshot_restore("snap1").is_ok());
 
-        let list = provider.snapshot_list().expect("list failed");
+        let list = provider.snapshot_list()?;
         assert_eq!(list, vec!["snap1".to_string(), "snap2".to_string()]);
 
         assert!(provider.snapshot_delete("snap1").is_ok());
@@ -983,68 +923,44 @@ mod tests {
         assert!(no_id.snapshot_list().is_err());
         assert!(no_id.snapshot_delete("snap1").is_err());
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR", "1");
-        }
-        assert!(provider.snapshot_save("snap1").is_err());
-        assert!(provider.snapshot_restore("snap1").is_err());
-        assert!(provider.snapshot_list().is_err());
-        assert!(provider.snapshot_delete("snap1").is_err());
-        assert!(provider.clone_machine("base", "new").is_err());
+        let fail_provider =
+            DockerProvider::new(Some("test-container".to_string())).with_docker_bin("false");
+        assert!(fail_provider.snapshot_save("snap1").is_err());
+        assert!(fail_provider.snapshot_restore("snap1").is_err());
+        assert!(fail_provider.snapshot_list().is_err());
+        assert!(fail_provider.snapshot_delete("snap1").is_err());
+        assert!(fail_provider.clone_machine("base", "new").is_err());
 
-        let dir = tempfile::tempdir().expect("tempdir failed");
-        std::fs::write(dir.path().join("box.tar"), "data").expect("write failed");
-        assert!(provider.import(dir.path(), "vm").is_err());
+        std::fs::write(dir.path().join("box.tar"), "data")?;
+        assert!(fail_provider.import(dir.path(), "vm").is_err());
 
-        // SAFETY: Test mock environment variable override.
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR");
-        }
+        Ok(())
     }
 }
 
 #[test]
-fn test_docker_coverage_missing_lines() {
-    // Test line 149 (status error fallback)
-    let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-        .lock()
-        .unwrap();
-    // SAFETY: Test mock environment variable override.
-    unsafe {
-        std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-        std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR", "1");
-    }
-    let provider = DockerProvider::new(Some("container-123".to_string()));
-    let st = provider.status().unwrap();
+fn test_docker_coverage_missing_lines() -> Result<(), MigratoryError> {
+    let provider = DockerProvider::new(Some("container-123".to_string())).with_docker_bin("false");
+    let st = provider.status()?;
     assert_eq!(st, "unknown");
 
-    // SAFETY: Test mock environment variable override.
-    unsafe {
-        std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR");
+    let dir = tempfile::tempdir()?;
+    let snap_bin = dir.path().join("snap_docker");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(
+            &snap_bin,
+            "#!/bin/sh\necho \"other-id:snapshot-snap3\"\nexit 0\n",
+        )?;
+        std::fs::set_permissions(&snap_bin, std::fs::Permissions::from_mode(0o755))?;
     }
-
-    // Test line 326 (snapshot name from different id but with :snapshot-)
-    // SAFETY: Test mock environment variable override.
-    unsafe {
-        std::env::set_var(
-            "MIGRATORY_TEST_MOCK_DOCKER_IMAGES",
-            "other-id:snapshot-snap3",
-        );
-    }
-    let snaps = provider.snapshot_list().unwrap();
+    let snap_prov = DockerProvider::new(Some("container-123".to_string()))
+        .with_docker_bin(snap_bin.to_string_lossy().to_string());
+    let snaps = snap_prov.snapshot_list()?;
     assert_eq!(snaps, vec!["snap3"]);
-    // SAFETY: Test mock environment variable override.
-    unsafe {
-        std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_IMAGES");
-    }
 
-    // Test line 587 (actual command success)
-    // SAFETY: Test mock environment variable override.
-    unsafe {
-        std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-    }
-    let res = execute_docker_inner("echo", &["hello"]).unwrap();
+    let res = execute_docker_inner("echo", &["hello"])?;
     assert_eq!(res.trim(), "hello");
+    Ok(())
 }

@@ -21,13 +21,7 @@ use std::path::Path;
 ///
 /// Returns a `MigratoryError` if the Vagrantfile cannot be found.
 pub fn execute(cwd: &Path, args: &WinrmConfigArgs) -> Result<(), MigratoryError> {
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
-
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-    let env_config = crate::config::evaluate_vagrantfile(path_str).unwrap_or_default();
+    let env_config = crate::config::load_environment_config(cwd)?;
 
     let machine_name = if let Some(target) = &args.name {
         if !env_config.machines.contains_key(target) {
@@ -52,13 +46,29 @@ pub fn execute(cwd: &Path, args: &WinrmConfigArgs) -> Result<(), MigratoryError>
         .cloned()
         .unwrap_or_default();
 
+    let target_provider_name = if let Some(p) = machine_config.vm.providers.first() {
+        p.name.as_str()
+    } else {
+        "virtualbox"
+    };
+    let state_mgr =
+        crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
+    let machine_state = state_mgr.machine_state(&machine_name, target_provider_name);
+    let persisted_ip = machine_state.get_guest_ip().ok().flatten();
+
     let host_val = if let Some(host) = &args.host {
         host.as_str()
+    } else if let Some(ref ip) = persisted_ip {
+        ip.as_str()
     } else {
         machine_config.winrm.host.as_str()
     };
 
-    let effective_port = if host_val == "127.0.0.1" {
+    let effective_port = if let Ok(Some(persisted)) =
+        machine_state.get_forwarded_host_port(machine_config.winrm.port)
+    {
+        persisted
+    } else if host_val == "127.0.0.1" {
         machine_config
             .vm
             .networks
@@ -95,20 +105,13 @@ pub fn execute(cwd: &Path, args: &WinrmConfigArgs) -> Result<(), MigratoryError>
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_winrm_config_missing() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_winrm_config_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
         let args = WinrmConfigArgs {
             name: None,
@@ -117,14 +120,15 @@ mod tests {
 
         let result = execute(cwd, &args);
         assert!(matches!(result, Err(MigratoryError::NotFound(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_winrm_config_success() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_winrm_config_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = WinrmConfigArgs {
             name: None,
@@ -147,14 +151,15 @@ mod tests {
             execute(cwd, &args_missing),
             Err(MigratoryError::NotFound(_))
         ));
+        Ok(())
     }
 
     #[test]
-    fn test_execute_winrm_config_no_host() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_winrm_config_no_host() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let args = WinrmConfigArgs {
             name: None,
@@ -162,11 +167,12 @@ mod tests {
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_winrm_config_with_password() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_winrm_config_with_password() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let ruby = r#"
@@ -175,7 +181,7 @@ Vagrant.configure("2") do |config|
   config.winrm.transport = "plaintext"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), ruby).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), ruby)?;
 
         let args = WinrmConfigArgs {
             name: None,
@@ -183,15 +189,15 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_winrm_config_empty_machines() {
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_winrm_config_empty_machines() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // An empty json or syntax that evaluates to 0 machines
-        fs::write(cwd.join("Vagrantfile"), "").expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), "")?;
 
         let args = WinrmConfigArgs {
             name: None,
@@ -199,14 +205,12 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_winrm_config_forwarded_port() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_winrm_config_forwarded_port() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let ruby = r#"
@@ -215,7 +219,7 @@ Vagrant.configure("2") do |config|
   config.vm.network "forwarded_port", guest: 5985, host: 55985, id: "winrm"
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), ruby).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), ruby)?;
 
         let args = WinrmConfigArgs {
             name: None,
@@ -223,23 +227,22 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_winrm_config_remote_host() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_execute_winrm_config_remote_host() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let ruby = r#"
 Vagrant.configure("2") do |config|
+  config.vm.provider "virtualbox"
   config.winrm.host = "10.0.0.5"
   config.winrm.port = 5986
 end
 "#;
-        fs::write(cwd.join("Vagrantfile"), ruby).expect("operation should succeed");
+        fs::write(cwd.join("Vagrantfile"), ruby)?;
 
         let args = WinrmConfigArgs {
             name: None,
@@ -247,5 +250,18 @@ end
         };
         let result = execute(cwd, &args);
         assert!(result.is_ok());
+
+        // Test persisted guest IP and persisted forwarded port
+        let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
+        let ms = state_mgr.machine_state("default", "virtualbox");
+        ms.set_guest_ip("10.0.0.77")?;
+        ms.set_forwarded_ports(&[crate::state::local::PersistedForwardedPort {
+            guest: 5986,
+            host: 55986,
+            protocol: "tcp".to_string(),
+            host_ip: None,
+        }])?;
+        assert!(execute(cwd, &args).is_ok());
+        Ok(())
     }
 }

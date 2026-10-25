@@ -9,21 +9,21 @@ use std::io::Write;
 
 /// Chef provisioner.
 pub struct ChefProvisioner {
-    /// Represents the `mode` field.
+    /// Execution mode (`"solo"`, `"zero"`, or `"client"`).
     mode: Option<String>,
-    /// Represents the `run_list` field.
+    /// Comma-separated Chef run list of recipes and roles.
     run_list: Option<String>,
-    /// Represents the `install` field.
+    /// Whether to install Chef via Omnitruck if not already present.
     install: bool,
-    /// Represents the `json` field.
+    /// Raw JSON node attributes string.
     json: String,
-    /// Represents the `cookbooks_path` field.
+    /// Local path to the Chef cookbooks directory.
     cookbooks_path: Option<String>,
-    /// Represents the `roles_path` field.
+    /// Local path to the Chef roles directory.
     roles_path: Option<String>,
-    /// Represents the `data_bags_path` field.
+    /// Local path to the Chef data bags directory.
     data_bags_path: Option<String>,
-    /// Represents the `environments_path` field.
+    /// Local path to the Chef environments directory.
     environments_path: Option<String>,
 }
 
@@ -212,54 +212,39 @@ impl Provisioner for ChefProvisioner {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::communicator::Communicator;
     use std::path::Path;
-    use std::time::Duration;
 
+    /// No-op mock communicator for Chef provisioner tests.
     struct MockComm;
 
     impl Communicator for MockComm {
         fn execute(&self, _command: &str) -> Result<String, MigratoryError> {
             Ok(String::new())
         }
-        fn upload(&self, _local_path: &Path, _remote_path: &str) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
-            Ok(())
-        }
     }
 
+    /// Configurable failing mock communicator for Chef provisioner error tests.
     struct FailingComm {
+        /// Fail all `upload` calls.
         fail_upload: bool,
+        /// Fail `upload` when `remote_path` contains this substring.
         fail_upload_substring: Option<&'static str>,
+        /// Fail all `execute` calls.
         fail_execute: bool,
+        /// Fail `execute` when `command` contains this substring.
         fail_cmd_substring: Option<&'static str>,
     }
 
     impl Communicator for FailingComm {
         fn execute(&self, command: &str) -> Result<String, MigratoryError> {
-            if self.fail_execute {
+            if self.fail_execute
+                || self
+                    .fail_cmd_substring
+                    .is_some_and(|needle| command.contains(needle))
+            {
                 return Err(MigratoryError::Generic("execute failed".to_string()));
-            }
-            if let Some(needle) = self.fail_cmd_substring {
-                if command.contains(needle) {
-                    return Err(MigratoryError::Generic("execute failed".to_string()));
-                }
             }
             Ok(String::new())
         }
@@ -267,20 +252,11 @@ mod tests {
             if self.fail_upload {
                 return Err(MigratoryError::Generic("upload failed".to_string()));
             }
-            if let Some(needle) = self.fail_upload_substring {
-                if remote_path.contains(needle) {
-                    return Err(MigratoryError::Generic("upload failed".to_string()));
-                }
+            if let Some(needle) = self.fail_upload_substring
+                && remote_path.contains(needle)
+            {
+                return Err(MigratoryError::Generic("upload failed".to_string()));
             }
-            Ok(())
-        }
-        fn download(&self, _remote_path: &str, _local_path: &Path) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn execute_interactive(&self) -> Result<(), MigratoryError> {
-            Ok(())
-        }
-        fn wait_for_ready(&self, _timeout: Duration) -> Result<(), MigratoryError> {
             Ok(())
         }
     }
@@ -363,17 +339,17 @@ mod tests {
     }
 
     #[test]
-    fn test_chef_provisioner_zero_and_sync() {
-        let dir = tempfile::tempdir().expect("tempdir failed");
+    fn test_chef_provisioner_zero_and_sync() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cb_dir = dir.path().join("cookbooks");
         let roles_dir = dir.path().join("roles");
         let db_dir = dir.path().join("data_bags");
         let env_dir = dir.path().join("environments");
 
-        std::fs::create_dir(&cb_dir).expect("create_dir failed");
-        std::fs::create_dir(&roles_dir).expect("create_dir failed");
-        std::fs::create_dir(&db_dir).expect("create_dir failed");
-        std::fs::create_dir(&env_dir).expect("create_dir failed");
+        std::fs::create_dir(&cb_dir)?;
+        std::fs::create_dir(&roles_dir)?;
+        std::fs::create_dir(&db_dir)?;
+        std::fs::create_dir(&env_dir)?;
 
         let mut prov = ChefProvisioner::default();
         let mut config = HashMap::new();
@@ -399,13 +375,16 @@ mod tests {
         assert!(prov.prepare(&config).is_ok());
         let comm = MockComm;
         assert!(prov.provision(&comm).is_ok());
+        Ok(())
     }
 
     #[test]
     fn test_chef_provisioner_unprepared() {
         // If provision is called without prepare, mode is None, run_list is None.
-        let mut prov = ChefProvisioner::default();
-        prov.run_list = Some("recipe[apt]".to_string());
+        let prov = ChefProvisioner {
+            run_list: Some("recipe[apt]".to_string()),
+            ..Default::default()
+        };
 
         let comm = MockComm;
         // mode is None here, so it falls back to "solo" in provision()
@@ -413,17 +392,17 @@ mod tests {
     }
 
     #[test]
-    fn test_chef_provisioner_failures() {
-        let dir = tempfile::tempdir().expect("tempdir failed");
+    fn test_chef_provisioner_failures() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let cb_dir = dir.path().join("cookbooks");
         let roles_dir = dir.path().join("roles");
         let db_dir = dir.path().join("data_bags");
         let env_dir = dir.path().join("environments");
 
-        std::fs::create_dir(&cb_dir).expect("create_dir failed");
-        std::fs::create_dir(&roles_dir).expect("create_dir failed");
-        std::fs::create_dir(&db_dir).expect("create_dir failed");
-        std::fs::create_dir(&env_dir).expect("create_dir failed");
+        std::fs::create_dir(&cb_dir)?;
+        std::fs::create_dir(&roles_dir)?;
+        std::fs::create_dir(&db_dir)?;
+        std::fs::create_dir(&env_dir)?;
 
         let mut prov = ChefProvisioner::default();
         let mut config = HashMap::new();
@@ -572,5 +551,6 @@ mod tests {
         assert!(prov_simple.prepare(&conf_simple).is_ok());
         assert!(prov_simple.provision(&comm_upload_node_fail).is_err());
         assert!(prov_simple.provision(&comm_final_exec_fail).is_err());
+        Ok(())
     }
 }

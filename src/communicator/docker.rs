@@ -52,30 +52,35 @@ impl DockerCommunicator {
     }
 
     /// Internal helper to execute a docker CLI command.
-    fn run_docker(&self, args: &[&str]) -> Result<String, MigratoryError> {
-        if std::env::var("MIGRATORY_TEST_MOCK_DOCKER").is_ok() {
-            if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_ERROR").is_ok() {
-                return Err(MigratoryError::Generic("Mock Docker error".to_string()));
-            }
-            return Ok("mock docker output".to_string());
-        }
-
-        self.run_docker_real(args)
-    }
-
-    /// Executes the `run_docker_real` function.
     ///
     /// # Arguments
     ///
-    /// * `args` - The `args` argument.
+    /// * `args` - Arguments passed to the `docker` binary.
     ///
     /// # Returns
     ///
-    /// Returns `Result<String, MigratoryError>`.
+    /// Returns the captured standard output string on success.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns a [`MigratoryError`] if the command fails.
+    fn run_docker(&self, args: &[&str]) -> Result<String, MigratoryError> {
+        self.run_docker_real(args)
+    }
+
+    /// Spawns the `docker` CLI binary and captures output.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Arguments passed to the `docker` binary.
+    ///
+    /// # Returns
+    ///
+    /// Returns the captured standard output string on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`MigratoryError`] if the process cannot be spawned or exits non-zero.
     fn run_docker_real(&self, args: &[&str]) -> Result<String, MigratoryError> {
         let output = Command::new(&self.docker_bin)
             .args(args)
@@ -93,19 +98,15 @@ impl DockerCommunicator {
         }
     }
 
-    /// Executes the `execute_interactive_real` function.
-    ///
-    /// # Arguments
-    ///
-    /// * None
+    /// Spawns an interactive `docker exec -i -t` session attached to the current terminal.
     ///
     /// # Returns
     ///
-    /// Returns `Result<(), MigratoryError>`.
+    /// Returns `Ok(())` when the interactive shell exits cleanly.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns a [`MigratoryError`] if the process cannot be spawned or exits non-zero.
     fn execute_interactive_real(&self) -> Result<(), MigratoryError> {
         let mut cmd = Command::new(&self.docker_bin);
         cmd.args(["exec", "-i", "-t", &self.container_id, "/bin/sh"]);
@@ -115,10 +116,8 @@ impl DockerCommunicator {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| MigratoryError::Generic(format!("Failed to spawn docker exec: {}", e)))?;
-        let status = child.wait().map_err(|e| {
-            MigratoryError::Generic(format!("Failed to wait for docker exec: {}", e))
-        })?;
+            .map_err(|e| MigratoryError::Generic(format!("Failed to spawn docker exec: {e}")))?;
+        let status = child.wait()?;
 
         if status.success() {
             Ok(())
@@ -201,15 +200,6 @@ impl Communicator for DockerCommunicator {
     ///
     /// Returns a `MigratoryError` if the session fails or exits with an error.
     fn execute_interactive(&self) -> Result<(), MigratoryError> {
-        if std::env::var("MIGRATORY_TEST_MOCK_DOCKER").is_ok() {
-            if std::env::var("MIGRATORY_TEST_MOCK_DOCKER_ERROR").is_ok() {
-                return Err(MigratoryError::Generic(
-                    "Mock interactive error".to_string(),
-                ));
-            }
-            return Ok(());
-        }
-
         self.execute_interactive_real()
     }
 
@@ -245,17 +235,7 @@ impl Communicator for DockerCommunicator {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_docker_communicator_new_and_builder() {
@@ -265,20 +245,11 @@ mod tests {
     }
 
     #[test]
-    fn test_docker_communicator_mock_success() {
-        let _guard = TEST_LOCK.lock().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR");
-        }
+    fn test_docker_communicator_mock_success() -> Result<(), MigratoryError> {
+        let comm = DockerCommunicator::new("test-ctr").with_docker_bin("echo");
+        assert!(comm.execute("uptime")?.contains("uptime"));
 
-        let comm = DockerCommunicator::new("test-ctr");
-        assert_eq!(
-            comm.execute("uptime").unwrap_or_default(),
-            "mock docker output"
-        );
-
-        let tmp = tempfile::tempdir().expect("operation should succeed");
+        let tmp = tempfile::tempdir()?;
         let src_file = tmp.path().join("src.txt");
         let _ = std::fs::write(&src_file, b"hello");
 
@@ -287,43 +258,26 @@ mod tests {
         assert!(comm.execute_interactive().is_ok());
         assert!(comm.wait_for_ready(Duration::from_secs(1)).is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_docker_communicator_mock_error() {
-        let _guard = TEST_LOCK.lock().expect("operation should succeed");
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER", "1");
-            std::env::set_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR", "1");
-        }
-
-        let comm = DockerCommunicator::new("test-ctr");
+    fn test_docker_communicator_mock_error() -> Result<(), MigratoryError> {
+        let comm = DockerCommunicator::new("test-ctr").with_docker_bin("false");
         assert!(comm.execute("uptime").is_err());
 
-        let tmp = tempfile::tempdir().expect("operation should succeed");
+        let tmp = tempfile::tempdir()?;
         let src_file = tmp.path().join("src.txt");
         assert!(comm.upload(&src_file, "/tmp/dst.txt").is_err());
         assert!(comm.download("/tmp/dst.txt", &src_file).is_err());
         assert!(comm.execute_interactive().is_err());
         assert!(comm.wait_for_ready(Duration::from_millis(300)).is_err());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR");
-        }
+        Ok(())
     }
 
     #[test]
     fn test_docker_communicator_real_execution_invalid_binary() {
-        let _guard = TEST_LOCK.lock().expect("operation should succeed");
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_DOCKER_ERROR");
-        }
-
         let comm = DockerCommunicator::new("invalid-ctr").with_docker_bin("nonexistent_binary_xyz");
         assert!(comm.execute("echo test").is_err());
         assert!(comm.execute_interactive().is_err());

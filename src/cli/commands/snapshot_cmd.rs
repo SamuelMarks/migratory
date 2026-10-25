@@ -1,6 +1,7 @@
 //! Semantic implementation of the `snapshot` command and its subcommands.
 //!
-//! This module provides the logic to manage snapshots.
+//! This module provides the logic to save, restore, list, delete, push, and pop
+//! virtual machine snapshots across supported providers.
 
 use crate::cli::SnapshotCommands;
 use crate::config;
@@ -9,21 +10,20 @@ use crate::provider;
 use crate::ui::Ui;
 use std::path::Path;
 
-/// Executes the `snapshot` command.
+/// Resolves the target machine names from the environment configuration.
 ///
 /// # Arguments
 ///
-/// * `cmd` - The specific snapshot subcommand to execute.
-/// * `cwd` - The path to the directory containing the `Vagrantfile`.
+/// * `env_config` - The evaluated [`crate::config::EnvironmentConfig`].
+/// * `target_machine` - Optional explicit machine name filter.
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` on success.
+/// Returns a vector of target machine names.
 ///
 /// # Errors
 ///
-/// Returns a `MigratoryError` if the Vagrantfile is not found or the command fails.
-/// Helper function to resolve the target machines.
+/// Returns [`MigratoryError::NotFound`] if an explicit machine name does not exist.
 fn resolve_target_machines(
     env_config: &crate::config::EnvironmentConfig,
     target_machine: Option<String>,
@@ -31,12 +31,12 @@ fn resolve_target_machines(
     crate::config::resolve_target_machines(&env_config.machines, target_machine.as_deref())
 }
 
-/// Executes the snapshot command.
+/// Executes the `snapshot` command.
 ///
 /// # Arguments
 ///
 /// * `cmd` - The snapshot subcommand to execute.
-/// * `cwd` - The current working directory.
+/// * `cwd` - The current working directory containing the `Vagrantfile`.
 ///
 /// # Returns
 ///
@@ -44,28 +44,41 @@ fn resolve_target_machines(
 ///
 /// # Errors
 ///
-/// Returns a `MigratoryError` if the Vagrantfile is not found or the command fails.
+/// Returns a [`MigratoryError`] if the `Vagrantfile` is not found or the command fails.
 pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError> {
-    let path = crate::config::get_vagrantfile_path(cwd);
-    if !path.exists() {
-        return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
-    }
+    execute_with_provider(cmd, cwd, |name, id| provider::get_provider(name, id))
+}
 
-    fn get_ui() -> Box<dyn crate::ui::Ui + Send + Sync> {
-        if std::env::args().any(|arg| arg == "--machine-readable") {
-            Box::new(crate::ui::MachineReadableUi)
-        } else {
-            Box::new(crate::ui::ConsoleUi)
-        }
-    }
-    let base_ui = get_ui();
+/// Executes the `snapshot` command with a customizable provider factory.
+///
+/// # Arguments
+///
+/// * `cmd` - The snapshot subcommand to execute.
+/// * `cwd` - The current working directory containing the `Vagrantfile`.
+/// * `provider_factory` - Factory function creating a [`provider::Provider`] given name and optional ID.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success.
+///
+/// # Errors
+///
+/// Returns a [`MigratoryError`] if the `Vagrantfile` is not found or the command fails.
+pub fn execute_with_provider<F>(
+    cmd: &SnapshotCommands,
+    cwd: &Path,
+    mut provider_factory: F,
+) -> Result<(), MigratoryError>
+where
+    F: FnMut(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError>,
+{
+    let env_config = config::load_environment_config(cwd)?;
 
+    let base_ui = crate::ui::default_ui();
     let ui = crate::ui::ConcurrentUi::new(base_ui);
 
-    let path_str = path.to_str().unwrap_or("Vagrantfile");
-
-    let env_config = config::evaluate_vagrantfile(path_str).unwrap_or_default();
-    let state_mgr = provider::StateManager::new(crate::config::get_dotfile_path(cwd));
+    let state_mgr =
+        crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
 
     let target_machine = match cmd {
         SnapshotCommands::Save(args) => args.vm_name.clone(),
@@ -84,33 +97,31 @@ pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError>
             .vm
             .providers
             .first()
-            .map(|p| p.name.clone())
-            .unwrap_or("virtualbox".to_string());
+            .map_or_else(|| "virtualbox".to_string(), |p| p.name.to_string());
 
         let machine_id = state_mgr.read_id(name, &target_provider_name)?;
-        let p = provider::get_provider(&target_provider_name, machine_id)?;
+        let p = provider_factory(&target_provider_name, machine_id)?;
 
         match cmd {
             SnapshotCommands::Save(args) => {
-                let snap_name = args.name.clone().unwrap_or_else(|| {
-                    format!(
-                        "snapshot_{}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                    )
-                });
-                ui.info(name, &format!("Saving snapshot '{}'...", snap_name));
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let snap_name = args
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("snapshot_{secs}"));
+                ui.info(name, &format!("Saving snapshot '{snap_name}'..."));
                 if let Err(e) = p.snapshot_save(&snap_name) {
-                    ui.warn(name, &format!("Snapshot save failed: {}", e));
+                    ui.warn(name, &format!("Snapshot save failed: {e}"));
                 }
             }
             SnapshotCommands::Restore(args) => {
                 let snap_name = args.name.clone().unwrap_or_default();
-                ui.info(name, &format!("Restoring snapshot '{}'...", snap_name));
+                ui.info(name, &format!("Restoring snapshot '{snap_name}'..."));
                 if let Err(e) = p.snapshot_restore(&snap_name) {
-                    ui.warn(name, &format!("Snapshot restore failed: {}", e));
+                    ui.warn(name, &format!("Snapshot restore failed: {e}"));
                 }
             }
             SnapshotCommands::List(_args) => {
@@ -121,18 +132,18 @@ pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError>
                             ui.info(name, "No snapshots found.");
                         } else {
                             for snap in snaps {
-                                ui.info(name, &format!("- {}", snap));
+                                ui.info(name, &format!("- {snap}"));
                             }
                         }
                     }
-                    Err(e) => ui.warn(name, &format!("Snapshot list failed: {}", e)),
+                    Err(e) => ui.warn(name, &format!("Snapshot list failed: {e}")),
                 }
             }
             SnapshotCommands::Delete(args) => {
                 let snap_name = args.name.clone().unwrap_or_default();
-                ui.info(name, &format!("Deleting snapshot '{}'...", snap_name));
+                ui.info(name, &format!("Deleting snapshot '{snap_name}'..."));
                 if let Err(e) = p.snapshot_delete(&snap_name) {
-                    ui.warn(name, &format!("Snapshot delete failed: {}", e));
+                    ui.warn(name, &format!("Snapshot delete failed: {e}"));
                 }
             }
             SnapshotCommands::Pop(_args) => {
@@ -140,11 +151,11 @@ pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError>
                 if let Ok(snaps) = p.snapshot_list() {
                     if let Some(latest) = snaps.last() {
                         if let Err(e) = p.snapshot_restore(latest) {
-                            ui.warn(name, &format!("Snapshot pop (restore) failed: {}", e));
+                            ui.warn(name, &format!("Snapshot pop (restore) failed: {e}"));
                         } else if let Err(e) = p.snapshot_delete(latest) {
-                            ui.warn(name, &format!("Snapshot pop (delete) failed: {}", e));
+                            ui.warn(name, &format!("Snapshot pop (delete) failed: {e}"));
                         } else {
-                            ui.info(name, &format!("Successfully popped snapshot '{}'", latest));
+                            ui.info(name, &format!("Successfully popped snapshot '{latest}'"));
                         }
                     } else {
                         ui.info(name, "No snapshots to pop.");
@@ -161,10 +172,10 @@ pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError>
                 );
                 ui.info(
                     name,
-                    &format!("Pushing state to new snapshot '{}'...", snap_name),
+                    &format!("Pushing state to new snapshot '{snap_name}'..."),
                 );
                 if let Err(e) = p.snapshot_save(&snap_name) {
-                    ui.warn(name, &format!("Snapshot push failed: {}", e));
+                    ui.warn(name, &format!("Snapshot push failed: {e}"));
                 }
             }
         }
@@ -174,41 +185,32 @@ pub fn execute(cmd: &SnapshotCommands, cwd: &Path) -> Result<(), MigratoryError>
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use crate::cli::*;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn test_execute_snapshot_missing() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_missing() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let cmd = SnapshotCommands::List(SnapshotListArgs { vm_name: None });
         let result = execute(&cmd, cwd);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_success() {
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_success() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let id_dir = cwd.join(".vagrant").join("machines").join("default");
-        fs::create_dir_all(&id_dir).expect("create_dir failed");
-        fs::write(id_dir.join("id"), "mock_id").expect("write failed");
+        fs::create_dir_all(&id_dir)?;
+        fs::write(id_dir.join("id"), "mock_id")?;
 
         assert!(
             execute(
@@ -273,147 +275,156 @@ mod tests {
             )
             .is_ok()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_vm_not_found() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("operation should succeed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_vm_not_found() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(cwd.join("Vagrantfile"), "# Dummy config").expect("write failed");
+        fs::write(cwd.join("Vagrantfile"), "# Dummy config")?;
 
         let cmd = SnapshotCommands::List(SnapshotListArgs {
             vm_name: Some("missing_vm".to_string()),
         });
         let result = execute(&cmd, cwd);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_missing_vagrantfile() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_missing_vagrantfile() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         let cmd = SnapshotCommands::List(SnapshotListArgs { vm_name: None });
         let result = execute(&cmd, cwd);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_missing_machines() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_missing_machines() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(cwd.join("Vagrantfile"), "").expect("failed");
+        std::fs::write(cwd.join("Vagrantfile"), "")?;
         let cmd = SnapshotCommands::List(SnapshotListArgs { vm_name: None });
         let result = execute(&cmd, cwd);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_all_commands() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_all_commands() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         std::fs::write(
             cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+end",
+        )?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("failed");
-        std::fs::write(state_dir.join("id"), "12345").expect("failed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "12345")?;
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-        }
+        let ok_factory =
+            |_: &str, id: Option<String>| -> Result<Box<dyn provider::Provider>, MigratoryError> {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id).with_runner(|args| {
+                        if args.contains(&"list") {
+                            return Ok("Name: snap1 (UUID: 1234)\n".to_string());
+                        }
+                        Ok(String::new())
+                    }),
+                ))
+            };
 
-        let _ = execute(
-            &SnapshotCommands::Save(SnapshotSaveArgs {
-                vm_name: None,
-                name: Some("snap1".to_string()),
-                force: false,
-            }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Save(SnapshotSaveArgs {
+                    vm_name: None,
+                    name: Some("snap1".to_string()),
+                    force: false,
+                }),
+                cwd,
+                ok_factory,
+            )
+            .is_ok()
         );
-        let _ = execute(
-            &SnapshotCommands::Restore(SnapshotRestoreArgs {
-                vm_name: None,
-                name: Some("snap1".to_string()),
-                provision: None,
-                provision_with: None,
-                no_start: false,
-                no_provision: false,
-            }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Restore(SnapshotRestoreArgs {
+                    vm_name: None,
+                    name: Some("snap1".to_string()),
+                    provision: None,
+                    provision_with: None,
+                    no_start: false,
+                    no_provision: false,
+                }),
+                cwd,
+                ok_factory,
+            )
+            .is_ok()
         );
-        let _ = execute(
-            &SnapshotCommands::Delete(SnapshotDeleteArgs {
-                vm_name: None,
-                name: Some("snap1".to_string()),
-            }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Delete(SnapshotDeleteArgs {
+                    vm_name: None,
+                    name: Some("snap1".to_string()),
+                }),
+                cwd,
+                ok_factory,
+            )
+            .is_ok()
         );
-        let _ = execute(
-            &SnapshotCommands::Push(SnapshotPushArgs { vm_name: None }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Push(SnapshotPushArgs { vm_name: None }),
+                cwd,
+                ok_factory,
+            )
+            .is_ok()
         );
-        let _ = execute(
-            &SnapshotCommands::Pop(SnapshotPopArgs {
-                vm_name: None,
-                provision: None,
-                provision_with: None,
-                no_provision: false,
-                no_start: false,
-                no_delete: false,
-            }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Pop(SnapshotPopArgs {
+                    vm_name: None,
+                    provision: None,
+                    provision_with: None,
+                    no_provision: false,
+                    no_start: false,
+                    no_delete: false,
+                }),
+                cwd,
+                ok_factory,
+            )
+            .is_ok()
         );
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_target_machine() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_target_machine() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         std::fs::write(
             cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\n  config.vm.define 'node1'\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+  config.vm.define 'node1'
+end",
+        )?;
         let state_dir = cwd.join(".vagrant").join("machines").join("node1");
-        std::fs::create_dir_all(&state_dir).expect("failed");
-        std::fs::write(state_dir.join("id"), "12345").expect("failed");
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-        }
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "12345")?;
 
         let cmd = SnapshotCommands::List(SnapshotListArgs {
             vm_name: Some("node1".to_string()),
@@ -427,134 +438,103 @@ mod tests {
         let result2 = execute(&cmd2, cwd);
         assert!(result2.is_err());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_pop_failures() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_pop_failures() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         std::fs::write(
             cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+end",
+        )?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("failed");
-        std::fs::write(state_dir.join("id"), "12345").expect("failed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "12345")?;
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-        }
+        let pop_cmd = SnapshotCommands::Pop(SnapshotPopArgs {
+            vm_name: None,
+            provision: None,
+            provision_with: None,
+            no_provision: false,
+            no_start: false,
+            no_delete: false,
+        });
 
-        // list empty
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_EMPTY", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Pop(SnapshotPopArgs {
-                vm_name: None,
-                provision: None,
-                provision_with: None,
-                no_provision: false,
-                no_start: false,
-                no_delete: false,
-            }),
-            cwd,
+        // 1. Empty snapshot list
+        assert!(
+            execute_with_provider(&pop_cmd, cwd, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Ok(String::new())),
+                ))
+            })
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_EMPTY");
-        }
 
-        // list error
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Pop(SnapshotPopArgs {
-                vm_name: None,
-                provision: None,
-                provision_with: None,
-                no_provision: false,
-                no_start: false,
-                no_delete: false,
-            }),
-            cwd,
+        // 2. List error
+        assert!(
+            execute_with_provider(&pop_cmd, cwd, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Err(MigratoryError::Generic("list err".to_string()))),
+                ))
+            })
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_ERROR");
-        }
 
-        // restore error
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_RESTORE_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Pop(SnapshotPopArgs {
-                vm_name: None,
-                provision: None,
-                provision_with: None,
-                no_provision: false,
-                no_start: false,
-                no_delete: false,
-            }),
-            cwd,
+        // 3. Restore error
+        assert!(
+            execute_with_provider(&pop_cmd, cwd, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id).with_runner(|args| {
+                        if args.contains(&"restore") {
+                            return Err(MigratoryError::Generic("restore err".to_string()));
+                        }
+                        Ok("Name: snap1 (UUID: 1234)\n".to_string())
+                    }),
+                ))
+            })
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_RESTORE_ERROR");
-        }
 
-        // delete error
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_DELETE_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Pop(SnapshotPopArgs {
-                vm_name: None,
-                provision: None,
-                provision_with: None,
-                no_provision: false,
-                no_start: false,
-                no_delete: false,
-            }),
-            cwd,
+        // 4. Delete error
+        assert!(
+            execute_with_provider(&pop_cmd, cwd, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id).with_runner(|args| {
+                        if args.contains(&"delete") {
+                            return Err(MigratoryError::Generic("delete err".to_string()));
+                        }
+                        Ok("Name: snap1 (UUID: 1234)\n".to_string())
+                    }),
+                ))
+            })
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_DELETE_ERROR");
-        }
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_coverage_gaps() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_coverage_gaps() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
-        // Setup vagrantfile with multiple machines to hit line 58 FALSE branch
         std::fs::write(
             cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\n  config.vm.define 'node1'\n  config.vm.define 'node2'\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+  config.vm.define 'node1'
+  config.vm.define 'node2'
+end",
+        )?;
 
         for name in &["node1", "node2"] {
             let state_dir = cwd
@@ -562,228 +542,215 @@ mod tests {
                 .join("machines")
                 .join(name)
                 .join("virtualbox");
-            std::fs::create_dir_all(&state_dir).expect("failed");
-            std::fs::write(state_dir.join("id"), "12345").expect("failed");
+            std::fs::create_dir_all(&state_dir)?;
+            std::fs::write(state_dir.join("id"), "12345")?;
         }
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-        }
+        let list_cmd = SnapshotCommands::List(SnapshotListArgs { vm_name: None });
 
-        // 1. target_machines NOT empty, vm_name = None -> Line 58 FALSE
-        let _ = execute(
-            &SnapshotCommands::List(SnapshotListArgs { vm_name: None }),
-            cwd,
+        assert!(
+            execute_with_provider(&list_cmd, cwd, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Ok("Name: snap1 (UUID: 1234)\n".to_string())),
+                ))
+            })
+            .is_ok()
         );
 
-        // 2. List empty -> Line 103 TRUE
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_EMPTY", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::List(SnapshotListArgs { vm_name: None }),
-            cwd,
+        assert!(
+            execute_with_provider(&list_cmd, cwd, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Ok(String::new())),
+                ))
+            })
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_EMPTY");
-        }
 
-        // 3. List error -> Line 123 FALSE
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::List(SnapshotListArgs { vm_name: None }),
-            cwd,
+        assert!(
+            execute_with_provider(&list_cmd, cwd, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Err(MigratoryError::Generic("err".to_string()))),
+                ))
+            })
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_LIST_ERROR");
-        }
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_save_and_delete_errors() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_save_and_delete_errors() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         std::fs::write(
             cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+end",
+        )?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("failed");
-        std::fs::write(state_dir.join("id"), "12345").expect("failed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "12345")?;
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-        }
+        let fail_factory =
+            |_: &str, id: Option<String>| -> Result<Box<dyn provider::Provider>, MigratoryError> {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Err(MigratoryError::Generic("err".to_string()))),
+                ))
+            };
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_SAVE_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Save(SnapshotSaveArgs {
-                vm_name: None,
-                name: Some("snap1".to_string()),
-                force: false,
-            }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Save(SnapshotSaveArgs {
+                    vm_name: None,
+                    name: Some("snap1".to_string()),
+                    force: false,
+                }),
+                cwd,
+                fail_factory,
+            )
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_SAVE_ERROR");
-        }
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_RESTORE_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Restore(SnapshotRestoreArgs {
-                vm_name: None,
-                name: Some("snap1".to_string()),
-                provision: None,
-                provision_with: None,
-                no_start: false,
-                no_provision: false,
-            }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Restore(SnapshotRestoreArgs {
+                    vm_name: None,
+                    name: Some("snap1".to_string()),
+                    provision: None,
+                    provision_with: None,
+                    no_start: false,
+                    no_provision: false,
+                }),
+                cwd,
+                fail_factory,
+            )
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_RESTORE_ERROR");
-        }
-
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_DELETE_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Delete(SnapshotDeleteArgs {
-                vm_name: None,
-                name: Some("snap1".to_string()),
-            }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Delete(SnapshotDeleteArgs {
+                    vm_name: None,
+                    name: Some("snap1".to_string()),
+                }),
+                cwd,
+                fail_factory,
+            )
+            .is_ok()
         );
-
-        // Push error
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_SAVE_ERROR", "1");
-        }
-        let _ = execute(
-            &SnapshotCommands::Push(SnapshotPushArgs { vm_name: None }),
-            cwd,
+        assert!(
+            execute_with_provider(
+                &SnapshotCommands::Push(SnapshotPushArgs { vm_name: None }),
+                cwd,
+                fail_factory,
+            )
+            .is_ok()
         );
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_SAVE_ERROR");
-        }
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE_DELETE_ERROR");
-        }
-
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_with_provider_config_and_default_name() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_with_provider_config_and_default_name() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let cwd = dir.path();
 
         std::fs::write(
             cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\n  config.vm.provider 'virtualbox'\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+  config.vm.provider 'virtualbox'
+end",
+        )?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox");
-        std::fs::create_dir_all(&state_dir).expect("failed");
-        std::fs::write(state_dir.join("id"), "12345").expect("failed");
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(state_dir.join("id"), "12345")?;
 
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS", "running");
-            std::env::set_var("MIGRATORY_TEST_MOCK_VBOXMANAGE", "1");
-        }
-
-        let res = execute(
+        let res = execute_with_provider(
             &SnapshotCommands::Save(SnapshotSaveArgs {
                 vm_name: None,
                 name: None,
                 force: false,
             }),
             cwd,
+            |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Ok(String::new())),
+                ))
+            },
         );
         assert!(res.is_ok());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_PROVIDER_STATUS");
-            std::env::remove_var("MIGRATORY_TEST_MOCK_VBOXMANAGE");
-        }
+        Ok(())
     }
 
     #[test]
-    fn test_execute_snapshot_read_id_and_unsupported_provider_errors() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
-        // 1. read_id error (directory instead of file)
-        let dir1 = tempdir().expect("tempdir failed");
+    fn test_execute_snapshot_read_id_and_unsupported_provider_errors() -> Result<(), MigratoryError>
+    {
+        let dir1 = tempdir()?;
         let cwd1 = dir1.path();
         std::fs::write(
             cwd1.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+end",
+        )?;
         let id_dir = cwd1
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("virtualbox")
             .join("id");
-        std::fs::create_dir_all(&id_dir).expect("create_dir failed");
+        std::fs::create_dir_all(&id_dir)?;
 
         let cmd = SnapshotCommands::List(SnapshotListArgs { vm_name: None });
         let res1 = execute(&cmd, cwd1);
         assert!(res1.is_err());
 
-        // 2. unsupported provider error
-        let dir2 = tempdir().expect("tempdir failed");
+        let save_cmd = SnapshotCommands::Save(SnapshotSaveArgs {
+            vm_name: None,
+            name: Some("snap1".to_string()),
+            force: false,
+        });
+        let save_err_factory =
+            |_: &str, id: Option<String>| -> Result<Box<dyn provider::Provider>, MigratoryError> {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Err(MigratoryError::Generic("save err".to_string()))),
+                ))
+            };
+        assert!(execute_with_provider(&save_cmd, cwd1, save_err_factory).is_err());
+        std::fs::remove_dir_all(&id_dir)?;
+        std::fs::write(&id_dir, "12345")?;
+        assert!(execute_with_provider(&save_cmd, cwd1, save_err_factory).is_ok());
+
+        let dir2 = tempdir()?;
         let cwd2 = dir2.path();
         std::fs::write(
             cwd2.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\n  config.vm.provider 'unsupported_provider'\nend",
-        )
-        .expect("write failed");
+            "Vagrant.configure('2') do |config|
+  config.vm.provider 'unsupported_provider'
+end",
+        )?;
         let state_dir2 = cwd2
             .join(".vagrant")
             .join("machines")
             .join("default")
             .join("unsupported_provider");
-        std::fs::create_dir_all(&state_dir2).expect("create_dir failed");
-        std::fs::write(state_dir2.join("id"), "12345").expect("write failed");
+        std::fs::create_dir_all(&state_dir2)?;
+        std::fs::write(state_dir2.join("id"), "12345")?;
 
         let res2 = execute(&cmd, cwd2);
         assert!(res2.is_err());
+        Ok(())
     }
 }

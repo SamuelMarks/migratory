@@ -1,44 +1,18 @@
+//! Vagrantfile Ruby and JSON configuration parser.
+//!
+//! Evaluates `Vagrantfile` configurations using the pure-Rust in-process evaluator
+//! or a system Ruby subprocess fallback, deserializing the output into [`EnvironmentConfig`].
+
 use super::{
     EnvironmentConfig, MachineConfig, NetworkConfig, ProviderConfig, ProvisionerConfig,
     SyncedFolderConfig,
 };
-use crate::error::MigratoryError;
+use crate::error::{MigratoryError, ResultExt};
 use std::process::Command;
-
-/// Documentation for this item.
-trait ResultExt<T> {
-    /// Executes the `wrap_err` function.
-    ///
-    /// # Arguments
-    ///
-    /// * `msg` - The `msg` argument.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<T, MigratoryError>`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails.
-    fn wrap_err(self, msg: &str) -> Result<T, MigratoryError>;
-}
-
-impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
-    fn wrap_err(self, msg: &str) -> Result<T, MigratoryError> {
-        self.map_err(|e| MigratoryError::Generic(format!("{}: {}", msg, e)))
-    }
-}
-
-/// Initializes the embedded Ruby VM.
-///
-/// In this implementation, we rely on the system Ruby interpreter, so this is a no-op.
-pub fn init_ruby_vm() {
-    // No-op
-}
 
 pub use super::in_process::evaluate_in_process;
 
-/// Represents the `RUBY_PARSER_SCRIPT` constant.
+/// Inline Ruby script that mocks the `Vagrant.configure` DSL and serializes the evaluated configuration as JSON.
 const RUBY_PARSER_SCRIPT: &str = r#"
 require 'fileutils'
 require 'socket'
@@ -670,62 +644,54 @@ puts JSON.generate(Vagrant.get_config.to_hash)
 pub fn parse_vagrantfiles<P: AsRef<std::path::Path>>(
     paths: &[P],
 ) -> Result<EnvironmentConfig, MigratoryError> {
-    let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
-    parse_vagrantfiles_inner(&path_refs)
+    parse_vagrantfiles_with_runner(paths, |script, file_paths| {
+        let mut cmd = Command::new("ruby");
+        cmd.arg("-e").arg(script);
+        for p in file_paths {
+            cmd.arg(p);
+        }
+        cmd.output()
+    })
 }
 
-/// Executes the `parse_vagrantfiles_inner` function.
+/// Evaluates an ordered hierarchy of `Vagrantfile` paths using an injectable Ruby process runner.
 ///
 /// # Arguments
 ///
-/// * `paths` - The `paths` argument.
+/// * `paths` - Ordered slice of `Vagrantfile` paths to evaluate.
+/// * `runner` - Closure that executes the Ruby parser script against the resolved paths.
 ///
 /// # Returns
 ///
-/// Returns `Result<EnvironmentConfig, MigratoryError>`.
+/// Returns the evaluated [`EnvironmentConfig`] on success.
 ///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
-fn parse_vagrantfiles_inner(
-    paths: &[&std::path::Path],
-) -> Result<EnvironmentConfig, MigratoryError> {
+/// Returns a [`MigratoryError`] if `paths` is empty, a file does not exist, or evaluation fails.
+pub fn parse_vagrantfiles_with_runner<P, F>(
+    paths: &[P],
+    runner: F,
+) -> Result<EnvironmentConfig, MigratoryError>
+where
+    P: AsRef<std::path::Path>,
+    F: FnOnce(&str, &[&std::path::Path]) -> std::io::Result<std::process::Output>,
+{
     if paths.is_empty() {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
     }
 
+    let mut path_refs = Vec::with_capacity(paths.len());
     for p in paths {
-        if !p.exists() {
-            return Err(MigratoryError::NotFound(p.to_string_lossy().to_string()));
+        let p_ref = p.as_ref();
+        if !p_ref.exists() {
+            return Err(MigratoryError::NotFound(
+                p_ref.to_string_lossy().to_string(),
+            ));
         }
+        path_refs.push(p_ref);
     }
 
-    let mut cmd = Command::new("ruby");
-    cmd.arg("-e").arg(RUBY_PARSER_SCRIPT);
-    for p in paths {
-        cmd.arg(p);
-    }
-
-    let is_forced_pure_rust = std::env::var("MIGRATORY_FORCE_PURE_RUST").is_ok();
-    let output_result = if std::env::var("MIGRATORY_TEST_MOCK_RUBY_ERROR").is_ok() {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Mock permission denied executing ruby",
-        ))
-    } else if std::env::var("MIGRATORY_TEST_MOCK_RUBY_BAD_JSON").is_ok() {
-        Ok(std::process::Output {
-            status: std::process::ExitStatus::default(),
-            stdout: b"not json".to_vec(),
-            stderr: Vec::new(),
-        })
-    } else if is_forced_pure_rust {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Forced pure Rust evaluation",
-        ))
-    } else {
-        cmd.output()
-    };
+    let output_result = runner(RUBY_PARSER_SCRIPT, &path_refs);
 
     match output_result {
         Ok(output) => {
@@ -747,7 +713,7 @@ fn parse_vagrantfiles_inner(
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let mut aggregated = EnvironmentConfig::default();
-            for p in paths {
+            for p in path_refs {
                 let content = std::fs::read_to_string(p).map_err(MigratoryError::Io)?;
                 let file_config = evaluate_in_process(&content)?;
                 aggregated = crate::config::merge_environment_configs(&aggregated, &file_config);
@@ -837,11 +803,11 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
         machine_config.vm.box_download_client_cert = vm_val
             .get("box_download_client_cert")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::path::PathBuf::from);
         machine_config.vm.box_download_ca_cert = vm_val
             .get("box_download_ca_cert")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::path::PathBuf::from);
         machine_config.vm.box_download_insecure = vm_val
             .get("box_download_insecure")
             .and_then(|v| v.as_bool());
@@ -852,7 +818,7 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
         machine_config.vm.guest = vm_val
             .get("guest")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(crate::config::GuestKind::parse_raw);
         machine_config.vm.post_up_message = vm_val
             .get("post_up_message")
             .and_then(|v| v.as_str())
@@ -861,7 +827,7 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
         machine_config.vm.communicator = vm_val
             .get("communicator")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(crate::config::CommunicatorKind::parse_raw);
         machine_config.vm.graceful_halt_timeout =
             vm_val.get("graceful_halt_timeout").and_then(|v| v.as_u64());
 
@@ -905,11 +871,16 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                     .get("name")
                     .and_then(|n| n.as_str())
                     .map(|s| s.to_string());
+                let file = match d.get("file") {
+                    Some(v) => v.as_str().map(std::path::PathBuf::from),
+                    None => None,
+                };
                 let primary = d.get("primary").and_then(|p| p.as_bool()).unwrap_or(false);
                 machine_config.vm.disks.push(crate::config::DiskConfig {
                     disk_type: d_type,
                     size,
                     name,
+                    file,
                     primary,
                 });
             }
@@ -932,7 +903,7 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                 machine_config.ssh.password = Some(p.to_string());
             }
             if let Some(pk) = ssh_val.get("private_key_path").and_then(|v| v.as_str()) {
-                machine_config.ssh.private_key_path = Some(pk.to_string());
+                machine_config.ssh.private_key_path = Some(std::path::PathBuf::from(pk));
             }
             if let Some(ik) = ssh_val.get("insert_key").and_then(|v| v.as_bool()) {
                 machine_config.ssh.insert_key = ik;
@@ -1181,7 +1152,7 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                 options_map.insert(k.clone(), val_str);
             }
             machine_config.vm.providers.push(ProviderConfig {
-                name: p_name.to_string(),
+                name: crate::config::ProviderKind::parse_raw(p_name),
                 options: options_map,
             });
         }
@@ -1347,7 +1318,12 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                 let mut args = None;
 
                 if let Some(t) = opts.get("type").and_then(|t| t.as_str()) {
-                    folder_type = Some(t.to_string());
+                    folder_type = Some(crate::config::SyncedFolderType::parse_raw(t));
+                }
+                if folder_type.is_none()
+                    && let Some(t) = f.get("type").and_then(|t| t.as_str())
+                {
+                    folder_type = Some(crate::config::SyncedFolderType::parse_raw(t));
                 }
                 if let Some(d) = opts.get("disabled").and_then(|d| d.as_bool()) {
                     disabled = d;
@@ -1374,8 +1350,8 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                 }
 
                 machine_config.vm.synced_folders.push(SyncedFolderConfig {
-                    host_path: h_path.to_string(),
-                    guest_path: g_path.to_string(),
+                    host_path: std::path::PathBuf::from(h_path),
+                    guest_path: std::path::PathBuf::from(g_path),
                     folder_type,
                     disabled,
                     owner,
@@ -1394,21 +1370,9 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
     use std::fs;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_init_ruby_vm() {
-        init_ruby_vm(); // Just coverage
-    }
 
     #[test]
     fn test_parse_vagrantfile_missing() {
@@ -1417,24 +1381,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_vagrantfile_syntax_error() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfile_syntax_error() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let path = dir.path().join("Vagrantfile");
-        fs::write(&path, "invalid ruby syntax {").expect("operation should succeed");
+        fs::write(&path, "invalid ruby syntax {")?;
 
-        let res = parse_vagrantfile(path.to_str().expect("operation should succeed"));
+        let res = parse_vagrantfile(&path.to_string_lossy());
         assert!(res.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfile_valid_all_features() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfile_valid_all_features() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let path = dir.path().join("Vagrantfile");
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -1479,10 +1438,9 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        fs::write(&path, vagrantfile_content).expect("operation should succeed");
+        fs::write(&path, vagrantfile_content)?;
 
-        let env = parse_vagrantfile(path.to_str().expect("operation should succeed"))
-            .expect("Should parse");
+        let env = parse_vagrantfile(&path.to_string_lossy())?;
         assert!(env.machines.contains_key("web"));
         assert!(env.machines.contains_key("db"));
 
@@ -1490,13 +1448,16 @@ end
         assert_eq!(web.ssh.username, "webuser");
         assert_eq!(web.ssh.host, "ssh-host");
         assert_eq!(web.ssh.port, 2222);
-        assert_eq!(web.ssh.private_key_path.as_deref(), Some("/path/to/key"));
-        assert_eq!(web.ssh.insert_key, false);
+        assert_eq!(
+            web.ssh.private_key_path.as_deref(),
+            Some(std::path::Path::new("/path/to/key"))
+        );
+        assert!(!web.ssh.insert_key);
         assert_eq!(web.winrm.username, "admin");
         assert_eq!(web.winrm.password.as_deref(), Some("secret"));
         assert_eq!(web.winrm.host, "winrm-host");
         assert_eq!(web.winrm.port, 5985);
-        assert_eq!(web.winrm.ssl, true);
+        assert!(web.winrm.ssl);
         assert_eq!(web.vagrant.host.as_deref(), Some("vagrant-host"));
         assert_eq!(
             web.vagrant.plugins,
@@ -1530,23 +1491,17 @@ end
 
         assert_eq!(db.vm.synced_folders.len(), 1);
         let sf = &db.vm.synced_folders[0];
-        assert_eq!(sf.host_path, "src/");
-        assert_eq!(sf.guest_path, "/srv/website");
+        assert_eq!(sf.host_path, std::path::Path::new("src/"));
+        assert_eq!(sf.guest_path, std::path::Path::new("/srv/website"));
         assert_eq!(sf.folder_type.as_deref(), Some("rsync"));
         assert!(!sf.disabled);
         assert_eq!(sf.owner.as_deref(), Some("vagrant"));
         assert_eq!(sf.group.as_deref(), Some("vagrant"));
-        assert_eq!(sf.mount_options.as_ref().expect("mount_options").len(), 2);
         assert_eq!(
-            sf.mount_options.as_ref().expect("mount_options")[0],
-            "dmode=775"
+            sf.mount_options.as_deref(),
+            Some(&["dmode=775".to_string(), "fmode=774".to_string()][..])
         );
-        assert_eq!(
-            sf.mount_options.as_ref().expect("mount_options")[1],
-            "fmode=774"
-        );
-        assert_eq!(sf.args.as_ref().expect("args").len(), 1);
-        assert_eq!(sf.args.as_ref().expect("args")[0], "--verbose");
+        assert_eq!(sf.args.as_deref(), Some(&["--verbose".to_string()][..]));
 
         assert_eq!(db.vm.providers.len(), 1);
         let prov = &db.vm.providers[0];
@@ -1562,14 +1517,12 @@ end
         assert_eq!(provisioner.config["inline"], "echo hello");
         assert_eq!(provisioner.config["privileged"], "false");
         assert_eq!(provisioner.config["arr_opt"], "");
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfile_incomplete_network() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfile_incomplete_network() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let path = dir.path().join("Vagrantfile");
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -1586,10 +1539,9 @@ Vagrant.configure("2") do |config|
   config.vm.provision "ansible", boolean_opt: true, num_opt: 42
 end
         "#;
-        fs::write(&path, vagrantfile_content).expect("operation should succeed");
+        fs::write(&path, vagrantfile_content)?;
 
-        let env = parse_vagrantfile(path.to_str().expect("operation should succeed"))
-            .expect("operation should succeed");
+        let env = parse_vagrantfile(&path.to_string_lossy())?;
         let def = &env.machines["default"];
 
         // forwarded_port parsed (defaults), private skipped (no IP), public parsed (defaults), unknown skipped
@@ -1627,14 +1579,12 @@ end
         assert_eq!(def.vm.provisioners.len(), 2);
 
         assert_eq!(def.vm.synced_folders.len(), 0); // Both invalid
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfile_machine_config() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfile_machine_config() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let path = dir.path().join("Vagrantfile");
         let vagrantfile_content = r#"
 Vagrant.configure("2") do |config|
@@ -1654,30 +1604,33 @@ Vagrant.configure("2") do |config|
   config.vagrant.plugins = ["vagrant-aws", "vagrant-vbguest"]
 end
         "#;
-        fs::write(&path, vagrantfile_content).expect("operation should succeed");
+        fs::write(&path, vagrantfile_content)?;
 
-        let env = parse_vagrantfile(path.to_str().expect("operation should succeed"))
-            .expect("operation should succeed");
+        let env = parse_vagrantfile(&path.to_string_lossy())?;
         let def = &env.machines["default"];
 
         assert_eq!(def.ssh.username, "root");
         assert_eq!(def.ssh.host, "1.2.3.4");
         assert_eq!(def.ssh.port, 2222);
-        assert_eq!(def.ssh.private_key_path.as_deref(), Some("/path/to/key"));
-        assert_eq!(def.ssh.insert_key, false);
+        assert_eq!(
+            def.ssh.private_key_path.as_deref(),
+            Some(std::path::Path::new("/path/to/key"))
+        );
+        assert!(!def.ssh.insert_key);
 
         assert_eq!(def.winrm.username, "Administrator");
         assert_eq!(def.winrm.password.as_deref(), Some("secret"));
         assert_eq!(def.winrm.host, "5.6.7.8");
         assert_eq!(def.winrm.port, 5986);
-        assert_eq!(def.winrm.ssl, true);
+        assert!(def.winrm.ssl);
 
         assert_eq!(def.vagrant.host.as_deref(), Some("linux"));
         assert_eq!(def.vagrant.plugins, vec!["vagrant-aws", "vagrant-vbguest"]);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfile_invalid_types() {
+    fn test_parse_vagrantfile_invalid_types() -> Result<(), MigratoryError> {
         // Test parsing where ssh, winrm, and vagrant are not objects
         // to cover the `and_then(|s| s.as_object())` returning None branch
         let json_content = r#"{
@@ -1692,8 +1645,7 @@ end
             }
         }"#;
 
-        let parsed_json: serde_json::Value =
-            serde_json::from_str(json_content).expect("operation should succeed");
+        let parsed_json: serde_json::Value = serde_json::from_str(json_content)?;
         let env = crate::config::parser::parse_json_config(&parsed_json);
         let def = &env.machines["default"];
 
@@ -1702,14 +1654,12 @@ end
         assert_eq!(def.winrm.username, "vagrant");
         assert_eq!(def.vagrant.host, None);
         assert!(def.vagrant.plugins.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfile_dynamic_ruby_features() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfile_dynamic_ruby_features() -> Result<(), MigratoryError> {
+        let dir = tempdir()?;
         let path = dir.path().join("Vagrantfile");
         let vagrantfile_content = r#"
 require 'base64'
@@ -1732,10 +1682,9 @@ Vagrant.configure("2") do |config|
   end
 end
         "#;
-        fs::write(&path, vagrantfile_content).expect("operation should succeed");
+        fs::write(&path, vagrantfile_content)?;
 
-        let env = parse_vagrantfile(path.to_str().expect("operation should succeed"))
-            .expect("operation should succeed");
+        let env = parse_vagrantfile(&path.to_string_lossy())?;
 
         assert!(env.machines.contains_key("node1"));
         assert!(env.machines.contains_key("node2"));
@@ -1745,22 +1694,16 @@ end
 
         let node2 = &env.machines["node2"];
         assert_eq!(node2.vm.box_name.as_deref(), Some("custom-box"));
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod parse_json_tests {
-    #![allow(
-        clippy::all,
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::undocumented_unsafe_blocks
-    )]
     use super::*;
 
     #[test]
-    fn test_parse_json_full_coverage() {
+    fn test_parse_json_full_coverage() -> Result<(), MigratoryError> {
         let json_content = serde_json::json!({
             "machines": {
                 "default": {
@@ -1888,7 +1831,7 @@ mod parse_json_tests {
         let m = env_config
             .machines
             .get("default")
-            .expect("operation should succeed");
+            .ok_or(MigratoryError::NotFound("default".to_string()))?;
         assert!(m.primary);
         assert!(!m.autostart);
         assert_eq!(m.depends_on, vec!["db_service".to_string()]);
@@ -1901,9 +1844,12 @@ mod parse_json_tests {
         assert_eq!(m.vm.box_download_checksum_type.as_deref(), Some("sha256"));
         assert_eq!(
             m.vm.box_download_client_cert.as_deref(),
-            Some("/path/to/cert")
+            Some(std::path::Path::new("/path/to/cert"))
         );
-        assert_eq!(m.vm.box_download_ca_cert.as_deref(), Some("/path/to/ca"));
+        assert_eq!(
+            m.vm.box_download_ca_cert.as_deref(),
+            Some(std::path::Path::new("/path/to/ca"))
+        );
         assert_eq!(m.vm.box_download_insecure, Some(true));
         assert_eq!(m.vm.networks.len(), 4);
         assert_eq!(
@@ -1971,8 +1917,8 @@ mod parse_json_tests {
         assert_eq!(m.triggers[1].on_error.as_deref(), Some("halt"));
 
         assert_eq!(m.ssh.password, Some("ssh_password".to_string()));
-        assert_eq!(m.ssh.forward_agent, true);
-        assert_eq!(m.ssh.forward_x11, true);
+        assert!(m.ssh.forward_agent);
+        assert!(m.ssh.forward_x11);
         assert_eq!(
             m.ssh.proxy_command,
             Some("ssh -q -W %h:%p proxy".to_string())
@@ -1995,6 +1941,7 @@ mod parse_json_tests {
         assert_eq!(m.pushes[2].name, "local-exec");
         assert_eq!(m.pushes[2].strategy, "local-exec");
         assert_eq!(env_config.pushes.len(), 2);
+        Ok(())
     }
 
     #[test]
@@ -2013,7 +1960,7 @@ mod parse_json_tests {
     }
 
     #[test]
-    fn test_parse_json_invalid_plugin_type() {
+    fn test_parse_json_invalid_plugin_type() -> Result<(), MigratoryError> {
         let json_content = serde_json::json!({
             "machines": {
                 "default": {
@@ -2029,16 +1976,14 @@ mod parse_json_tests {
         let m = env_config
             .machines
             .get("default")
-            .expect("operation should succeed");
+            .ok_or(MigratoryError::NotFound("default".to_string()))?;
         assert_eq!(m.vagrant.plugins, vec!["valid".to_string()]);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfile_v1_legacy() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfile_v1_legacy() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("Vagrantfile");
         let content = r#"
 Vagrant.configure("1") do |config|
@@ -2052,13 +1997,12 @@ Vagrant.configure("1") do |config|
   config.trigger.after :halt, run: ->(env) { }
 end
 "#;
-        std::fs::write(&path, content).expect("operation should succeed");
-        let env = parse_vagrantfile(path.to_str().expect("operation should succeed"))
-            .expect("operation should succeed");
+        std::fs::write(&path, content)?;
+        let env = parse_vagrantfile(&path.to_string_lossy())?;
         let m = env
             .machines
             .get("default")
-            .expect("operation should succeed");
+            .ok_or(MigratoryError::NotFound("default".to_string()))?;
         assert_eq!(m.vm.box_name.as_deref(), Some("base"));
         assert_eq!(m.vm.guest.as_deref(), Some("linux"));
         assert_eq!(m.vm.networks.len(), 1);
@@ -2073,35 +2017,34 @@ end
             }
         );
         assert_eq!(m.vm.synced_folders.len(), 1);
-        assert_eq!(m.vm.synced_folders[0].guest_path, "/vagrant");
+        assert_eq!(
+            m.vm.synced_folders[0].guest_path,
+            std::path::Path::new("/vagrant")
+        );
         assert_eq!(m.triggers.len(), 2);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfiles_multi_file() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfiles_multi_file() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let file1 = dir.path().join("Vagrantfile.base");
         let file2 = dir.path().join("Vagrantfile.override");
 
         std::fs::write(
             &file1,
             "Vagrant.configure('2') do |c|\n c.vm.box = 'box1'\n c.vm.hostname = 'host1'\nend",
-        )
-        .expect("operation should succeed");
+        )?;
         std::fs::write(
             &file2,
             "Vagrant.configure('2') do |c|\n c.vm.box = 'box2'\nend",
-        )
-        .expect("operation should succeed");
+        )?;
 
-        let env = parse_vagrantfiles(&[&file1, &file2]).expect("operation should succeed");
+        let env = parse_vagrantfiles(&[&file1, &file2])?;
         let m = env
             .machines
             .get("default")
-            .expect("operation should succeed");
+            .ok_or(MigratoryError::NotFound("default".to_string()))?;
         assert_eq!(m.vm.box_name.as_deref(), Some("box2"));
         assert_eq!(m.vm.hostname.as_deref(), Some("host1"));
 
@@ -2112,11 +2055,12 @@ end
         // Test nonexistent file
         let bad_path = dir.path().join("nonexistent");
         assert!(parse_vagrantfiles(&[&bad_path]).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfiles_fallback_pure_rust() {
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfiles_fallback_pure_rust() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("Vagrantfile");
         let vf_content = r#"
 Vagrant.configure("2") do |config|
@@ -2130,40 +2074,33 @@ Vagrant.configure("2") do |config|
   config.vagrant.sensitive = ["my_secret"]
 end
 "#;
-        std::fs::write(&path, vf_content).expect("operation should succeed");
+        std::fs::write(&path, vf_content)?;
 
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-        unsafe {
-            std::env::set_var("MIGRATORY_FORCE_PURE_RUST", "1");
-        }
+        let not_found_runner = |_: &str, _: &[&std::path::Path]| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Forced pure Rust evaluation",
+            ))
+        };
 
-        let env_res = parse_vagrantfile(path.to_str().expect("operation should succeed"));
-        assert!(env_res.is_ok());
+        let env = parse_vagrantfiles_with_runner(&[&path], not_found_runner)?;
 
         // Test pure rust with nonexistent file
         let bad_path = dir.path().join("nonexistent");
-        let bad_res = parse_vagrantfiles(&[&bad_path]);
+        let bad_res = parse_vagrantfiles_with_runner(&[&bad_path], not_found_runner);
         assert!(bad_res.is_err());
 
         // Test pure rust with directory as path (triggers std::fs::read_to_string Io error)
         let dir_as_file = dir.path();
-        let io_err_res = parse_vagrantfiles(&[dir_as_file]);
+        let io_err_res = parse_vagrantfiles_with_runner(&[dir_as_file], not_found_runner);
         assert!(io_err_res.is_err());
 
         // Test pure rust with unsatisfiable version requirement (triggers evaluate_in_process error)
         let syntax_err_path = dir.path().join("Vagrantfile.bad_version");
-        std::fs::write(&syntax_err_path, b"Vagrant.require_version '>= 99.0.0'").expect("write");
-        let syntax_err_res = parse_vagrantfiles(&[&syntax_err_path]);
+        std::fs::write(&syntax_err_path, b"Vagrant.require_version '>= 99.0.0'")?;
+        let syntax_err_res = parse_vagrantfiles_with_runner(&[&syntax_err_path], not_found_runner);
         assert!(syntax_err_res.is_err());
 
-        unsafe {
-            std::env::remove_var("MIGRATORY_FORCE_PURE_RUST");
-        }
-
-        assert!(env_res.is_ok());
-        let env = env_res.expect("operation should succeed");
         assert!(env.machines.contains_key("default"));
         let def = &env.machines["default"];
         assert_eq!(def.vm.box_name.as_deref(), Some("pure-rust-box"));
@@ -2175,10 +2112,11 @@ end
         assert!(def.ssh.forward_agent);
         assert_eq!(def.winrm.username, "Administrator");
         assert_eq!(def.vagrant.sensitive, vec!["my_secret".to_string()]);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_json_new_fields() {
+    fn test_parse_json_new_fields() -> Result<(), MigratoryError> {
         let json_content = serde_json::json!({
             "machines": {
                 "default": {
@@ -2215,6 +2153,7 @@ end
                                 "disk_type": "disk",
                                 "size": "25GB",
                                 "name": "extra",
+                                "file": "/tmp/extra.vdi",
                                 "primary": true
                             }
                         ],
@@ -2245,8 +2184,8 @@ end
         let m = env
             .machines
             .get("default")
-            .expect("operation should succeed");
-        assert_eq!(m.vm.guest.as_deref(), Some("freebsd"));
+            .ok_or(MigratoryError::NotFound("default".to_string()))?;
+        assert_eq!(m.vm.guest, Some(crate::config::GuestKind::Bsd));
         assert_eq!(m.vm.usable_port_range, (2200, 2300));
 
         // Test invalid length usable_port_range to cover false branch
@@ -2324,40 +2263,36 @@ end
                 use_dhcp_assigned_default_route: true,
             }
         );
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vagrantfiles_ruby_errors() {
-        let _guard = crate::cli::commands::box_cmd::tests::ENV_LOCK
-            .lock()
-            .expect("lock failed");
-
-        let dir = tempfile::tempdir().expect("operation should succeed");
+    fn test_parse_vagrantfiles_ruby_errors() -> Result<(), MigratoryError> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("Vagrantfile");
-        std::fs::write(&path, b"Vagrant.configure('2') do |c| end")
-            .expect("operation should succeed");
+        std::fs::write(&path, b"Vagrant.configure('2') do |c| end")?;
 
         // 0. Empty paths error
         assert!(parse_vagrantfiles::<&std::path::Path>(&[]).is_err());
 
         // 1. Ruby execution permission denied / spawn error
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUBY_ERROR", "1");
-        }
-        let res_err = parse_vagrantfiles(&[&path]);
+        let res_err = parse_vagrantfiles_with_runner(&[&path], |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Mock permission denied executing ruby",
+            ))
+        });
         assert!(res_err.is_err());
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUBY_ERROR");
-        }
 
         // 2. Ruby returns invalid JSON
-        unsafe {
-            std::env::set_var("MIGRATORY_TEST_MOCK_RUBY_BAD_JSON", "1");
-        }
-        let res_bad_json = parse_vagrantfiles(&[&path]);
+        let res_bad_json = parse_vagrantfiles_with_runner(&[&path], |_, _| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::default(),
+                stdout: b"not json".to_vec(),
+                stderr: Vec::new(),
+            })
+        });
         assert!(res_bad_json.is_err());
-        unsafe {
-            std::env::remove_var("MIGRATORY_TEST_MOCK_RUBY_BAD_JSON");
-        }
+        Ok(())
     }
 }
