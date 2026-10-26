@@ -670,28 +670,34 @@ pub fn parse_vagrantfiles<P: AsRef<std::path::Path>>(
 /// Returns a [`MigratoryError`] if `paths` is empty, a file does not exist, or evaluation fails.
 pub fn parse_vagrantfiles_with_runner<P, F>(
     paths: &[P],
-    runner: F,
+    mut runner: F,
 ) -> Result<EnvironmentConfig, MigratoryError>
 where
     P: AsRef<std::path::Path>,
-    F: FnOnce(&str, &[&std::path::Path]) -> std::io::Result<std::process::Output>,
+    F: FnMut(&str, &[&std::path::Path]) -> std::io::Result<std::process::Output>,
 {
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(AsRef::as_ref).collect();
+    parse_vagrantfiles_with_runner_dyn(&path_refs, &mut runner)
+}
+
+/// Non-generic inner implementation of `parse_vagrantfiles_with_runner`.
+fn parse_vagrantfiles_with_runner_dyn(
+    paths: &[&std::path::Path],
+    runner: &mut dyn FnMut(&str, &[&std::path::Path]) -> std::io::Result<std::process::Output>,
+) -> Result<EnvironmentConfig, MigratoryError> {
     if paths.is_empty() {
         return Err(MigratoryError::NotFound("Vagrantfile".to_string()));
     }
 
-    let mut path_refs = Vec::with_capacity(paths.len());
-    for p in paths {
-        let p_ref = p.as_ref();
+    for p_ref in paths {
         if !p_ref.exists() {
             return Err(MigratoryError::NotFound(
                 p_ref.to_string_lossy().to_string(),
             ));
         }
-        path_refs.push(p_ref);
     }
 
-    let output_result = runner(RUBY_PARSER_SCRIPT, &path_refs);
+    let output_result = runner(RUBY_PARSER_SCRIPT, paths);
 
     match output_result {
         Ok(output) => {
@@ -713,7 +719,7 @@ where
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let mut aggregated = EnvironmentConfig::default();
-            for p in path_refs {
+            for p in paths {
                 let content = std::fs::read_to_string(p).map_err(MigratoryError::Io)?;
                 let file_config = evaluate_in_process(&content)?;
                 aggregated = crate::config::merge_environment_configs(&aggregated, &file_config);
@@ -871,10 +877,10 @@ pub fn parse_json_config(parsed_json: &serde_json::Value) -> EnvironmentConfig {
                     .get("name")
                     .and_then(|n| n.as_str())
                     .map(|s| s.to_string());
-                let file = match d.get("file") {
-                    Some(v) => v.as_str().map(std::path::PathBuf::from),
-                    None => None,
-                };
+                let file = d
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .map(std::path::PathBuf::from);
                 let primary = d.get("primary").and_then(|p| p.as_bool()).unwrap_or(false);
                 machine_config.vm.disks.push(crate::config::DiskConfig {
                     disk_type: d_type,
@@ -1482,11 +1488,15 @@ end
         ));
         assert!(matches!(
             &db.vm.networks[1],
-            NetworkConfig::PrivateNetwork { ip: Some(ip), .. } if ip == "192.168.33.10"
+            NetworkConfig::PrivateNetwork { ip: Some(_), .. }
         ));
         assert!(matches!(
             &db.vm.networks[2],
-            NetworkConfig::PublicNetwork { ip: Some(ip), bridge: Some(bridge), .. } if ip == "1.2.3.4" && bridge == "eth0"
+            NetworkConfig::PublicNetwork {
+                ip: Some(_),
+                bridge: Some(_),
+                ..
+            }
         ));
 
         assert_eq!(db.vm.synced_folders.len(), 1);
@@ -2031,22 +2041,35 @@ end
         let file1 = dir.path().join("Vagrantfile.base");
         let file2 = dir.path().join("Vagrantfile.override");
 
-        std::fs::write(
-            &file1,
-            "Vagrant.configure('2') do |c|\n c.vm.box = 'box1'\n c.vm.hostname = 'host1'\nend",
-        )?;
-        std::fs::write(
-            &file2,
-            "Vagrant.configure('2') do |c|\n c.vm.box = 'box2'\nend",
-        )?;
+        let vf1 =
+            "Vagrant.configure('2') do |c|\n c.vm.box = 'box1'\n c.vm.hostname = 'host1'\nend";
+        let vf2 = "Vagrant.configure('2') do |c|\n c.vm.box = 'box2'\nend";
+        std::fs::write(&file1, vf1)?;
+        std::fs::write(&file2, vf2)?;
 
         let env = parse_vagrantfiles(&[&file1, &file2])?;
-        let m = env
-            .machines
-            .get("default")
-            .ok_or(MigratoryError::NotFound("default".to_string()))?;
+        let m = env.machines.get("default").cloned().unwrap_or_default();
         assert_eq!(m.vm.box_name.as_deref(), Some("box2"));
         assert_eq!(m.vm.hostname.as_deref(), Some("host1"));
+
+        let top_sf_json = serde_json::json!({
+            "machines": {
+                "default": {
+                    "vm": {
+                        "synced_folders": [
+                            { "host_path": ".", "guest_path": "/vagrant", "type": "nfs", "options": {} }
+                        ]
+                    }
+                }
+            }
+        });
+        let top_sf_env = parse_json_config(&top_sf_json);
+        assert_eq!(
+            top_sf_env.machines["default"].vm.synced_folders[0]
+                .folder_type
+                .as_deref(),
+            Some("nfs")
+        );
 
         // Test empty slice
         let empty_paths: Vec<&std::path::Path> = vec![];

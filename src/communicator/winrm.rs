@@ -504,6 +504,17 @@ impl WinrmCommunicator {
         mut reader: R,
         mut writer: W,
     ) -> Result<(), MigratoryError> {
+        self.execute_interactive_stream_dyn(command, elevated, &mut reader, &mut writer)
+    }
+
+    /// Non-generic implementation of [`Self::execute_interactive_stream`].
+    fn execute_interactive_stream_dyn(
+        &self,
+        command: Option<&str>,
+        elevated: bool,
+        reader: &mut dyn Read,
+        writer: &mut dyn Write,
+    ) -> Result<(), MigratoryError> {
         let shell_id = self.open_shell()?;
         let cmd = match (command, elevated) {
             (Some(c), true) => format!(
@@ -541,9 +552,7 @@ impl WinrmCommunicator {
                         let _ = writer.flush();
                     }
                     if output.completed {
-                        if let Some(code) = output.exit_code
-                            && code != 0
-                        {
+                        if let Some(code) = output.exit_code.filter(|&c| c != 0) {
                             exit_code_res = Err(MigratoryError::Generic(format!(
                                 "WinRM shell process exited with code {}",
                                 code

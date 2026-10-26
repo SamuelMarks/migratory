@@ -69,6 +69,15 @@ pub fn execute_with_graceful<G>(
 where
     G: Fn(&crate::communicator::ssh::SshCommunicator) -> bool + Sync,
 {
+    execute_with_graceful_dyn(cwd, args, &graceful_halt_fn)
+}
+
+/// Non-generic implementation of `halt` execution with a dynamic graceful-shutdown callback.
+fn execute_with_graceful_dyn(
+    cwd: &Path,
+    args: &HaltArgs,
+    graceful_halt_fn: &(dyn Fn(&crate::communicator::ssh::SshCommunicator) -> bool + Sync),
+) -> Result<(), MigratoryError> {
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
     let _guard = lock_file.try_write().map_err(|_| {
@@ -662,13 +671,12 @@ mod extra_halt_tests {
             .join("virtualbox");
         fs::create_dir_all(&id_dir)?;
         fs::write(id_dir.join("id"), "mock_machine_123")?;
-        fs::write(
-            cwd.join(".vagrant")
-                .join("machines")
-                .join("default")
-                .join("provider"),
-            "virtualbox",
-        )?;
+        let prov_file = cwd
+            .join(".vagrant")
+            .join("machines")
+            .join("default")
+            .join("provider");
+        fs::write(prov_file, "virtualbox")?;
 
         let args = HaltArgs {
             force: false,

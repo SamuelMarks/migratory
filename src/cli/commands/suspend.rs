@@ -277,10 +277,8 @@ mod tests {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c| c.vm.provider 'my_custom_provider' end",
-        )?;
+        let vf = "Vagrant.configure('2') do |c| c.vm.provider 'my_custom_provider' end";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = SuspendArgs {
             all_global: false,
@@ -403,10 +401,8 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c| c.vm.provider 'virtualbox' end",
-        )?;
+        let vf = "Vagrant.configure('2') do |c| c.vm.provider 'virtualbox' end";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let vagrant_dir = cwd
             .join(".vagrant")

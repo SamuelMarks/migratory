@@ -191,9 +191,16 @@ mod tests {
             no_prefix: false,
         };
         let result = execute(cwd, &args);
-        assert!(
-            matches!(result, Err(MigratoryError::NotFound(msg)) if msg.contains("Docker container ID for machine 'default' not found"))
-        );
+        assert!(result.is_err_and(|e| {
+            e.to_string()
+                .contains("Docker container ID for machine 'default' not found")
+        }));
+
+        // Also test when id file exists but contains only whitespace
+        let state_dir = cwd.join(".vagrant/machines/default/docker");
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("id"), "   \n  ")?;
+        assert!(execute(cwd, &args).is_err());
         Ok(())
     }
 

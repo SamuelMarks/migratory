@@ -502,9 +502,10 @@ pub fn get_provider(
     machine_id: Option<String>,
 ) -> Result<Box<dyn Provider>, MigratoryError> {
     let raw_name = name.as_ref();
-    if let Ok(reg) = crate::plugin::global_registry().read()
-        && let Some(prov) = reg.get_provider(raw_name, machine_id.clone())
-    {
+    let reg = crate::plugin::global_registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(prov) = reg.get_provider(raw_name, machine_id.clone()) {
         return Ok(prov);
     }
     match crate::config::ProviderKind::parse_raw(raw_name) {

@@ -943,6 +943,7 @@ exit 0
         #[cfg(unix)]
         {
             let mock_script_single = r#"#!/bin/sh
+echo "<ip address='unterminated"
 echo "<ip address='192.168.1.1'/>"
 exit 0
 "#;
@@ -950,6 +951,7 @@ exit 0
             assert_eq!(provider.resolve_gateway(), "192.168.1.1");
 
             let mock_script_double = r#"#!/bin/sh
+echo "<ip address=\"unterminated"
 echo "<ip address=\"192.168.1.2\"/>"
 exit 0
 "#;

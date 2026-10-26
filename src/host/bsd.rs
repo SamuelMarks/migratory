@@ -3,7 +3,7 @@
 //! This module provides the implementation for the BSD host,
 //! detailing operations such as configuring NFS or SMB file sharing.
 
-use super::Host;
+use super::{Host, HostCommandRunner};
 use crate::error::MigratoryError;
 use std::process::Command;
 
@@ -159,14 +159,11 @@ impl BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if reloading `mountd` fails.
-    pub fn configure_nfs_with<F>(
+    pub fn configure_nfs_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         let uid = runner("id", &["-u"])
             .map(|(_, s)| s.trim().to_string())
             .unwrap_or_else(|_| "1000".to_string());
@@ -201,14 +198,11 @@ impl BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if reloading `samba_server` fails.
-    pub fn configure_smb_with<F>(
+    pub fn configure_smb_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         let conf_block = Self::generate_smb_conf(folders);
         let cmd = format!("echo '{conf_block}' | sudo tee -a /usr/local/etc/smb4.conf > /dev/null");
         let _ = runner("sh", &["-c", &cmd]);
@@ -235,10 +229,7 @@ impl BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the command fails.
-    pub fn check_admin_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn check_admin_with(&self, runner: HostCommandRunner) -> Result<bool, MigratoryError> {
         let (_, stdout) = runner("id", &["-u"])?;
         Ok(stdout.trim() == "0")
     }
@@ -256,10 +247,10 @@ impl BsdHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on failure.
-    pub fn resolve_host_ip_with<F>(&self, mut runner: F) -> Result<String, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn resolve_host_ip_with(
+        &self,
+        runner: HostCommandRunner,
+    ) -> Result<String, MigratoryError> {
         if let Ok((_, stdout)) = runner("route", &["-n", "get", "default"]) {
             return Ok(Self::parse_host_ip_from_route(&stdout));
         }
@@ -477,6 +468,8 @@ mod tests {
         let caps = host.capabilities_with("echo", "echo");
         assert!(caps.contains(&"bhyve".to_string()));
         assert!(caps.contains(&"virtualbox".to_string()));
+        let failed = host.capabilities_with("false", "false");
+        assert!(failed.is_empty());
         let missing = host.capabilities_with("nonexistent_bhyve_xyz", "nonexistent_vbox_xyz");
         assert!(missing.is_empty());
         Ok(())

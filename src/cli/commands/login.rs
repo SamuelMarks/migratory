@@ -56,6 +56,16 @@ where
     P: FnMut(&str) -> Result<String, MigratoryError>,
     C: FnMut() -> Result<CloudClient, MigratoryError>,
 {
+    execute_with_deps_dyn(args, home_dir, &mut prompter, &mut cloud_factory)
+}
+
+/// Non-generic implementation of `login` execution with dynamic dependency callbacks.
+fn execute_with_deps_dyn(
+    args: &LoginArgs,
+    home_dir: &std::path::Path,
+    prompter: &mut dyn FnMut(&str) -> Result<String, MigratoryError>,
+    cloud_factory: &mut dyn FnMut() -> Result<CloudClient, MigratoryError>,
+) -> Result<(), MigratoryError> {
     let token_path = home_dir.join("data").join("token");
 
     if args.check {

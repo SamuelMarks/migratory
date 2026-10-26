@@ -44,6 +44,14 @@ pub fn execute(cwd: &Path, args: &RsyncAutoArgs) -> Result<(), MigratoryError> {
     })
 }
 
+/// Dynamic callback type for performing an rsync synced-folder mount.
+type RsyncMountFn<'a> = dyn FnMut(
+        &crate::synced_folder::rsync::RsyncSyncedFolder,
+        &crate::synced_folder::SyncedFolderOptions,
+        &dyn crate::communicator::Communicator,
+    ) -> Result<(), MigratoryError>
+    + 'a;
+
 /// Executes the `rsync-auto` command with a customizable mount callback and watch loop control.
 ///
 /// # Arguments
@@ -73,6 +81,16 @@ where
         &dyn crate::communicator::Communicator,
     ) -> Result<(), MigratoryError>,
 {
+    execute_with_mount_dyn(cwd, args, run_watch_loop, &mut mount_fn)
+}
+
+/// Non-generic implementation of `rsync-auto` execution with a dynamic mount callback.
+fn execute_with_mount_dyn(
+    cwd: &Path,
+    args: &RsyncAutoArgs,
+    run_watch_loop: bool,
+    mount_fn: &mut RsyncMountFn<'_>,
+) -> Result<(), MigratoryError> {
     let env_config = crate::config::load_environment_config(cwd)?;
 
     println!("==> default: Watching for changes to rsync folders...");
@@ -173,6 +191,22 @@ pub fn process_watch_events<F>(
         &dyn crate::communicator::Communicator,
     ) -> Result<(), MigratoryError>,
 {
+    process_watch_events_dyn(cwd, rx, timeout, watch_targets, mount_fn);
+}
+
+/// Non-generic implementation of `process_watch_events` with a dynamic mount callback.
+fn process_watch_events_dyn(
+    cwd: &Path,
+    rx: &std::sync::mpsc::Receiver<notify::Result<Event>>,
+    timeout: Duration,
+    watch_targets: &[(
+        String,
+        crate::synced_folder::SyncedFolderOptions,
+        crate::synced_folder::rsync::RsyncSyncedFolder,
+        crate::config::SshConfig,
+    )],
+    mount_fn: &mut RsyncMountFn<'_>,
+) {
     let mut pending_paths = std::collections::HashSet::new();
 
     loop {
@@ -266,16 +300,15 @@ mod tests {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"
+        let vf = b"
 Vagrant.configure('2') do |config|
   config.ssh.private_key_path = '/tmp/key'
   config.vm.synced_folder '.', '/vagrant', type: 'rsync'
+  config.vm.synced_folder 'nfs_dir', '/nfs', type: 'nfs'
   config.vm.synced_folder 'disabled', '/disabled', disabled: true
 end
-",
-        )?;
+";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = RsyncAutoArgs {
             rsync_chown: true,
@@ -311,14 +344,12 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"
+        let vf = b"
 Vagrant.configure('2') do |config|
   config.vm.synced_folder '.', '/vagrant', type: 'rsync'
 end
-",
-        )?;
+";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = RsyncAutoArgs {
             poll: false,
@@ -336,14 +367,12 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"
+        let vf = b"
 Vagrant.configure('2') do |config|
   config.vm.synced_folder '.', '/vagrant', disabled: true
 end
-",
-        )?;
+";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = RsyncAutoArgs {
             rsync_chown: false,
@@ -440,9 +469,15 @@ end
         let ev_access = Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
         let ev_other_path = Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Any))
             .add_path(std::path::PathBuf::from("/outside/unrelated/file.txt"));
+        let ev_create = Event::new(notify::EventKind::Create(notify::event::CreateKind::Any))
+            .add_path(cwd.join("file_created.txt"));
+        let ev_mod_queued = Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(cwd.join("file_mod.txt"));
         let ev_ok = Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Any))
             .add_path(cwd.join("file3.txt"));
         let _ = tx_ok.send(Ok(ev_access.clone()));
+        let _ = tx_ok.send(Ok(ev_create));
+        let _ = tx_ok.send(Ok(ev_mod_queued));
         let _ = tx_ok.send(Ok(ev_other_path));
         let _ = tx_ok.send(Ok(ev_ok));
         let _ = tx_ok.send(Ok(ev_access));
@@ -450,6 +485,19 @@ end
         process_watch_events(
             cwd,
             &rx_ok,
+            Duration::from_millis(1),
+            &targets,
+            &mut noop_mount,
+        );
+
+        let (tx_rem, rx_rem) = channel();
+        let ev_rem_first = Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Any))
+            .add_path(cwd.join("file_rem.txt"));
+        let _ = tx_rem.send(Ok(ev_rem_first));
+        drop(tx_rem);
+        process_watch_events(
+            cwd,
+            &rx_rem,
             Duration::from_millis(1),
             &targets,
             &mut noop_mount,

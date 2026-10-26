@@ -27,6 +27,14 @@ pub fn execute(cwd: &Path, args: &RsyncArgs) -> Result<(), MigratoryError> {
     })
 }
 
+/// Dynamic callback type for performing an rsync synced-folder mount.
+type RsyncMountFn<'a> = dyn FnMut(
+        &crate::synced_folder::rsync::RsyncSyncedFolder,
+        &crate::synced_folder::SyncedFolderOptions,
+        &dyn crate::communicator::Communicator,
+    ) -> Result<(), MigratoryError>
+    + 'a;
+
 /// Executes the `rsync` command with a customizable mount callback.
 ///
 /// # Arguments
@@ -54,6 +62,15 @@ where
         &dyn crate::communicator::Communicator,
     ) -> Result<(), MigratoryError>,
 {
+    execute_with_mount_dyn(cwd, args, &mut mount_fn)
+}
+
+/// Non-generic implementation of `rsync` execution with a dynamic mount callback.
+fn execute_with_mount_dyn(
+    cwd: &Path,
+    args: &RsyncArgs,
+    mount_fn: &mut RsyncMountFn<'_>,
+) -> Result<(), MigratoryError> {
     let env_config = crate::config::load_environment_config(cwd)?;
 
     println!("==> default: Rsyncing folder...");
@@ -143,15 +160,13 @@ mod tests {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"
+        let vf = b"
 Vagrant.configure('2') do |config|
   config.vm.synced_folder '.', '/vagrant', type: 'rsync'
   config.vm.synced_folder 'disabled', '/disabled', disabled: true
 end
-",
-        )?;
+";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = RsyncArgs {
             rsync_chown: true,
@@ -168,14 +183,12 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"
+        let vf = b"
 Vagrant.configure('2') do |config|
   config.vm.synced_folder '.', '/vagrant', type: 'rsync'
 end
-",
-        )?;
+";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = RsyncArgs {
             rsync_chown: true,
@@ -191,14 +204,12 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"
+        let vf = b"
 Vagrant.configure('2') do |config|
   config.vm.synced_folder '.', '/vagrant', disabled: true
 end
-",
-        )?;
+";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = RsyncArgs {
             rsync_chown: false,
@@ -214,10 +225,8 @@ end
     fn test_execute_rsync_with_other_folder() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"Vagrant.configure('2') do |config|\n  config.vm.synced_folder '.', '/vagrant', type: 'nfs'\nend",
-        )?;
+        let vf = b"Vagrant.configure('2') do |config|\n  config.vm.synced_folder '.', '/vagrant', type: 'nfs'\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
         let args = RsyncArgs {
             rsync_chown: false,
             no_rsync_chown: false,
@@ -231,10 +240,8 @@ end
     fn test_execute_rsync_flags_and_private_key() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"Vagrant.configure('2') do |config|\n  config.ssh.private_key_path = '/tmp/key'\n  config.vm.synced_folder '.', '/vagrant', type: 'rsync'\nend",
-        )?;
+        let vf = b"Vagrant.configure('2') do |config|\n  config.ssh.private_key_path = '/tmp/key'\n  config.vm.synced_folder '.', '/vagrant', type: 'rsync'\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         // Test with no_rsync_chown: true
         let args_no_chown = RsyncArgs {
@@ -257,10 +264,8 @@ end
     fn test_execute_rsync_prepare_failure() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            b"Vagrant.configure('2') do |config|\n  config.vm.synced_folder '/nonexistent/path/for/rsync', '/vagrant', type: 'rsync'\nend",
-        )?;
+        let vf1 = b"Vagrant.configure('2') do |config|\n  config.vm.synced_folder '/nonexistent/path/for/rsync', '/vagrant', type: 'rsync'\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf1)?;
 
         let args = RsyncArgs {
             rsync_chown: false,
@@ -270,10 +275,8 @@ end
         assert!(result.is_err());
 
         // Test with private_key_path configured in Vagrantfile
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|\n  config.ssh.private_key_path = '/tmp/id_rsa'\n  config.vm.synced_folder '.', '/vagrant', type: 'rsync'\nend\n",
-        )?;
+        let vf2 = "Vagrant.configure('2') do |config|\n  config.ssh.private_key_path = '/tmp/id_rsa'\n  config.vm.synced_folder '.', '/vagrant', type: 'rsync'\nend\n";
+        fs::write(cwd.join("Vagrantfile"), vf2)?;
         assert!(execute_with_mount(cwd, &args, |_, _, _| Ok(())).is_ok());
         Ok(())
     }

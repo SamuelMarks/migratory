@@ -224,7 +224,7 @@ impl Guest for WindowsGuest {
             let verify_cmd = "powershell -NoProfile -Command \"(Get-Service -Name 'VBoxService' -ErrorAction SilentlyContinue).Status\"";
             let verify_out = comm.execute(verify_cmd).unwrap_or_default();
             let status = verify_out.trim().to_lowercase();
-            if status.is_empty() && !status.contains("running") && !status.contains("stopped") {
+            if status.is_empty() {
                 let disk_check = "powershell -NoProfile -Command \"Test-Path '${env:ProgramFiles}\\Oracle\\VirtualBox Guest Additions\\VBoxService.exe'\"";
                 let exists = comm.execute(disk_check).unwrap_or_default();
                 if !exists.trim().eq_ignore_ascii_case("true") {

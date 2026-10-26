@@ -267,16 +267,14 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf = r#"
         Vagrant.configure("2") do |config|
         config.vm.box = "ubuntu/focal64"
         config.vm.provider "virtualbox" do |v|
         end
         end
-        "#,
-        )?;
+        "#;
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let state_dir = cwd.join(".vagrant").join("machines").join("default");
         fs::create_dir_all(&state_dir)?;
@@ -312,14 +310,12 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf = r#"
         Vagrant.configure("2") do |config|
           config.vm.provider "docker"
         end
-        "#,
-        )?;
+        "#;
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
         state_mgr.write_id("default", "docker", "docker-id-999")?;
@@ -335,14 +331,12 @@ end
     fn test_execute_resume_non_virtualbox_read_id_error() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf = r#"
         Vagrant.configure("2") do |config|
           config.vm.provider "qemu"
         end
-        "#,
-        )?;
+        "#;
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let id_dir = cwd
             .join(".vagrant")
@@ -355,6 +349,10 @@ end
         let args = mock_args();
         let result = execute(cwd, &args);
         assert!(result.is_err());
+
+        let ok_prov = crate::provider::virtualbox::VirtualBoxProvider::new(Some("id".to_string()))
+            .with_runner(|_| Ok(String::new()));
+        try_resume(&ok_prov, "default", &ConsoleUi);
         Ok(())
     }
 }

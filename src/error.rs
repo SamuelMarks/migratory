@@ -343,14 +343,13 @@ mod tests {
         let int_res = "not_an_int".parse::<i32>().map_err(MigratoryError::from);
         assert!(int_res.is_err_and(|e| e.to_string().contains("Integer parse error:")));
 
-        let utf8_res = String::from_utf8(vec![0xFF, 0xFE]);
-        assert!(utf8_res.is_err_and(|e| {
-            let valid_err = e.utf8_error();
+        let _ = String::from_utf8(vec![0xFF, 0xFE]).map_err(|utf8_err| {
+            let valid_err = utf8_err.utf8_error();
             let mig_str_utf8: MigratoryError = valid_err.into();
-            let mig_utf8: MigratoryError = e.into();
-            mig_str_utf8.to_string().contains("UTF-8 slice error:")
-                && mig_utf8.to_string().contains("UTF-8 conversion error:")
-        }));
+            let mig_utf8: MigratoryError = utf8_err.into();
+            assert!(mig_str_utf8.to_string().contains("UTF-8 slice error:"));
+            assert!(mig_utf8.to_string().contains("UTF-8 conversion error:"));
+        });
 
         use base64::Engine;
         let b64_res = base64::engine::general_purpose::STANDARD
@@ -383,9 +382,15 @@ mod tests {
 
         let err_val: Result<i32, &str> = Err("boom");
         let wrapped = err_val.wrap_err("context");
-        assert!(matches!(wrapped, Err(MigratoryError::Generic(ref s)) if s == "context: boom"));
+        assert_eq!(
+            wrapped.err().map(|e| e.to_string()),
+            Some("Generic error: context: boom".to_string())
+        );
 
         let wrapped_gen = err_val.wrap_generic();
-        assert!(matches!(wrapped_gen, Err(MigratoryError::Generic(ref s)) if s == "boom"));
+        assert_eq!(
+            wrapped_gen.err().map(|e| e.to_string()),
+            Some("Generic error: boom".to_string())
+        );
     }
 }

@@ -294,14 +294,10 @@ mod tests {
 
         fs::write(source_dir.join("box.ovf"), "<ovf/>")?;
         fs::write(source_dir.join("box-disk1.vmdk"), "dummy-vmdk-bytes")?;
-        fs::write(
-            source_dir.join("metadata.json"),
-            r#"{"provider": "virtualbox"}"#,
-        )?;
-        fs::write(
-            source_dir.join("Vagrantfile"),
-            "Vagrant.configure(\"2\") do |config|\n  config.vm.provider :virtualbox\nend\n",
-        )?;
+        let meta = r#"{"provider": "virtualbox"}"#;
+        fs::write(source_dir.join("metadata.json"), meta)?;
+        let vf = "Vagrant.configure(\"2\") do |config|\n  config.vm.provider :virtualbox\nend\n";
+        fs::write(source_dir.join("Vagrantfile"), vf)?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -504,10 +500,8 @@ mod tests {
             .join("1.0.0")
             .join("virtualbox");
         fs::create_dir_all(&source_dir)?;
-        fs::write(
-            source_dir.join("Vagrantfile"),
-            "Vagrant.configure(\"2\") do |config|\nend\n",
-        )?;
+        let vf = "Vagrant.configure(\"2\") do |config|\nend\n";
+        fs::write(source_dir.join("Vagrantfile"), vf)?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),
@@ -632,10 +626,8 @@ mod tests {
         fs::create_dir_all(&source_dir)?;
 
         fs::write(source_dir.join("box-disk1.vmdk"), "dummy-vmdk-bytes")?;
-        fs::write(
-            source_dir.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c|\n  c.vm.provider :virtualbox\nend\n",
-        )?;
+        let vf = "Vagrant.configure('2') do |c|\n  c.vm.provider :virtualbox\nend\n";
+        fs::write(source_dir.join("Vagrantfile"), vf)?;
 
         let args = MutateArgs {
             box_name: Some("test/box".to_string()),

@@ -159,15 +159,6 @@ impl Provider for HypervProvider {
                 continue;
             }
 
-            // Automatically fallback to SMB for synced folders on Hyper-V
-            if let Some(ref t) = sf.folder_type
-                && *t != crate::config::SyncedFolderType::Smb
-                && *t != crate::config::SyncedFolderType::Rsync
-            {
-                // Only skip if explicitly not smb or rsync (and rsync is handled by rsync)
-                // If it's vboxsf, nfs, we fallback to smb for Hyper-V.
-            }
-
             let share_name = sf
                 .guest_path
                 .to_string_lossy()

@@ -267,10 +267,8 @@ mod tests {
     fn test_execute_upload_file_not_found() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c| c.vm.define 'default' end",
-        )?;
+        let vf = "Vagrant.configure('2') do |c| c.vm.define 'default' end";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = UploadArgs {
             source: Some("nonexistent_file".to_string()),

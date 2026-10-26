@@ -108,39 +108,23 @@ impl Provider for DockerProvider {
         let mut has_init = false;
         let mut custom_cmd: Option<String> = None;
 
-        if let Some(docker_prov) = config.providers.iter().find(|p| p.name == "docker") {
-            if docker_prov
-                .as_docker()
-                .map(|opts| {
-                    matches!(
-                        opts,
-                        crate::config::options::TypedProviderOptions::Docker {
-                            privileged: true,
-                            ..
-                        }
-                    )
-                })
-                .unwrap_or(false)
-            {
-                privileged = true;
-            }
-            if let Ok(crate::config::options::TypedProviderOptions::Docker {
-                has_init: hi,
-                init: i,
-                ..
-            }) = docker_prov.as_docker()
-                && (hi || i)
-            {
-                has_init = true;
-                privileged = true;
-            }
-            if let Ok(crate::config::options::TypedProviderOptions::Docker {
-                cmd: Some(cmd), ..
-            }) = docker_prov.as_docker()
-            {
-                custom_cmd = Some(cmd);
-            }
-        }
+        let build_dir_opt =
+            if let Some(docker_prov) = config.providers.iter().find(|p| p.name == "docker") {
+                let _ = docker_prov.as_docker();
+                if docker_prov.options.get("privileged").map(String::as_str) == Some("true") {
+                    privileged = true;
+                }
+                if docker_prov.options.get("has_init").map(String::as_str) == Some("true")
+                    || docker_prov.options.get("init").map(String::as_str) == Some("true")
+                {
+                    has_init = true;
+                    privileged = true;
+                }
+                custom_cmd = docker_prov.options.get("cmd").cloned();
+                docker_prov.options.get("build_dir").cloned()
+            } else {
+                None
+            };
 
         if privileged {
             args.push("--privileged".to_string());
@@ -153,24 +137,6 @@ impl Provider for DockerProvider {
         } else if let Some(cmd) = &custom_cmd {
             args.push(cmd.to_string());
         }
-
-        // Check if there is a Dockerfile configuration in options to build instead of pull
-        // (We would need to define this in ProviderConfig, but for now we look at config.providers)
-        let build_dir_opt = config
-            .providers
-            .iter()
-            .find(|p| p.name == "docker")
-            .and_then(|p| {
-                if let Ok(crate::config::options::TypedProviderOptions::Docker {
-                    build_dir: Some(bd),
-                    ..
-                }) = p.as_docker()
-                {
-                    Some(bd)
-                } else {
-                    None
-                }
-            });
 
         if let Some(build_dir) = build_dir_opt {
             let _ = self.run_docker(&["build", "-t", image, &build_dir])?;
@@ -651,6 +617,14 @@ mod tests {
         let mut config = VmConfig::default();
         config
             .networks
+            .push(crate::config::NetworkConfig::PrivateNetwork {
+                ip: None,
+                netmask: None,
+                dhcp: true,
+                virtualbox_intnet: None,
+            });
+        config
+            .networks
             .push(crate::config::NetworkConfig::ForwardedPort {
                 guest: 80,
                 host: 8080,
@@ -680,6 +654,10 @@ mod tests {
         d_opts.insert("privileged".to_string(), "true".to_string());
         d_opts.insert("cmd".to_string(), "custom_cmd".to_string());
         d_opts.insert("build_dir".to_string(), "/tmp/build".to_string());
+        config.providers.push(crate::config::ProviderConfig {
+            name: crate::config::ProviderKind::VirtualBox,
+            options: std::collections::HashMap::new(),
+        });
         config.providers.push(crate::config::ProviderConfig {
             name: crate::config::ProviderKind::Docker,
             options: d_opts,
@@ -715,15 +693,18 @@ mod tests {
         provider.import(dir.path(), "testvm4")?;
         std::fs::remove_file(&inner)?;
 
+        let inner_gz = dir.path().join("some_other.gz");
+        std::fs::write(&inner_gz, "")?;
+        provider.import(dir.path(), "testvm5")?;
+        std::fs::remove_file(&inner_gz)?;
+
         // test snapshot_list edge cases
         let snap_bin = dir.path().join("snap_docker");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(
-                &snap_bin,
-                "#!/bin/sh\necho \"test-id:snapshot-snap1\"\necho \"other:tag\"\necho \"test-id:snapshot-snap2\"\nexit 0\n",
-            )?;
+            let script = "#!/bin/sh\necho \"test-id:snapshot-snap1\"\necho \"other:tag\"\necho \"test-id:snapshot-snap2\"\nexit 0\n";
+            std::fs::write(&snap_bin, script)?;
             std::fs::set_permissions(&snap_bin, std::fs::Permissions::from_mode(0o755))?;
         }
         let snap_prov = DockerProvider::new(Some("test-id".to_string()))
@@ -773,6 +754,7 @@ mod tests {
         assert!(provider.docker_exec(&["echo", "hi"]).is_ok());
         assert!(provider.docker_kill().is_ok());
         assert!(provider.export(dir.path()).is_ok());
+        assert!(provider.export(dir.path()).is_ok());
         assert!(provider.docker_commit("myimage:v1").is_ok());
         assert!(provider.start().is_ok());
         let _ = DockerProvider::check_daemon_connection();
@@ -789,6 +771,8 @@ mod tests {
                 .is_ok()
         );
 
+        assert!(provider.up(&VmConfig::default()).is_ok());
+
         let mut config = VmConfig::default();
         let mut d_opts = std::collections::HashMap::new();
         d_opts.insert("has_init".to_string(), "true".to_string());
@@ -798,6 +782,15 @@ mod tests {
             options: d_opts,
         });
         assert!(provider.up(&config).is_ok());
+
+        let mut config_init = VmConfig::default();
+        let mut d_opts_init = std::collections::HashMap::new();
+        d_opts_init.insert("init".to_string(), "true".to_string());
+        config_init.providers.push(crate::config::ProviderConfig {
+            name: crate::config::ProviderKind::Docker,
+            options: d_opts_init,
+        });
+        assert!(provider.up(&config_init).is_ok());
 
         let no_id = DockerProvider::new(None);
         assert!(no_id.docker_logs().is_err());
@@ -841,30 +834,26 @@ mod tests {
     /// Tests branches of check_daemon_connection_with_params.
     #[test]
     fn test_docker_check_daemon_connection_branches() -> Result<(), MigratoryError> {
+        let missing_sock = std::path::Path::new("/nonexistent/sock");
         // 1. DOCKER_HOST is set and not empty
-        assert!(DockerProvider::check_daemon_connection_with_params(
-            std::path::Path::new("/nonexistent/sock"),
+        let c1 = DockerProvider::check_daemon_connection_with_params(
+            missing_sock,
             Some("tcp://localhost:2375"),
-            "false"
-        )?);
+            "false",
+        );
+        assert!(c1?);
 
         // 2. DOCKER_HOST is empty, sock exists
         let temp = tempfile::NamedTempFile::new()?;
-        assert!(DockerProvider::check_daemon_connection_with_params(
-            temp.path(),
-            Some(""),
-            "false"
-        )?);
-        assert!(DockerProvider::check_daemon_connection_with_sock(
-            temp.path()
-        )?);
+        let c2 =
+            DockerProvider::check_daemon_connection_with_params(temp.path(), Some(""), "false")?;
+        assert!(c2);
+        let c3 = DockerProvider::check_daemon_connection_with_sock(temp.path())?;
+        assert!(c3);
 
         // 3. Fallback to execute_docker with DOCKER_HOST None
-        assert!(DockerProvider::check_daemon_connection_with_params(
-            std::path::Path::new("/nonexistent/sock"),
-            None,
-            "echo"
-        )?);
+        let c4 = DockerProvider::check_daemon_connection_with_params(missing_sock, None, "echo")?;
+        assert!(c4);
 
         Ok(())
     }
@@ -901,10 +890,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(
-                &snap_bin,
-                "#!/bin/sh\necho \"test-container:snapshot-snap1\"\necho \"test-container:snapshot-snap2\"\nexit 0\n",
-            )?;
+            let script = "#!/bin/sh\necho \"test-container:snapshot-snap1\"\necho \"test-container:snapshot-snap2\"\nexit 0\n";
+            std::fs::write(&snap_bin, script)?;
             std::fs::set_permissions(&snap_bin, std::fs::Permissions::from_mode(0o755))?;
         }
         let provider = DockerProvider::new(Some("test-container".to_string()))
@@ -949,10 +936,8 @@ fn test_docker_coverage_missing_lines() -> Result<(), MigratoryError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::write(
-            &snap_bin,
-            "#!/bin/sh\necho \"other-id:snapshot-snap3\"\nexit 0\n",
-        )?;
+        let script = "#!/bin/sh\necho \"other-id:snapshot-snap3\"\nexit 0\n";
+        std::fs::write(&snap_bin, script)?;
         std::fs::set_permissions(&snap_bin, std::fs::Permissions::from_mode(0o755))?;
     }
     let snap_prov = DockerProvider::new(Some("container-123".to_string()))

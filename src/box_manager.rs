@@ -655,15 +655,13 @@ impl BoxManager {
             }
         }
 
-        let cloud_res = if let Some(ref client) = self.cloud_client {
-            Ok(client.clone())
+        let cloud = if let Some(ref client) = self.cloud_client {
+            client.clone()
         } else {
-            crate::cloud::CloudClient::new()
+            crate::cloud::CloudClient::new()?
         };
 
-        if let Ok(cloud) = cloud_res
-            && let Ok(meta) = cloud.fetch_metadata(name)
-        {
+        if let Ok(meta) = cloud.fetch_metadata(name) {
             for v in &meta.versions {
                 if let Some(remote_ver) = Version::parse(&v.version)
                     && remote_ver > latest_local
@@ -1023,7 +1021,8 @@ mod tests {
             .join("qemu")
             .join("metadata.json");
         let qemu_meta_str = fs::read_to_string(qemu_meta_path)?;
-        assert!(qemu_meta_str.contains(r#""provider""#) && qemu_meta_str.contains(r#""qemu""#));
+        assert!(qemu_meta_str.contains(r#""provider""#));
+        assert!(qemu_meta_str.contains(r#""qemu""#));
 
         // 3. Box with provider "qemu" added as "libvirt" (reverse aliased and rewritten)
         let box_qemu = make_box("qemu.box", br#"{"provider": "qemu"}"#)?;
@@ -1259,13 +1258,13 @@ mod tests {
 
         std::thread::spawn(move || {
             use std::io::{Read, Write};
-            if let Ok((mut stream, _)) = listener.accept() {
+            let _ = listener.accept().map(|(mut stream, _)| {
                 let mut buf = [0u8; 512];
                 let _ = stream.read(&mut buf);
                 let _ = stream
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\npartial_payload");
                 let _ = stream.flush();
-            }
+            });
         });
 
         let url = format!("http://127.0.0.1:{}/truncated.box", port);
@@ -1922,11 +1921,12 @@ mod extra_coverage_tests {
         assert!(!manager.outdated("my/box")?);
 
         // Setup local box directories for my/box:
-        // "1.0.0", "0.5.0" (lower), and "not-a-ver"
+        // "0.5.0", "1.0.0", "0.2.0" (ensures both v > latest_local true and false are hit), and "not-a-ver"
         let safe_name = "my-VAGRANTSLASH-box";
         let box_dir = manager.global_boxes_dir.join(safe_name);
-        fs::create_dir_all(box_dir.join("1.0.0/virtualbox"))?;
         fs::create_dir_all(box_dir.join("0.5.0/virtualbox"))?;
+        fs::create_dir_all(box_dir.join("1.0.0/virtualbox"))?;
+        fs::create_dir_all(box_dir.join("0.2.0/virtualbox"))?;
         fs::create_dir_all(box_dir.join("not-a-ver/virtualbox"))?;
 
         let box_bytes = create_dummy_box_bytes()?;
@@ -2102,10 +2102,11 @@ mod extra_coverage_tests {
         fs::create_dir_all(fail_add_dir.join("1.0.0/virtualbox"))?;
         assert!(manager.update("fail-add", None).is_err());
 
-        // Test outdated when box_dir exists but is a file (read_dir fails)
+        // Test outdated and repackage when box_dir exists but is a file (read_dir fails)
         let file_box_path = manager.global_boxes_dir.join("file-box");
         fs::write(&file_box_path, b"not a dir")?;
         assert!(!manager.outdated("file-box")?);
+        assert!(manager.repackage("file-box", "virtualbox").is_err());
 
         // Also exercise default CloudClient::new branch when cloud_client is None
         let manager_no_client = BoxManager::new(dir.path());

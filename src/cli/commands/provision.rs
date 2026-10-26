@@ -33,6 +33,10 @@ fn get_machine<'a>(
         .ok_or_else(|| MigratoryError::NotFound(format!("Machine '{name}' not found")))
 }
 
+/// Dynamic factory closure type for instantiating a [`provider::Provider`].
+type ProviderFactoryFn =
+    dyn Fn(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError> + Sync;
+
 /// Executes the `provision` command.
 ///
 /// # Arguments
@@ -49,6 +53,15 @@ fn get_machine<'a>(
 /// Returns a [`MigratoryError`] if the environment is locked, the `Vagrantfile` cannot be found,
 /// dependency resolution fails, or triggers fail.
 pub fn execute(cwd: &Path, args: &ProvisionArgs) -> Result<(), MigratoryError> {
+    execute_with_provider(cwd, args, &|name, id| provider::get_provider(name, id))
+}
+
+/// Executes the `provision` command with an injectable provider factory.
+fn execute_with_provider(
+    cwd: &Path,
+    args: &ProvisionArgs,
+    provider_factory: &ProviderFactoryFn,
+) -> Result<(), MigratoryError> {
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
     let _guard = lock_file
@@ -73,7 +86,7 @@ pub fn execute(cwd: &Path, args: &ProvisionArgs) -> Result<(), MigratoryError> {
             .map_or("virtualbox", |p| p.name.as_str());
 
         let machine_id = state_mgr.read_id(name, target_provider_name)?;
-        let p = provider::get_provider(target_provider_name, machine_id)?;
+        let p = provider_factory(target_provider_name, machine_id)?;
 
         let state = p.status().unwrap_or(crate::provider::MachineState::Unknown(
             "unknown".to_string(),
@@ -356,11 +369,8 @@ end
     fn test_execute_provision_read_id_and_unsupported_provider() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-end",
-        )?;
+        let vf1 = "Vagrant.configure('2') do |config|\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf1)?;
 
         let id_dir = cwd
             .join(".vagrant")
@@ -380,12 +390,9 @@ end",
 
         let dir2 = tempdir()?;
         let cwd2 = dir2.path();
-        std::fs::write(
-            cwd2.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-  config.vm.provider 'unsupported_prov'
-end",
-        )?;
+        let vf2 =
+            "Vagrant.configure('2') do |config|\n  config.vm.provider 'unsupported_prov'\nend";
+        std::fs::write(cwd2.join("Vagrantfile"), vf2)?;
         let state_dir2 = cwd2
             .join(".vagrant")
             .join("machines")
@@ -473,10 +480,8 @@ end
         let port = listener.local_addr()?.port();
         std::thread::spawn(move || while listener.accept().is_ok() {});
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            format!(
-                r#"
+        let vf = format!(
+            r#"
 Vagrant.configure("2") do |config|
   config.ssh.port = {port}
   config.vm.provision "shell", inline: "echo 'hello'"
@@ -489,8 +494,8 @@ Vagrant.configure("2") do |config|
   config.vm.provision "unknown_prov"
 end
         "#
-            ),
-        )?;
+        );
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let state_dir = cwd
             .join(".vagrant")
@@ -515,11 +520,8 @@ end
     fn test_execute_provision_target_machine_not_found() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config|\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = ProvisionArgs {
             provision_with: None,
@@ -551,18 +553,16 @@ end",
         let port = listener.local_addr()?.port();
         std::thread::spawn(move || while listener.accept().is_ok() {});
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            format!(
-                r#"
+        let vf = format!(
+            r#"
 Vagrant.configure("2") do |config|
   config.ssh.port = {port}
   config.vm.provision "shell", inline: "echo 'hello'"
   config.vm.provision "file", source: "{abs_src}", destination: "bar"
 end
         "#
-            ),
-        )?;
+        );
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = ProvisionArgs {
             provision_with: Some("shell,file".to_string()),
@@ -587,14 +587,12 @@ end
         std::fs::create_dir_all(&id_dir)?;
         std::fs::write(id_dir.join("id"), "mock_id")?;
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf1 = r#"
     Vagrant.configure("2") do |config|
     config.vm.provision "shell", env: "not a valid json"
     end
-    "#,
-        )?;
+    "#;
+        fs::write(cwd.join("Vagrantfile"), vf1)?;
 
         let state_dir = cwd.join(".vagrant").join("machines").join("default");
         fs::create_dir_all(&state_dir)?;
@@ -609,15 +607,13 @@ end
 
         assert!(execute(cwd, &args).is_err());
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf2 = r#"
     Vagrant.configure("2") do |config|
     config.ssh.port = 1
     config.vm.provision "shell", inline: "echo hi"
     end
-    "#,
-        )?;
+    "#;
+        fs::write(cwd.join("Vagrantfile"), vf2)?;
 
         assert!(execute(cwd, &args).is_err());
         Ok(())
@@ -667,18 +663,16 @@ end
         let port = listener.local_addr()?.port();
         std::thread::spawn(move || while listener.accept().is_ok() {});
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            format!(
-                r#"
+        let vf = format!(
+            r#"
 Vagrant.configure("2") do |config|
 config.ssh.port = {port}
 config.vm.provision "shell", inline: "echo 'hello'"
 config.vm.provision "file", source: "foo", destination: "bar"
 end
 "#
-            ),
-        )?;
+        );
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = crate::cli::ProvisionArgs {
             provision_with: Some("shell".to_string()),
@@ -707,17 +701,15 @@ end
         let port = listener.local_addr()?.port();
         std::thread::spawn(move || while listener.accept().is_ok() {});
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            format!(
-                r#"
+        let vf = format!(
+            r#"
     Vagrant.configure("2") do |config|
     config.ssh.port = {port}
     config.vm.provision "shell", inline: "echo hello"
     end
     "#
-            ),
-        )?;
+        );
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let state_dir = cwd.join(".vagrant").join("machines").join("default");
         fs::create_dir_all(&state_dir)?;
@@ -748,21 +740,12 @@ end
         std::fs::create_dir_all(&id_dir)?;
         std::fs::write(id_dir.join("id"), "mock_id")?;
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        std::thread::spawn(move || while listener.accept().is_ok() {});
-
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            format!(
-                r#"
+        let vf = r#"
     Vagrant.configure("2") do |config|
-    config.ssh.port = {port}
     config.vm.provision "shell", inline: "echo hello", name: "my_shell"
     end
-    "#
-            ),
-        )?;
+    "#;
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let state_dir = cwd.join(".vagrant").join("machines").join("default");
         std::fs::create_dir_all(&state_dir)?;
@@ -775,7 +758,12 @@ end
             no_parallel: false,
         };
 
-        let result = execute(cwd, &args);
+        let result = execute_with_provider(cwd, &args, &|_, id| {
+            Ok(Box::new(
+                crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                    .with_runner(|_| Ok("VMState=\"running\"\n".to_string())),
+            ))
+        });
         assert!(result.is_ok());
 
         // Test with completely empty Vagrantfile so machines.is_empty() branch is covered

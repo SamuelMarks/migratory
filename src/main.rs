@@ -642,7 +642,7 @@ mod tests {
             }
         }
 
-        // Also test live=true dispatch on safe commands (Version, ListCommands, Validate)
+        // Also test live=true dispatch on safe commands (Version, ListCommands, Validate, Plugin List)
         assert!(execute_command_in_env(&Commands::Version, dir.path(), dir.path(), true).is_ok());
         assert!(
             execute_command_in_env(&Commands::ListCommands, dir.path(), dir.path(), true).is_ok()
@@ -652,6 +652,15 @@ mod tests {
                 &Commands::Validate(cli::ValidateArgs {
                     ignore_provider: true,
                 }),
+                dir.path(),
+                dir.path(),
+                true,
+            )
+            .is_ok()
+        );
+        assert!(
+            execute_command_in_env(
+                &Commands::Plugin(PluginCommands::List(cli::PluginListArgs { local: false })),
                 dir.path(),
                 dir.path(),
                 true,

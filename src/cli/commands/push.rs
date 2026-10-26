@@ -62,9 +62,7 @@ impl IgnoreFilter {
                 let clean = trimmed.trim_end_matches('/');
                 let escaped = regex::escape(clean);
                 let pat = escaped.replace(r"\*", ".*").replace(r"\?", ".");
-                if let Ok(re) = regex::Regex::new(&format!("(^|/){}(/|$)", pat)) {
-                    patterns.push(re);
-                }
+                patterns.extend(regex::Regex::new(&format!("(^|/){}(/|$)", pat)));
             }
         }
 
@@ -699,8 +697,8 @@ impl SftpBackend for RealSftpBackend {
 }
 
 /// Helper to recursively upload a local directory to an SFTP backend.
-fn upload_directory_sftp<B: SftpBackend>(
-    backend: &mut B,
+fn upload_directory_sftp(
+    backend: &mut dyn SftpBackend,
     base_dir: &Path,
     current_dir: &Path,
     remote_base: &str,
@@ -769,10 +767,7 @@ impl SftpPush {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if directory creation or file upload fails.
-    pub fn deploy_with_backend<B: SftpBackend>(
-        &self,
-        backend: &mut B,
-    ) -> Result<(), MigratoryError> {
+    pub fn deploy_with_backend(&self, backend: &mut dyn SftpBackend) -> Result<(), MigratoryError> {
         backend.mkdir(&self.destination, 0o755)?;
         let filter = IgnoreFilter::new(&self.dir, false);
         upload_directory_sftp(backend, &self.dir, &self.dir, &self.destination, &filter)?;
@@ -1265,72 +1260,69 @@ pub mod tests {
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let addr = listener.local_addr()?;
             let shutdown = Arc::new(AtomicBool::new(false));
-            let shutdown_clone = Arc::clone(&shutdown);
+            let _shutdown_clone = Arc::clone(&shutdown);
 
             let handle = thread::spawn(move || {
-                if let Ok((mut stream, _)) = listener.accept()
-                    && let Ok(cloned) = stream.try_clone()
-                {
-                    let mut reader = BufReader::new(cloned);
-                    let _ = stream.write_all(b"220-Welcome\n220 Mock FTP ready\n");
+                for mut stream in listener.incoming().take(1).flatten() {
+                    let _ = stream.try_clone().map(|cloned| {
+                        let mut reader = BufReader::new(cloned);
+                        let _ = stream.write_all(b"-\nabc continuation\n220-Welcome\n220\n");
 
-                    let mut data_listener: Option<TcpListener> = None;
+                        let mut data_listener: Option<TcpListener> = None;
 
-                    while !shutdown_clone.load(Ordering::Relaxed) {
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                            break;
-                        }
-                        let trimmed = line.trim();
-                        if trimmed.starts_with("USER") {
-                            let _ = stream.write_all(b"331 Password required\n");
-                        } else if trimmed.starts_with("PASS") {
-                            if fail_auth {
-                                let _ = stream.write_all(b"530 Authentication failed\n");
-                            } else {
-                                let _ = stream.write_all(b"230 User logged in\n");
+                        loop {
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                break;
                             }
-                        } else if trimmed == "TYPE I" {
-                            let _ = stream.write_all(b"200 Type set to I\n");
-                        } else if trimmed == "AUTH TLS" {
-                            let _ = stream.write_all(b"234 Enabling TLS Connection\n");
-                        } else if trimmed.starts_with("CWD") {
-                            let _ = stream.write_all(b"250 Directory changed\n");
-                        } else if trimmed == "CDUP" {
-                            let _ = stream.write_all(b"200 Command okay\n");
-                        } else if trimmed == "PASV" {
-                            if let Ok(dlistener) = TcpListener::bind("127.0.0.1:0")
-                                && let Ok(daddr) = dlistener.local_addr()
-                            {
-                                let dport = daddr.port();
-                                let p1 = dport / 256;
-                                let p2 = dport % 256;
-                                data_listener = Some(dlistener);
-                                let resp = format!(
-                                    "227 Entering Passive Mode (127,0,0,1,{},{})\n",
-                                    p1, p2
-                                );
-                                let _ = stream.write_all(resp.as_bytes());
-                            }
-                        } else if trimmed.starts_with("STOR") {
-                            if fail_stor {
+                            let trimmed = line.trim();
+                            if trimmed.starts_with("USER") {
+                                let _ = stream.write_all(b"331 Password required\n");
+                            } else if trimmed.starts_with("PASS") {
+                                if fail_auth {
+                                    let _ = stream.write_all(b"530 Authentication failed\n");
+                                } else {
+                                    let _ = stream.write_all(b"230 User logged in\n");
+                                }
+                            } else if trimmed == "TYPE I" {
+                                let _ = stream.write_all(b"200 Type set to I\n");
+                            } else if trimmed == "AUTH TLS" {
+                                let _ = stream.write_all(b"234 Enabling TLS Connection\n");
+                            } else if trimmed.starts_with("CWD") {
+                                let _ = stream.write_all(b"250 Directory changed\n");
+                            } else if trimmed == "CDUP" {
+                                let _ = stream.write_all(b"200 Command okay\n");
+                            } else if trimmed == "PASV" {
+                                let _ = TcpListener::bind("127.0.0.1:0").map(|dlistener| {
+                                    let _ = dlistener.local_addr().map(|daddr| {
+                                        let dport = daddr.port();
+                                        let p1 = dport / 256;
+                                        let p2 = dport % 256;
+                                        let resp = format!(
+                                            "227 Entering Passive Mode (127,0,0,1,{},{})\n",
+                                            p1, p2
+                                        );
+                                        stream.write_all(resp.as_bytes())
+                                    });
+                                    data_listener.replace(dlistener)
+                                });
+                            } else if fail_stor {
                                 let _ = stream.write_all(b"550 Permission denied\n");
                             } else {
                                 let _ =
                                     stream.write_all(b"150 Opening BINARY mode data connection\n");
-                                if let Some(dlistener) = data_listener.take()
-                                    && let Ok((mut dstream, _)) = dlistener.accept()
-                                {
-                                    let mut buf = Vec::new();
-                                    let _ = dstream.read_to_end(&mut buf);
-                                }
+                                let _ = data_listener.take().map(|dlistener| {
+                                    for mut dstream in dlistener.incoming().take(1).flatten() {
+                                        let mut buf = Vec::new();
+                                        let _ = dstream.read_to_end(&mut buf);
+                                    }
+                                    0
+                                });
                                 let _ = stream.write_all(b"226 Transfer complete\n");
                             }
-                        } else {
-                            let _ = stream.write_all(b"221 Goodbye\n");
-                            break;
                         }
-                    }
+                        0
+                    });
                 }
             });
 
@@ -1346,9 +1338,7 @@ pub mod tests {
         fn drop(&mut self) {
             self.shutdown.store(true, Ordering::Relaxed);
             let _ = TcpStream::connect(self.addr);
-            if let Some(h) = self.handle.take() {
-                let _ = h.join();
-            }
+            let _ = self.handle.take().map(std::thread::JoinHandle::join);
         }
     }
 
@@ -1749,10 +1739,8 @@ end
         let dir = tempdir()?;
         let root = dir.path();
 
-        fs::write(
-            root.join(".vagrantignore"),
-            "# Comment line\n\n*.log\nsecret.key\ntemp/\n",
-        )?;
+        let ignore_content = "# Comment line\n\n*.log\nsecret.key\ntemp/\n";
+        fs::write(root.join(".vagrantignore"), ignore_content)?;
 
         let filter_no_vcs = IgnoreFilter::new(root, false);
         let filter_with_vcs = IgnoreFilter::new(root, true);
@@ -2226,10 +2214,31 @@ end
         let env = crate::action::Environment::new();
         assert!(sftp_push_live.deploy(&env).is_ok());
 
-        // Test RealSftpBackend missing key failure
+        // Test RealSftpBackend missing key failure and valid key / password fallback branches
         assert!(
             RealSftpBackend::connect("127.0.0.1", port, "u", None, Some("/nonexistent/key"))
                 .is_err()
+        );
+        assert!(
+            RealSftpBackend::connect(
+                "127.0.0.1",
+                port,
+                "u",
+                Some("pass"),
+                Some("/nonexistent/key")
+            )
+            .is_ok()
+        );
+        let existing_key = cwd.join("sftp_file.txt");
+        assert!(
+            RealSftpBackend::connect(
+                "127.0.0.1",
+                port,
+                "u",
+                None,
+                Some(&existing_key.to_string_lossy())
+            )
+            .is_ok()
         );
 
         // Test SftpPush validation errors
@@ -2279,57 +2288,82 @@ end
         assert!(ftp_empty_dest.deploy(&env).is_err());
 
         // Custom FTP server responses for greeting!=220, EOF, PASV!=227, PASV bad parts, CWD->MKD
-        let run_scripted_ftp = |lines: Vec<&'static str>| -> Result<u16, MigratoryError> {
+        let run_scripted_ftp = |lines: Vec<String>| -> Result<u16, MigratoryError> {
             let l = TcpListener::bind("127.0.0.1:0")?;
             let p = l.local_addr()?.port();
             thread::spawn(move || {
-                if let Ok((mut s, _)) = l.accept()
-                    && let Ok(c) = s.try_clone()
-                {
-                    let mut r = BufReader::new(c);
-                    for (idx, resp) in lines.into_iter().enumerate() {
-                        if idx > 0 {
-                            let mut cmd = String::new();
-                            let _ = r.read_line(&mut cmd);
+                for mut s in l.incoming().take(1).flatten() {
+                    let _ = s.try_clone().map(|c| {
+                        let mut r = BufReader::new(c);
+                        for (idx, resp) in lines.iter().enumerate() {
+                            if idx > 0 {
+                                let mut cmd = String::new();
+                                let _ = r.read_line(&mut cmd);
+                            }
+                            let _ = s.write_all(resp.as_bytes());
                         }
-                        let _ = s.write_all(resp.as_bytes());
-                    }
+                        0
+                    });
                 }
             });
             Ok(p)
         };
 
         // 1. Bad greeting (500)
-        let p_bad_greet = run_scripted_ftp(vec!["500 Service unavailable\n"])?;
+        let p_bad_greet = run_scripted_ftp(vec!["500 Service unavailable\n".to_string()])?;
         assert!(FtpClient::connect("127.0.0.1", p_bad_greet).is_err());
 
         // 2. Immediate EOF
         let p_eof = run_scripted_ftp(vec![])?;
         assert!(FtpClient::connect("127.0.0.1", p_eof).is_err());
 
-        // 3. PASV failure & bad PASV format & make_or_change_dir MKD path
-        let p_pasv = run_scripted_ftp(vec![
-            "220 Welcome\n",
-            "500 PASV not allowed\n",
-            "227 Bad format (1,2,3)\n",
-            "550 No such dir\n",
-            "257 Created\n",
-            "250 Changed\n",
-            "550 No such dir\n",
-            "500 MKD failed\n",
-            "550 No such dir\n",
-            "257 Created\n",
-            "500 CWD after MKD failed\n",
-        ])?;
+        // 3. PASV failure & bad PASV format & make_or_change_dir MKD path & STOR 125 path
+        let data_l = TcpListener::bind("127.0.0.1:0")?;
+        let data_p = data_l.local_addr()?.port();
+        thread::spawn(move || {
+            for mut ds in data_l.incoming().take(1).flatten() {
+                let mut buf = Vec::new();
+                let _ = ds.read_to_end(&mut buf);
+            }
+        });
+        let pasv_ok = format!(
+            "227 Entering Passive Mode (127,0,0,1,{},{})\n",
+            data_p / 256,
+            data_p % 256
+        );
+        let pasv_lines = vec![
+            "220 Welcome\n".to_string(),
+            "500 PASV not allowed\n".to_string(),
+            "227 Bad format (1,2,3)\n".to_string(),
+            "550 No such dir\n".to_string(),
+            "257 Created\n".to_string(),
+            "250 Changed\n".to_string(),
+            "550 No such dir\n".to_string(),
+            "550 Already exists\n".to_string(),
+            "250 Changed\n".to_string(),
+            "550 No such dir\n".to_string(),
+            "500 MKD failed\n".to_string(),
+            "550 No such dir\n".to_string(),
+            "257 Created\n".to_string(),
+            "500 CWD after MKD failed\n".to_string(),
+            pasv_ok,
+            "125 Data connection already open\n226 Transfer complete\n".to_string(),
+        ];
+        let p_pasv = run_scripted_ftp(pasv_lines)?;
         let mut client = FtpClient::connect("127.0.0.1", p_pasv)?;
         assert!(client.enter_passive_mode().is_err());
         assert!(client.enter_passive_mode().is_err());
         assert!(client.make_or_change_dir("newdir").is_ok());
+        assert!(client.make_or_change_dir("existdir").is_ok());
         assert!(client.make_or_change_dir("failmkd").is_err());
         assert!(client.make_or_change_dir("failcwd").is_err());
+        assert!(client.store_file("remote.txt", &existing_key).is_ok());
 
         // 4. FTPS rejected, USER rejected, TYPE I rejected
-        let p_ftps = run_scripted_ftp(vec!["220 Welcome\n", "500 No TLS\n"])?;
+        let p_ftps = run_scripted_ftp(vec![
+            "220 Welcome\n".to_string(),
+            "500 No TLS\n".to_string(),
+        ])?;
         let ftp_ftps = FtpPush {
             host: "127.0.0.1".to_string(),
             port: p_ftps,
@@ -2342,7 +2376,10 @@ end
         };
         assert!(ftp_ftps.deploy(&env).is_err());
 
-        let p_user_err = run_scripted_ftp(vec!["220 Welcome\n", "530 Not logged in\n"])?;
+        let p_user_err = run_scripted_ftp(vec![
+            "220 Welcome\n".to_string(),
+            "530 Not logged in\n".to_string(),
+        ])?;
         let ftp_user_err = FtpPush {
             host: "127.0.0.1".to_string(),
             port: p_user_err,
@@ -2355,8 +2392,12 @@ end
         };
         assert!(ftp_user_err.deploy(&env).is_err());
 
-        let p_type_err =
-            run_scripted_ftp(vec!["220 Welcome\n", "230 Logged in\n", "500 No binary\n"])?;
+        let type_err_lines = vec![
+            "220 Welcome\n".to_string(),
+            "230 Logged in\n".to_string(),
+            "500 No binary\n".to_string(),
+        ];
+        let p_type_err = run_scripted_ftp(type_err_lines)?;
         let ftp_type_err = FtpPush {
             host: "127.0.0.1".to_string(),
             port: p_type_err,
@@ -2369,12 +2410,12 @@ end
         };
         assert!(ftp_type_err.deploy(&env).is_err());
 
-        // Test upload_archive_with_retry connection failure
+        // Test upload_archive_with_retry connection failure with 2 attempts
         assert!(
             upload_archive_with_retry(
                 "http://127.0.0.1:1/unreachable",
                 &cwd.join("sftp_file.txt"),
-                1
+                2
             )
             .is_err()
         );

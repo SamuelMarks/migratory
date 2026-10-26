@@ -117,33 +117,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_execute_global_status() -> Result<(), MigratoryError> {
-        let temp = tempfile::tempdir()?;
-        std::fs::create_dir_all(temp.path().join("data").join("machine-index"))?;
-        std::fs::write(
-            temp.path().join("data").join("machine-index").join("index"),
+    fn test_execute_global_status() {
+        let temp = std::env::temp_dir().join(format!("mig_gs_1_{}", uuid::Uuid::new_v4()));
+        let index_dir = temp.join("data").join("machine-index");
+        let _ = std::fs::create_dir_all(&index_dir);
+        let _ = std::fs::write(
+            index_dir.join("index"),
             "{\"version\": 1, \"machines\": {}}",
-        )?;
+        );
 
         let args = GlobalStatusArgs { prune: true };
-        let result = execute_with_home(&args, temp.path().to_path_buf());
+        let result = execute_with_home(&args, temp.clone());
+        let _ = std::fs::remove_dir_all(&temp);
 
         assert!(result.is_ok());
-        Ok(())
     }
 
     #[test]
-    fn test_execute_global_status_read_index_error() -> Result<(), MigratoryError> {
-        let temp = tempfile::tempdir()?;
-        let index_dir = temp.path().join("data").join("machine-index");
-        std::fs::create_dir_all(&index_dir)?;
+    fn test_execute_global_status_read_index_error() {
+        let temp = std::env::temp_dir().join(format!("mig_gs_2_{}", uuid::Uuid::new_v4()));
+        let index_dir = temp.join("data").join("machine-index");
+        let _ = std::fs::create_dir_all(&index_dir);
         let index_path = index_dir.join("index");
-        std::fs::write(&index_path, "{ invalid json ")?;
+        let _ = std::fs::write(&index_path, "{ invalid json ");
 
         let args = GlobalStatusArgs { prune: false };
-        let result = execute_with_home(&args, temp.path().to_path_buf());
+        let result = execute_with_home(&args, temp.clone());
+        let _ = std::fs::remove_dir_all(&temp);
         assert!(result.is_err());
-        Ok(())
     }
 
     #[test]
@@ -160,10 +161,10 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_global_status_with_machines() -> Result<(), MigratoryError> {
-        let temp = tempfile::tempdir()?;
-        let index_dir = temp.path().join("data").join("machine-index");
-        std::fs::create_dir_all(&index_dir)?;
+    fn test_execute_global_status_with_machines() {
+        let temp = std::env::temp_dir().join(format!("mig_gs_3_{}", uuid::Uuid::new_v4()));
+        let index_dir = temp.join("data").join("machine-index");
+        let _ = std::fs::create_dir_all(&index_dir);
         let index_path = index_dir.join("index");
 
         let valid_json = r#"{
@@ -196,21 +197,22 @@ mod tests {
             }
         }"#;
 
-        std::fs::write(&index_path, valid_json)?;
+        let _ = std::fs::write(&index_path, valid_json);
 
         let args = GlobalStatusArgs { prune: false };
-        execute_with_home(&args, temp.path().to_path_buf())?;
-        Ok(())
+        assert!(execute_with_home(&args, temp.clone()).is_ok());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
-    fn test_execute_global_status_home_only() -> Result<(), MigratoryError> {
-        let temp = tempfile::tempdir()?;
-        let vagrant_d = resolve_vagrant_home_from(None, temp.path().to_str())?;
+    fn test_execute_global_status_home_only() {
+        let temp = std::env::temp_dir().join(format!("mig_gs_4_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp);
+        let vagrant_d = temp.join(".vagrant.d");
         let args = GlobalStatusArgs { prune: false };
         let result = execute_with_home(&args, vagrant_d);
+        let _ = std::fs::remove_dir_all(&temp);
         assert!(result.is_ok());
-        Ok(())
     }
 }
 #[cfg(test)]
@@ -218,9 +220,9 @@ mod extra_global_status_tests {
     use super::*;
 
     #[test]
-    fn test_execute_global_status_prune() -> Result<(), MigratoryError> {
-        let temp = tempfile::tempdir()?;
-        std::fs::create_dir_all(temp.path().join("data").join("machine-index"))?;
+    fn test_execute_global_status_prune() {
+        let temp = std::env::temp_dir().join(format!("mig_gs_5_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(temp.join("data").join("machine-index"));
 
         let index_content = r#"{
             "version": 1,
@@ -237,31 +239,29 @@ mod extra_global_status_tests {
                 }
             }
         }"#;
-        std::fs::write(
-            temp.path().join("data").join("machine-index").join("index"),
+        let _ = std::fs::write(
+            temp.join("data").join("machine-index").join("index"),
             index_content,
-        )?;
+        );
 
         let args = GlobalStatusArgs { prune: true };
-        let res = execute_with_home(&args, temp.path().to_path_buf());
+        let res = execute_with_home(&args, temp.clone());
+        let _ = std::fs::remove_dir_all(&temp);
         assert!(res.is_ok());
         let _ = execute(&GlobalStatusArgs { prune: false });
-
-        Ok(())
     }
 
     #[test]
-    fn test_execute_global_status_prune_error() -> Result<(), MigratoryError> {
-        let temp = tempfile::tempdir()?;
-        let index_dir = temp.path().join("data").join("machine-index");
-        std::fs::create_dir_all(&index_dir)?;
+    fn test_execute_global_status_prune_error() {
+        let temp = std::env::temp_dir().join(format!("mig_gs_6_{}", uuid::Uuid::new_v4()));
+        let index_dir = temp.join("data").join("machine-index");
+        let _ = std::fs::create_dir_all(&index_dir);
         let index_path = index_dir.join("index");
-        std::fs::write(&index_path, "{ invalid json ")?;
+        let _ = std::fs::write(&index_path, "{ invalid json ");
 
         let args = GlobalStatusArgs { prune: true };
-        let result = execute_with_home(&args, temp.path().to_path_buf());
+        let result = execute_with_home(&args, temp.clone());
+        let _ = std::fs::remove_dir_all(&temp);
         assert!(result.is_err());
-
-        Ok(())
     }
 }

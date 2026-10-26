@@ -55,6 +55,16 @@ pub fn execute_with_config<C>(
 where
     C: FnMut() -> Result<CloudClient, MigratoryError>,
 {
+    execute_with_config_dyn(cmd, writer, global_dir, &mut cloud_factory)
+}
+
+/// Non-generic inner implementation of `execute_with_config`.
+fn execute_with_config_dyn(
+    cmd: &BoxCommands,
+    writer: &mut dyn Write,
+    global_dir: &std::path::Path,
+    cloud_factory: &mut dyn FnMut() -> Result<CloudClient, MigratoryError>,
+) -> Result<(), MigratoryError> {
     match cmd {
         BoxCommands::Add(args) => {
             let ui = ConsoleUi;
@@ -1857,12 +1867,8 @@ mod missing_coverage_tests {
         let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         fs::create_dir_all(&boxes_dir)?;
-        fs::create_dir_all(
-            boxes_dir
-                .join("test-VAGRANTSLASH-box")
-                .join("1.0.0")
-                .join("virtualbox"),
-        )?;
+        let prov_dir = boxes_dir.join("test-VAGRANTSLASH-box/1.0.0/virtualbox");
+        fs::create_dir_all(&prov_dir)?;
 
         let server = MockServer::start();
 
@@ -1946,12 +1952,8 @@ mod missing_coverage_tests {
         let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         fs::create_dir_all(&boxes_dir)?;
-        fs::create_dir_all(
-            boxes_dir
-                .join("test-VAGRANTSLASH-box")
-                .join("1.0.0")
-                .join("virtualbox"),
-        )?;
+        let prov_dir = boxes_dir.join("test-VAGRANTSLASH-box/1.0.0/virtualbox");
+        fs::create_dir_all(&prov_dir)?;
 
         let server = MockServer::start();
 
@@ -1990,12 +1992,8 @@ mod missing_coverage_tests {
         let dir = tempdir()?;
         let boxes_dir = dir.path().join("boxes");
         fs::create_dir_all(&boxes_dir)?;
-        fs::create_dir_all(
-            boxes_dir
-                .join("test-VAGRANTSLASH-box")
-                .join("1.0.0")
-                .join("virtualbox"),
-        )?;
+        let prov_dir = boxes_dir.join("test-VAGRANTSLASH-box/1.0.0/virtualbox");
+        fs::create_dir_all(&prov_dir)?;
 
         let server = MockServer::start();
 

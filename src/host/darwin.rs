@@ -3,7 +3,7 @@
 //! This module provides the implementation for the Darwin (macOS) host,
 //! detailing operations such as configuring NFS or SMB file sharing.
 
-use super::Host;
+use super::{Host, HostCommandRunner};
 use crate::error::MigratoryError;
 use std::process::Command;
 
@@ -151,14 +151,11 @@ impl DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if restarting `nfsd` fails.
-    pub fn configure_nfs_with<F>(
+    pub fn configure_nfs_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         let uid = runner("id", &["-u"])
             .map(|(_, s)| s.trim().to_string())
             .unwrap_or_else(|_| "501".to_string());
@@ -193,14 +190,11 @@ impl DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if `sharing` fails.
-    pub fn configure_smb_with<F>(
+    pub fn configure_smb_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         for sf in folders {
             if sf.folder_type == Some(crate::config::SyncedFolderType::Smb) && !sf.disabled {
                 let share_name = sf
@@ -240,10 +234,7 @@ impl DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the command fails.
-    pub fn check_admin_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn check_admin_with(&self, runner: HostCommandRunner) -> Result<bool, MigratoryError> {
         let (_, stdout) = runner("id", &["-u"])?;
         Ok(stdout.trim() == "0")
     }
@@ -261,10 +252,10 @@ impl DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on failure.
-    pub fn resolve_host_ip_with<F>(&self, mut runner: F) -> Result<String, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn resolve_host_ip_with(
+        &self,
+        runner: HostCommandRunner,
+    ) -> Result<String, MigratoryError> {
         if let Ok((_, stdout)) = runner("route", &["-n", "get", "default"]) {
             for line in stdout.lines() {
                 if let Some(iface) = line.trim().strip_prefix("interface:")
@@ -291,13 +282,10 @@ impl DarwinHost {
     /// # Errors
     ///
     /// Returns a [`MigratoryError`] if `ifconfig` fails.
-    pub fn list_bridge_interfaces_with<F>(
+    pub fn list_bridge_interfaces_with(
         &self,
-        mut runner: F,
-    ) -> Result<Vec<String>, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<Vec<String>, MigratoryError> {
         let (_, text) = runner("ifconfig", &["-l"])?;
         Ok(text.split_whitespace().map(|s| s.to_string()).collect())
     }
@@ -328,10 +316,10 @@ impl DarwinHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if querying `sysctl` fails.
-    pub fn check_hypervisor_privileges_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn check_hypervisor_privileges_with(
+        &self,
+        runner: HostCommandRunner,
+    ) -> Result<bool, MigratoryError> {
         let (ok, _) = runner("sysctl", &["kern.hv_support"])?;
         Ok(ok)
     }
@@ -474,6 +462,13 @@ mod tests {
                 disabled: true,
                 ..Default::default()
             },
+            crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from("/Users/user/rsync"),
+                guest_path: std::path::PathBuf::from("/rsync"),
+                folder_type: Some(crate::config::SyncedFolderType::Rsync),
+                disabled: false,
+                ..Default::default()
+            },
         ];
         assert!(
             host.configure_smb_with(&smb_folders, |_, _| Ok((true, String::new())))
@@ -484,46 +479,30 @@ mod tests {
                 .is_err()
         );
         assert!(!host.check_admin_with(|_, _| Ok((true, "501".to_string())))?);
-        assert_eq!(
-            host.resolve_host_ip_with(|prog, _| {
-                if prog == "route" {
-                    Ok((
-                        true,
-                        "  interface: en0
-"
-                        .to_string(),
-                    ))
-                } else {
-                    Ok((
-                        true,
-                        "10.0.1.55
-"
-                        .to_string(),
-                    ))
-                }
-            })?,
-            "10.0.1.55"
-        );
-        assert_eq!(
-            host.resolve_host_ip_with(|prog, _| {
-                if prog == "route" {
-                    Ok((
-                        true,
-                        "  interface: en0
-"
-                        .to_string(),
-                    ))
-                } else {
-                    Ok((
-                        true,
-                        "   
-"
-                        .to_string(),
-                    ))
-                }
-            })?,
-            "192.168.1.2"
-        );
+        let ip1 = host.resolve_host_ip_with(|prog, _| {
+            if prog == "route" {
+                Ok((true, "  route to: default\n  interface: en0\n".to_string()))
+            } else {
+                Ok((true, "10.0.1.55\n".to_string()))
+            }
+        });
+        assert_eq!(ip1?, "10.0.1.55");
+        let ip2 = host.resolve_host_ip_with(|prog, _| {
+            if prog == "route" {
+                Ok((true, "  interface: en0\n".to_string()))
+            } else {
+                Err(MigratoryError::Generic("ipconfig err".to_string()))
+            }
+        });
+        assert_eq!(ip2?, "192.168.1.2");
+        let ip3 = host.resolve_host_ip_with(|prog, _| {
+            if prog == "route" {
+                Ok((true, "  interface: en0\n".to_string()))
+            } else {
+                Ok((true, "   \n".to_string()))
+            }
+        });
+        assert_eq!(ip3?, "192.168.1.2");
         assert_eq!(
             host.resolve_host_ip_with(|_, _| Err(MigratoryError::Generic("err".to_string())))?,
             "192.168.1.2"

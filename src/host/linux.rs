@@ -3,7 +3,7 @@
 //! This module provides the implementation for the Linux host,
 //! detailing operations such as configuring NFS or SMB file sharing.
 
-use super::Host;
+use super::{Host, HostCommandRunner};
 use crate::error::MigratoryError;
 use std::process::Command;
 
@@ -155,14 +155,11 @@ impl LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if `exportfs -ra` fails.
-    pub fn configure_nfs_with<F>(
+    pub fn configure_nfs_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         let uid = runner("id", &["-u"])
             .map(|(_, s)| s.trim().to_string())
             .unwrap_or_else(|_| "1000".to_string());
@@ -197,14 +194,11 @@ impl LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if reloading `smbd` fails.
-    pub fn configure_smb_with<F>(
+    pub fn configure_smb_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         let conf_block = Self::generate_smb_conf(folders);
         let cmd = format!("echo '{conf_block}' | sudo tee -a /etc/samba/smb.conf > /dev/null");
         let _ = runner("sh", &["-c", &cmd]);
@@ -231,10 +225,7 @@ impl LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if the command fails.
-    pub fn check_admin_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn check_admin_with(&self, runner: HostCommandRunner) -> Result<bool, MigratoryError> {
         let (_, stdout) = runner("id", &["-u"])?;
         Ok(stdout.trim() == "0")
     }
@@ -252,10 +243,10 @@ impl LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on failure.
-    pub fn resolve_host_ip_with<F>(&self, mut runner: F) -> Result<String, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn resolve_host_ip_with(
+        &self,
+        runner: HostCommandRunner,
+    ) -> Result<String, MigratoryError> {
         let cmd = "ip route get 1 | awk '{print $7}' | tr -d '
 '";
         let ip = runner("sh", &["-c", cmd])
@@ -323,12 +314,12 @@ impl LinuxHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if querying `groups` fails.
-    pub fn check_libvirt_group_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn check_libvirt_group_with(
+        &self,
+        runner: HostCommandRunner,
+    ) -> Result<bool, MigratoryError> {
         let (_, groups) = runner("groups", &[])?;
-        Ok(groups.contains("libvirt") || groups.contains("libvirtd"))
+        Ok(groups.contains("libvirt"))
     }
 
     /// Detects the service manager from filesystem paths.

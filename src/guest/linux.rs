@@ -1270,10 +1270,10 @@ mod tests {
             default: Ok(String::new()),
         };
         let res = guest.install_virtualbox_guest_additions(&fail_comm, None);
-        assert!(matches!(
-            res,
-            Err(MigratoryError::Generic(ref msg)) if msg.contains("VirtualBox Guest Additions installation failed")
-        ));
+        assert!(res.is_err_and(|e| {
+            e.to_string()
+                .contains("VirtualBox Guest Additions installation failed")
+        }));
 
         let err_fallback_comm = MultiMockComm {
             responses: vec![

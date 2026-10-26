@@ -56,6 +56,20 @@ pub fn execute_with_provider<F>(
 where
     F: FnMut(&str, Option<String>) -> Box<dyn crate::provider::Provider>,
 {
+    execute_with_provider_dyn(cwd, args, is_machine_readable, &mut provider_factory)
+}
+
+/// Dynamic factory closure type for instantiating a [`crate::provider::Provider`].
+type StatusProviderFactoryFn<'a> =
+    dyn FnMut(&str, Option<String>) -> Box<dyn crate::provider::Provider> + 'a;
+
+/// Non-generic implementation of `status` execution with a dynamic provider factory.
+fn execute_with_provider_dyn(
+    cwd: &Path,
+    args: &StatusArgs,
+    is_machine_readable: bool,
+    provider_factory: &mut StatusProviderFactoryFn<'_>,
+) -> Result<(), MigratoryError> {
     let env = config::load_environment_config(cwd)?;
     let state_mgr =
         crate::state::local::LocalStateManager::new(crate::config::get_dotfile_path(cwd));
@@ -222,10 +236,8 @@ mod tests {
     fn test_execute_status_multimachine_filter() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c|\n  c.vm.define 'web'\n  c.vm.define 'db'\nend",
-        )?;
+        let vf = "Vagrant.configure('2') do |c|\n  c.vm.define 'web'\n  c.vm.define 'db'\nend";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = StatusArgs {
             name: Some("web".to_string()),
@@ -272,10 +284,8 @@ mod tests {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c| c.vm.provider 'invalid_provider' end",
-        )?;
+        let vf = "Vagrant.configure('2') do |c| c.vm.provider 'invalid_provider' end";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = StatusArgs { name: None };
         let result = execute(cwd, &args);
@@ -288,10 +298,8 @@ mod tests {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c| c.vm.provider 'my_custom_provider' end",
-        )?;
+        let vf = "Vagrant.configure('2') do |c| c.vm.provider 'my_custom_provider' end";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = StatusArgs { name: None };
         let result = execute(cwd, &args);

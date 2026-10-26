@@ -134,7 +134,7 @@ pub fn is_machine_readable() -> bool {
 ///
 /// Returns a boxed [`MachineReadableUi`] if machine-readable mode is enabled, or [`ConsoleUi`] otherwise.
 pub fn default_ui() -> Box<dyn Ui + Send + Sync> {
-    if is_machine_readable() || std::env::args().any(|arg| arg == "--machine-readable") {
+    if is_machine_readable() {
         Box::new(MachineReadableUi)
     } else {
         Box::new(ConsoleUi)
@@ -431,9 +431,8 @@ impl MachineReadableUi {
             message,
         };
 
-        if let Ok(json) = serde_json::to_string(&log) {
-            println!("{json}");
-        }
+        let json = serde_json::to_string(&log).unwrap_or_default();
+        println!("{json}");
     }
 }
 

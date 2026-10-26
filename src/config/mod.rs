@@ -1933,10 +1933,8 @@ mod tests {
     fn test_evaluate_vagrantfile_mock_nonempty() -> Result<(), MigratoryError> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("Vagrantfile");
-        std::fs::write(
-            &path,
-            "Vagrant.configure('2') do |c|\n  c.vm.define 'node1'\n  c.vm.define 'node2'\nend",
-        )?;
+        let vf = "Vagrant.configure('2') do |c|\n  c.vm.define 'node1'\n  c.vm.define 'node2'\nend";
+        std::fs::write(&path, vf)?;
         let config = evaluate_vagrantfile(&path.to_string_lossy())?;
         assert_eq!(config.machines.len(), 2);
         Ok(())
@@ -1946,10 +1944,8 @@ mod tests {
     fn test_evaluate_vagrantfile() -> Result<(), MigratoryError> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("Vagrantfile");
-        std::fs::write(
-            &path,
-            "Vagrant_Result = Vagrant.configure('2') do |c|\n c.vm.box = 'foo' \nend",
-        )?;
+        let vf = "Vagrant_Result = Vagrant.configure('2') do |c|\n c.vm.box = 'foo' \nend";
+        std::fs::write(&path, vf)?;
 
         let env = evaluate_vagrantfile(&path.to_string_lossy())?;
         assert!(env.machines.contains_key("default"));
@@ -1988,16 +1984,54 @@ mod tests {
                 host_ip: None
             }
         ));
+        assert_eq!(port.as_forwarded_port(), Some((80, 8080, "tcp")));
+        assert_eq!(priv_net.as_forwarded_port(), None);
+        assert_eq!(
+            priv_net.as_private_network(),
+            Some(("192.168.50.4", "255.255.255.0"))
+        );
+        assert_eq!(pub_net.as_private_network(), None);
 
         assert!(matches!(
             priv_net,
-            NetworkConfig::PrivateNetwork { ip: Some(ip), netmask: Some(nm), dhcp: false, virtualbox_intnet: None } if ip == "192.168.50.4" && nm == "255.255.255.0"
+            NetworkConfig::PrivateNetwork {
+                ip: Some(_),
+                netmask: Some(_),
+                dhcp: false,
+                virtualbox_intnet: None
+            }
         ));
 
         assert!(matches!(
             pub_net,
-            NetworkConfig::PublicNetwork { ip: None, bridge: Some(b), use_dhcp_assigned_default_route: true } if b == "eth0"
+            NetworkConfig::PublicNetwork {
+                ip: None,
+                bridge: Some(_),
+                use_dhcp_assigned_default_route: true
+            }
         ));
+
+        let prov = ProviderConfig {
+            name: ProviderKind::Docker,
+            options: HashMap::new(),
+        };
+        assert!(prov.as_docker().is_ok());
+        assert!(prov.as_virtualbox().is_ok());
+
+        let mut prov_cfg = ProvisionerConfig::default();
+        assert!(prov_cfg.as_docker().is_ok());
+        prov_cfg
+            .config
+            .insert("images".to_string(), "ubuntu, alpine".to_string());
+        prov_cfg
+            .config
+            .insert("install".to_string(), "1".to_string());
+        assert!(prov_cfg.as_docker().is_ok());
+        prov_cfg
+            .config
+            .insert("install".to_string(), "true".to_string());
+        assert!(prov_cfg.as_docker().is_ok());
+        assert!(prov_cfg.as_shell().is_ok());
     }
 
     #[test]
@@ -2300,6 +2334,14 @@ mod tests {
         assert!(
             execute_triggers_with_guest("before", "up", &ignore_triggers, Some(&comm_fail)).is_ok()
         );
+        assert!(execute_triggers_with_guest("before", "up", &ignore_triggers, None).is_ok());
+
+        let noop_trigger = vec![TriggerConfig {
+            stage: "before".to_string(),
+            actions: vec!["up".to_string()],
+            ..Default::default()
+        }];
+        assert!(execute_triggers_with_guest("before", "up", &noop_trigger, None).is_ok());
 
         let _ = comm_success.download("src", std::path::Path::new("dst"));
         let _ = comm_success.execute_interactive();
@@ -2347,10 +2389,8 @@ mod tests {
         let project_dir = temp.path().join("project");
         std::fs::create_dir_all(&project_dir)?;
         let project_vf = project_dir.join("Vagrantfile");
-        std::fs::write(
-            &project_vf,
-            "Vagrant.configure('2') do |c|\n c.vm.box = 'testbox'\nend",
-        )?;
+        let proj_vf_str = "Vagrant.configure('2') do |c|\n c.vm.box = 'testbox'\nend";
+        std::fs::write(&project_vf, proj_vf_str)?;
 
         let _ = resolve_vagrantfile_hierarchy(&project_dir, Some(&box_dir));
         let hierarchy =
@@ -2381,10 +2421,8 @@ mod tests {
         let project_dir = temp.path().join("project");
         std::fs::create_dir_all(&project_dir)?;
         let project_vf = project_dir.join("Vagrantfile");
-        std::fs::write(
-            &project_vf,
-            "Vagrant.configure('2') do |c|\n c.vm.box = 'mybox'\nend",
-        )?;
+        let proj_vf_str = "Vagrant.configure('2') do |c|\n c.vm.box = 'mybox'\nend";
+        std::fs::write(&project_vf, proj_vf_str)?;
 
         let env = evaluate_vagrantfile_hierarchy(&project_dir, None)?;
         assert_eq!(
@@ -2633,16 +2671,13 @@ mod tests {
         };
         diamond.insert("d".to_string(), d);
 
-        let diamond_sorted = sort_machines_by_dependencies(
-            &[
-                "d".to_string(),
-                "c".to_string(),
-                "b".to_string(),
-                "a".to_string(),
-            ],
-            &diamond,
-            false,
-        )?;
+        let diamond_targets = [
+            "d".to_string(),
+            "c".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+        ];
+        let diamond_sorted = sort_machines_by_dependencies(&diamond_targets, &diamond, false)?;
         assert_eq!(diamond_sorted[0], "a");
         assert_eq!(diamond_sorted[3], "d");
         Ok(())

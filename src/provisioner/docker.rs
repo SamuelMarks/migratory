@@ -51,38 +51,26 @@ impl Provisioner for DockerProvisioner {
             config: config.clone(),
             ..Default::default()
         };
-        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { images, .. }) =
-            p_cfg.as_docker()
-            && !images.is_empty()
-        {
-            self.images = images;
-        }
-        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { run, .. }) =
-            p_cfg.as_docker()
-        {
-            self.run = run;
-        }
-        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { compose, .. }) =
-            p_cfg.as_docker()
-        {
-            self.compose = compose;
-        }
-        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { install, .. }) =
-            p_cfg.as_docker()
-        {
-            self.install = install;
-        }
+        let _ = p_cfg.as_docker();
 
-        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { build_image, .. }) =
-            p_cfg.as_docker()
-        {
-            self.build_image = build_image;
+        if let Some(s) = config.get("images") {
+            let images: Vec<String> = s
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
+            if !images.is_empty() {
+                self.images = images;
+            }
         }
-        if let Ok(crate::config::options::TypedProvisionerConfig::Docker { build_path, .. }) =
-            p_cfg.as_docker()
-        {
-            self.build_path = build_path;
-        }
+        self.run = config.get("run").cloned();
+        self.compose = config.get("compose").cloned();
+        self.install = config
+            .get("install")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(true);
+        self.build_image = config.get("build_image").cloned();
+        self.build_path = config.get("build_path").cloned();
         Ok(())
     }
 
@@ -190,9 +178,10 @@ mod tests {
         assert!(prov.prepare(&config_one).is_ok());
         assert!(prov.install);
 
-        // Test install="true"
+        // Test install="true" and comma-only images
         let mut config_true = HashMap::new();
         config_true.insert("install".to_string(), "true".to_string());
+        config_true.insert("images".to_string(), " , ".to_string());
         assert!(prov.prepare(&config_true).is_ok());
         assert!(prov.install);
     }

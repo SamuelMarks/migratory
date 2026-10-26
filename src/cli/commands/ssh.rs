@@ -57,6 +57,16 @@ pub fn execute_with_runner<F>(
 where
     F: FnMut(Command) -> Result<bool, MigratoryError>,
 {
+    execute_with_runner_dyn(cwd, args, enforce_state_check, &mut runner)
+}
+
+/// Non-generic implementation of `ssh` execution with a dynamic runner callback.
+fn execute_with_runner_dyn(
+    cwd: &Path,
+    args: &SshArgs,
+    enforce_state_check: bool,
+    runner: &mut dyn FnMut(Command) -> Result<bool, MigratoryError>,
+) -> Result<(), MigratoryError> {
     let env_config = config::load_environment_config(cwd)?;
 
     let machine_name = if let Some(target) = &args.name {
@@ -287,12 +297,11 @@ mod tests {
         };
         assert!(execute(cwd, &args_tty).is_ok());
         assert!(execute_with_runner(cwd, &args_tty, false, |_| Ok(false)).is_err());
+        assert!(execute_with_runner(cwd, &args_tty, true, |_| Ok(true)).is_err());
 
         // Test with explicit private_key_path in Vagrantfile
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure(\"2\") do |config|\n  config.vm.provider \"virtualbox\"\n  config.ssh.private_key_path = \"/tmp/custom_key\"\nend\n",
-        )?;
+        let vf = "Vagrant.configure(\"2\") do |config|\n  config.vm.provider \"virtualbox\"\n  config.ssh.private_key_path = \"/tmp/custom_key\"\nend\n";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
         assert!(execute(cwd, &args_tty).is_ok());
         Ok(())
     }

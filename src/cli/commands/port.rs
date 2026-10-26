@@ -598,6 +598,15 @@ pub fn execute_with_querier<Q>(
 where
     Q: FnMut(&str, &str) -> Option<Vec<ForwardedPortEntry>>,
 {
+    execute_with_querier_dyn(cwd, args, &mut querier)
+}
+
+/// Non-generic inner implementation of `execute_with_querier`.
+fn execute_with_querier_dyn(
+    cwd: &Path,
+    args: &PortArgs,
+    querier: &mut dyn FnMut(&str, &str) -> Option<Vec<ForwardedPortEntry>>,
+) -> Result<(), MigratoryError> {
     let env_config = crate::config::load_environment_config(cwd)?;
 
     if let Some(target_name) = &args.name
@@ -854,8 +863,7 @@ end
         );
 
         let valid = "Forwarding(0)=\"rule,tcp,127.0.0.1,8080,,80\"\nForwarding(1)=\"ssh,tcp,127.0.0.1,2222,,22\"\n";
-        let parsed = parse_vboxmanage_ports(valid)
-            .ok_or(MigratoryError::Generic("expected parsed ports".to_string()))?;
+        let parsed = parse_vboxmanage_ports(valid).unwrap_or_default();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].guest, 80);
         assert_eq!(parsed[0].host, 8080);
@@ -883,23 +891,21 @@ end
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::write(
-                &script_path,
-                "#!/bin/sh\necho 'Forwarding(0)=\"ssh,tcp,127.0.0.1,2222,,22\"'\nexit 0\n",
-            )?;
+            let script_body =
+                "#!/bin/sh\necho 'Forwarding(0)=\"ssh,tcp,127.0.0.1,2222,,22\"'\nexit 0\n";
+            fs::write(&script_path, script_body)?;
             let mut perms = fs::metadata(&script_path)?.permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&script_path, perms)?;
         }
         #[cfg(windows)]
         {
-            fs::write(
-                bin_dir.join("VBoxManage.bat"),
-                "@echo off\necho Forwarding(0)=\"ssh,tcp,127.0.0.1,2222,,22\"\nexit /b 0\n",
-            )?;
+            let script_body =
+                "@echo off\necho Forwarding(0)=\"ssh,tcp,127.0.0.1,2222,,22\"\nexit /b 0\n";
+            fs::write(bin_dir.join("VBoxManage.bat"), script_body)?;
         }
         let ports = query_virtualbox_ports_with(&script_path.to_string_lossy(), "vm-id-3")
-            .ok_or(MigratoryError::Generic("expected ports".to_string()))?;
+            .unwrap_or_default();
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].guest, 22);
         assert_eq!(ports[0].host, 2222);
@@ -959,8 +965,7 @@ end
 80/tcp -> :::8080
 443/udp -> 127.0.0.1:8443
 ";
-        let parsed = parse_docker_ports(sample)
-            .ok_or(MigratoryError::Generic("expected parsed".to_string()))?;
+        let parsed = parse_docker_ports(sample).unwrap_or_default();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].guest, 80);
         assert_eq!(parsed[0].host, 8080);
@@ -980,8 +985,8 @@ end
             fs::write(&script, format!("#!/bin/sh\necho '{}'\nexit 0\n", sample))?;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
         }
-        let queried = query_docker_ports_with(&script.to_string_lossy(), "container-123")
-            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
+        let queried =
+            query_docker_ports_with(&script.to_string_lossy(), "container-123").unwrap_or_default();
         assert_eq!(queried.len(), 2);
         Ok(())
     }
@@ -991,17 +996,26 @@ end
         assert_eq!(parse_qemu_ports(""), None);
         assert_eq!(parse_qemu_ports("random info output\n"), None);
         assert_eq!(parse_qemu_ports("hostfwd=bad\n"), None);
+        assert_eq!(parse_qemu_ports("hostfwd=tcp:bad-:22\n"), None);
+        assert_eq!(parse_qemu_ports("hostfwd=tcp::2222-:bad\n"), None);
         assert_eq!(parse_qemu_ports("[HOST_FORWARD] short\n"), None);
+        assert_eq!(
+            parse_qemu_ports("TCP[HOST_FORWARD] 13 127.0.0.1 bad 10.0.2.15 22\n"),
+            None
+        );
+        assert_eq!(
+            parse_qemu_ports("TCP[HOST_FORWARD] 13 127.0.0.1 2222 10.0.2.15 bad\n"),
+            None
+        );
 
         let usernet_sample = "
 VLAN -1 (net0):
   Protocol[State]    FD  Source Address  Port   Dest. Address  Port RecvQ SendQ
   TCP[HOST_FORWARD]  13       127.0.0.1  2222       10.0.2.15    22     0     0
+  TCP[HOST_FORWARD]  13       127.0.0.1  2222       10.0.2.15    22     0     0
   UDP[HOST_FORWARD]  14       0.0.0.0    8080       10.0.2.15    80     0     0
 ";
-        let parsed_usernet = parse_qemu_ports(usernet_sample).ok_or(MigratoryError::Generic(
-            "expected parsed usernet".to_string(),
-        ))?;
+        let parsed_usernet = parse_qemu_ports(usernet_sample).unwrap_or_default();
         assert_eq!(parsed_usernet.len(), 2);
         assert_eq!(parsed_usernet[0].guest, 22);
         assert_eq!(parsed_usernet[0].host, 2222);
@@ -1010,10 +1024,8 @@ VLAN -1 (net0):
         assert_eq!(parsed_usernet[1].host, 8080);
         assert_eq!(parsed_usernet[1].protocol, "udp");
 
-        let hostfwd_sample = "qemu -net nic -net user,hostfwd=tcp::2222-:22,hostfwd=udp::5353-:53";
-        let parsed_hostfwd = parse_qemu_ports(hostfwd_sample).ok_or(MigratoryError::Generic(
-            "expected parsed hostfwd".to_string(),
-        ))?;
+        let hostfwd_sample = "qemu -net nic -net user,hostfwd=tcp::2222-:22,hostfwd=tcp::2222-:22,hostfwd=udp::5353-:53";
+        let parsed_hostfwd = parse_qemu_ports(hostfwd_sample).unwrap_or_default();
         assert_eq!(parsed_hostfwd.len(), 2);
         assert_eq!(parsed_hostfwd[0].guest, 22);
         assert_eq!(parsed_hostfwd[0].host, 2222);
@@ -1028,14 +1040,12 @@ VLAN -1 (net0):
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::write(
-                &script,
-                format!("#!/bin/sh\necho '{}'\nexit 0\n", usernet_sample),
-            )?;
+            let script_body = format!("#!/bin/sh\necho '{}'\nexit 0\n", usernet_sample);
+            fs::write(&script, script_body)?;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
         }
-        let queried = query_qemu_ports_with(&script.to_string_lossy(), "qemu-domain-456")
-            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
+        let queried =
+            query_qemu_ports_with(&script.to_string_lossy(), "qemu-domain-456").unwrap_or_default();
         assert_eq!(queried.len(), 2);
         Ok(())
     }
@@ -1051,12 +1061,15 @@ Protocol     : TCP
 ExternalPort : 2222
 InternalPort : 22
 
+Protocol     : TCP
+ExternalPort : 2222
+InternalPort : 22
+
 Protocol     : UDP
 ExternalPort : 5353
 InternalPort : 53
 ";
-        let parsed_kv = parse_hyperv_ports(kv_sample)
-            .ok_or(MigratoryError::Generic("expected parsed kv".to_string()))?;
+        let parsed_kv = parse_hyperv_ports(kv_sample).unwrap_or_default();
         assert_eq!(parsed_kv.len(), 2);
         assert_eq!(parsed_kv[0].guest, 22);
         assert_eq!(parsed_kv[0].host, 2222);
@@ -1065,23 +1078,31 @@ InternalPort : 53
         assert_eq!(parsed_kv[1].host, 5353);
         assert_eq!(parsed_kv[1].protocol, "udp");
 
+        let kv_dup_end = "
+Protocol     : TCP
+ExternalPort : 2222
+InternalPort : 22
+
+Protocol     : TCP
+ExternalPort : 2222
+InternalPort : 22";
+        let parsed_kv_dup = parse_hyperv_ports(kv_dup_end).unwrap_or_default();
+        assert_eq!(parsed_kv_dup.len(), 1);
+
         let json_sample = r#"[
             {"Protocol": "TCP"},
             {"Protocol": "TCP", "ExternalPort": 8080, "InternalPort": 80},
             {"Protocol": "TCP", "ExternalPort": 8080, "InternalPort": 80},
             {"Protocol": "UDP", "ExternalPort": 9090, "InternalPort": 90}
         ]"#;
-        let parsed_json = parse_hyperv_ports(json_sample)
-            .ok_or(MigratoryError::Generic("expected parsed json".to_string()))?;
+        let parsed_json = parse_hyperv_ports(json_sample).unwrap_or_default();
         assert_eq!(parsed_json.len(), 2);
         assert_eq!(parsed_json[0].guest, 80);
         assert_eq!(parsed_json[0].host, 8080);
         assert_eq!(parsed_json[0].protocol, "tcp");
 
         let single_json = r#"{"Protocol": "TCP", "ExternalPort": 3000, "InternalPort": 3000}"#;
-        let parsed_single = parse_hyperv_ports(single_json).ok_or(MigratoryError::Generic(
-            "expected parsed single".to_string(),
-        ))?;
+        let parsed_single = parse_hyperv_ports(single_json).unwrap_or_default();
         assert_eq!(parsed_single.len(), 1);
 
         let _ = query_hyperv_ports("hyperv-vm-789");
@@ -1092,14 +1113,12 @@ InternalPort : 53
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::write(
-                &script,
-                format!("#!/bin/sh\necho '{}'\nexit 0\n", json_sample),
-            )?;
+            let script_body = format!("#!/bin/sh\necho '{}'\nexit 0\n", json_sample);
+            fs::write(&script, script_body)?;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
         }
-        let queried = query_hyperv_ports_with(&script.to_string_lossy(), "hyperv-vm-789")
-            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
+        let queried =
+            query_hyperv_ports_with(&script.to_string_lossy(), "hyperv-vm-789").unwrap_or_default();
         assert_eq!(queried.len(), 2);
         Ok(())
     }
@@ -1109,11 +1128,17 @@ InternalPort : 53
         assert_eq!(parse_vmware_nat_conf(""), None);
         assert_eq!(parse_vmware_nat_conf("# Comment only\n"), None);
         assert_eq!(parse_vmware_nat_conf("[incomingtcp]\n8080 = bad\n"), None);
+        assert_eq!(
+            parse_vmware_nat_conf("[incomingtcp]\n8080 = 127.0.0.1:bad\n"),
+            None
+        );
         assert!(parse_vmware_nat_conf("[incomingtcp]\nbad = 127.0.0.1:80\n").is_none());
 
         let conf_sample = "
 # VMware NAT configuration
+[unclosed_section
 [incomingtcp]
+2222 = 192.168.56.10:22
 2222 = 192.168.56.10:22
 8080 = 192.168.56.10:80
 
@@ -1125,8 +1150,7 @@ invalid_line
 [other_section]
 9999 = 192.168.56.10:99
 ";
-        let parsed = parse_vmware_nat_conf(conf_sample)
-            .ok_or(MigratoryError::Generic("expected parsed".to_string()))?;
+        let parsed = parse_vmware_nat_conf(conf_sample).unwrap_or_default();
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed[0].guest, 22);
         assert_eq!(parsed[0].host, 2222);
@@ -1148,8 +1172,7 @@ invalid_line
         let nat_file = dir.path().join("nat.conf");
         fs::write(&nat_file, conf_sample)?;
         let nat_str = nat_file.to_string_lossy();
-        let queried = query_vmware_ports_from_paths(&[&nat_str])
-            .ok_or(MigratoryError::Generic("expected queried".to_string()))?;
+        let queried = query_vmware_ports_from_paths(&[&nat_str]).unwrap_or_default();
         assert_eq!(queried.len(), 3);
         Ok(())
     }
@@ -1188,10 +1211,8 @@ end
         fs::write(vagrant_dir.join("hyperv_node/hyperv/id"), "vm-id")?;
 
         fs::create_dir_all(vagrant_dir.join("vmware_node/vmware_desktop"))?;
-        fs::write(
-            vagrant_dir.join("vmware_node/vmware_desktop/id"),
-            "vmx-path",
-        )?;
+        let vmware_id_path = vagrant_dir.join("vmware_node/vmware_desktop/id");
+        fs::write(vmware_id_path, "vmx-path")?;
 
         let args = PortArgs {
             name: None,
@@ -1229,7 +1250,7 @@ end
 
         let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
         let ms = state_mgr.machine_state("docker_node", "docker");
-        ms.set_forwarded_ports(&[
+        let persisted_list = [
             crate::state::local::PersistedForwardedPort {
                 guest: 80,
                 host: 8080,
@@ -1242,8 +1263,14 @@ end
                 protocol: "tcp".to_string(),
                 host_ip: None,
             },
-        ])?;
+        ];
+        ms.set_forwarded_ports(&persisted_list)?;
         assert!(execute_with_querier(cwd, &args_guest, |_, _| None).is_ok());
+        let args_no_guest = PortArgs {
+            name: Some("docker_node".to_string()),
+            guest: None,
+        };
+        assert!(execute_with_querier(cwd, &args_no_guest, |_, _| None).is_ok());
 
         // Test args.guest filtering on Vagrantfile networks when neither live nor persisted ports exist
         let vf_dir = tempdir()?;

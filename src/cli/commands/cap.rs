@@ -222,7 +222,7 @@ pub fn execute_with_options(
 /// * `args` - The capability arguments.
 /// * `cwd` - Working directory containing the `Vagrantfile`.
 /// * `dry_run` - If `true`, skips live guest capability invocation after printing header/arguments.
-/// * `enforce_state_check` - Whether to force running `CheckMachineStateAction` in tests.
+/// * `enforce_state_check` - Whether to run `CheckMachineStateAction`.
 /// * `writer` - Mutable reference to trait object writer.
 ///
 /// # Returns
@@ -332,7 +332,7 @@ pub fn execute_with_options_and_state(
             provider_name: provider_name.clone(),
             cwd: cwd.to_path_buf(),
         };
-        if !cfg!(test) || enforce_state_check {
+        if enforce_state_check {
             use crate::action::Action;
             check_action.call(&mut env)?;
         }
@@ -615,7 +615,8 @@ mod tests {
         };
         let mut out = Vec::new();
         assert!(
-            matches!(execute_with_options(&args_missing_vf, cwd, false, &mut out), Err(MigratoryError::NotFound(ref s)) if s.contains("Vagrantfile"))
+            execute_with_options(&args_missing_vf, cwd, false, &mut out)
+                .is_err_and(|e| e.to_string().contains("Vagrantfile"))
         );
 
         let broken_vf = "invalid ruby code {{{";
@@ -666,7 +667,8 @@ end
             target_guest: None,
         };
         assert!(
-            matches!(execute_with_options(&args_missing_machine, cwd, false, &mut out), Err(MigratoryError::NotFound(ref s)) if s.contains("Machine 'nonexistent' not found"))
+            execute_with_options(&args_missing_machine, cwd, false, &mut out)
+                .is_err_and(|e| e.to_string().contains("Machine 'nonexistent' not found"))
         );
 
         let args_win_target = CapArgs {

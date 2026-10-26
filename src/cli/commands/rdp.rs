@@ -440,10 +440,8 @@ end
 
         let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c|\n  c.vm.provider 'virtualbox'\nend\n",
-        )?;
+        let vf = "Vagrant.configure('2') do |c|\n  c.vm.provider 'virtualbox'\nend\n";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
         let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
         let ms = state_mgr.machine_state("default", "virtualbox");
         ms.set_guest_ip("10.0.0.88")?;

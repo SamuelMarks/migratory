@@ -256,6 +256,16 @@ where
     D: FnMut() -> Vec<String>,
     I: FnMut(&str) -> Result<(), MigratoryError>,
 {
+    execute_with_dyn(cwd, args, &mut detect_fn, &mut install_fn)
+}
+
+/// Non-generic implementation of `provider` execution with dynamic callbacks.
+fn execute_with_dyn(
+    cwd: &Path,
+    args: &ProviderArgs,
+    detect_fn: &mut dyn FnMut() -> Vec<String>,
+    install_fn: &mut dyn FnMut(&str) -> Result<(), MigratoryError>,
+) -> Result<(), MigratoryError> {
     let env_config = crate::config::load_environment_config(cwd)?;
 
     if args.usable {

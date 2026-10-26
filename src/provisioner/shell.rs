@@ -94,26 +94,11 @@ impl Provisioner for ShellProvisioner {
             config: config.clone(),
             ..Default::default()
         };
-        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { inline, .. }) =
-            p_cfg.as_shell()
-        {
-            self.inline = inline;
-        }
-        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { path, .. }) =
-            p_cfg.as_shell()
-        {
-            self.path = path;
-        }
-        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { args, .. }) =
-            p_cfg.as_shell()
-        {
-            self.args = args;
-        }
-        if let Ok(crate::config::options::TypedProvisionerConfig::Shell { upload_path, .. }) =
-            p_cfg.as_shell()
-        {
-            self.upload_path = upload_path;
-        }
+        let _ = p_cfg.as_shell();
+        self.inline = config.get("inline").cloned();
+        self.path = config.get("path").cloned();
+        self.args = config.get("args").cloned();
+        self.upload_path = config.get("upload_path").cloned();
         if let Some(ps) = config.get("powershell") {
             self.powershell = ps.to_lowercase() == "true" || ps == "1";
         }

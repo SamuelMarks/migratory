@@ -3,7 +3,7 @@
 //! This module provides the implementation for the Windows host,
 //! detailing operations such as configuring SMB file sharing.
 
-use super::Host;
+use super::{Host, HostCommandRunner};
 use crate::error::MigratoryError;
 use std::process::Command;
 
@@ -151,14 +151,11 @@ impl WindowsHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if NFS Server role is missing or share creation fails.
-    pub fn configure_nfs_with<F>(
+    pub fn configure_nfs_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         let has_nfs = folders
             .iter()
             .any(|sf| sf.folder_type == Some(crate::config::SyncedFolderType::Nfs) && !sf.disabled);
@@ -206,14 +203,11 @@ impl WindowsHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if `New-SmbShare` fails.
-    pub fn configure_smb_with<F>(
+    pub fn configure_smb_with(
         &self,
         folders: &[crate::config::SyncedFolderConfig],
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+        runner: HostCommandRunner,
+    ) -> Result<(), MigratoryError> {
         for cmd in Self::generate_smb_commands(folders) {
             let (ok, _) = runner("powershell", &["-NoProfile", "-Command", &cmd])?;
             if !ok {
@@ -239,10 +233,7 @@ impl WindowsHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` if spawning fails.
-    pub fn check_admin_with<F>(&self, mut runner: F) -> Result<bool, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn check_admin_with(&self, runner: HostCommandRunner) -> Result<bool, MigratoryError> {
         let (ok, _) = runner("net", &["session"])?;
         Ok(ok)
     }
@@ -260,10 +251,10 @@ impl WindowsHost {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on failure.
-    pub fn resolve_host_ip_with<F>(&self, mut runner: F) -> Result<String, MigratoryError>
-    where
-        F: FnMut(&str, &[&str]) -> Result<(bool, String), MigratoryError>,
-    {
+    pub fn resolve_host_ip_with(
+        &self,
+        runner: HostCommandRunner,
+    ) -> Result<String, MigratoryError> {
         if let Ok((_, stdout)) = runner(
             "powershell",
             &[
@@ -381,20 +372,31 @@ mod tests {
         assert!(host.enable_ansi_colors().is_ok());
 
         assert_eq!(host.resolve_host_ip()?, "192.168.1.4");
-        assert_eq!(
-            host.resolve_host_ip_with(|_, _| Ok((
-                true,
-                "10.0.0.50
-"
-                .to_string()
-            )))?,
-            "10.0.0.50"
-        );
+        let ip = host.resolve_host_ip_with(|_, _| Ok((true, "10.0.0.50\n".to_string())));
+        assert_eq!(ip?, "10.0.0.50");
         assert_eq!(
             host.resolve_host_ip_with(|_, _| Err(MigratoryError::Generic("err".to_string())))?,
             "192.168.1.4"
         );
         assert!(!host.check_admin_with(|_, _| Ok((false, String::new())))?);
+
+        let non_nfs_folders = vec![
+            crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from(r"C:\disabled_nfs"),
+                guest_path: std::path::PathBuf::from("/disabled_nfs"),
+                folder_type: Some(crate::config::SyncedFolderType::Nfs),
+                disabled: true,
+                ..Default::default()
+            },
+            crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from(r"C:\smb"),
+                guest_path: std::path::PathBuf::from("/smb"),
+                folder_type: Some(crate::config::SyncedFolderType::Smb),
+                disabled: false,
+                ..Default::default()
+            },
+        ];
+        assert!(host.configure_nfs(&non_nfs_folders).is_ok());
 
         let nfs_folders = vec![crate::config::SyncedFolderConfig {
             host_path: std::path::PathBuf::from(r"C:\project"),

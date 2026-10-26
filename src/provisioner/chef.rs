@@ -499,6 +499,13 @@ mod tests {
             fail_cmd_substring: Some("sudo chef-solo"),
         };
 
+        let comm_exec_all_fail = FailingComm {
+            fail_upload: false,
+            fail_upload_substring: None,
+            fail_execute: true,
+            fail_cmd_substring: None,
+        };
+        assert!(prov.provision(&comm_exec_all_fail).is_err());
         assert!(prov.provision(&comm_install_fail).is_err());
         assert!(prov.provision(&comm_mkdir_cookbooks_fail).is_err());
         assert!(prov.provision(&comm_upload_fail).is_err());

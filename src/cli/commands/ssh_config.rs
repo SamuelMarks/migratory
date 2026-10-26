@@ -237,8 +237,9 @@ mod tests {
             host: None,
         };
         let result = execute(cwd, &args);
-        assert!(
-            matches!(result, Err(MigratoryError::NotFound(msg)) if msg == "Machine 'nonexistent_machine' not found")
+        assert_eq!(
+            result.err().map(|e| e.to_string()),
+            Some("Not found: Machine 'nonexistent_machine' not found".to_string())
         );
         Ok(())
     }

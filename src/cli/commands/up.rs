@@ -482,6 +482,9 @@ impl Action for ProvisionMachinesAction {
             .ok_or_else(|| {
                 MigratoryError::Generic("Machines in environment is incorrect type".to_string())
             })?;
+        let custom_provider_factory = env
+            .get_typed::<ProviderFactory>("provider_factory")
+            .cloned();
 
         let ui = ConsoleUi;
         let state_mgr = crate::state::local::LocalStateManager::new(self.cwd.join(".vagrant"));
@@ -510,10 +513,14 @@ impl Action for ProvisionMachinesAction {
                 .read_id(name, &target_provider_name)
                 .ok()
                 .flatten();
-            let p = provider::get_provider(&target_provider_name, machine_id)?;
+            let p = if let Some(ref factory) = custom_provider_factory {
+                factory(&target_provider_name, machine_id)?
+            } else {
+                provider::get_provider(&target_provider_name, machine_id)?
+            };
 
             let state = p.status().unwrap_or_default();
-            if state != "running" {
+            if state != provider::MachineState::Running {
                 ui.warn(
                     name,
                     "VM is not running. Provisioners may fail or be skipped.",
@@ -1009,10 +1016,8 @@ end
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |c|\n  c.vm.define 'm1'\n  c.vm.define 'm2'\nend",
-        )?;
+        let vf = "Vagrant.configure('2') do |c|\n  c.vm.define 'm1'\n  c.vm.define 'm2'\nend";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let args = UpArgs {
             name: None,
@@ -1202,10 +1207,8 @@ end
     fn test_execute_up_read_id_error() -> Result<(), MigratoryError> {
         let dir = tempdir()?;
         let cwd = dir.path();
-        fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config| config.vm.box = 'base' end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config| config.vm.box = 'base' end";
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let id_dir = cwd
             .join(".vagrant")
@@ -1248,10 +1251,12 @@ end
 
         let mut env = Environment::new();
         let result = warden.call(&mut env);
-        assert!(matches!(
-            result,
-            Err(ref e) if e.to_string().contains("Machines not found")
-        ));
+        assert_eq!(
+            result
+                .err()
+                .map(|e| e.to_string().contains("Machines not found")),
+            Some(true)
+        );
 
         env.typed_data.insert(
             "machines".to_string(),
@@ -1259,10 +1264,12 @@ end
                 as std::sync::Arc<dyn std::any::Any + Send + Sync>,
         );
         let result2 = warden.call(&mut env);
-        assert!(matches!(
-            result2,
-            Err(ref e) if e.to_string().contains("incorrect type")
-        ));
+        assert_eq!(
+            result2
+                .err()
+                .map(|e| e.to_string().contains("incorrect type")),
+            Some(true)
+        );
         Ok(())
     }
 
@@ -1401,10 +1408,12 @@ end
 
         let mut env = Environment::new();
         let result = warden.call(&mut env);
-        assert!(matches!(
-            result,
-            Err(ref e) if e.to_string().contains("Machines not found")
-        ));
+        assert_eq!(
+            result
+                .err()
+                .map(|e| e.to_string().contains("Machines not found")),
+            Some(true)
+        );
 
         env.typed_data.insert(
             "machines".to_string(),
@@ -1412,10 +1421,12 @@ end
                 as std::sync::Arc<dyn std::any::Any + Send + Sync>,
         );
         let result2 = warden.call(&mut env);
-        assert!(matches!(
-            result2,
-            Err(ref e) if e.to_string().contains("incorrect type")
-        ));
+        assert_eq!(
+            result2
+                .err()
+                .map(|e| e.to_string().contains("incorrect type")),
+            Some(true)
+        );
         Ok(())
     }
 
@@ -1433,10 +1444,12 @@ end
 
         let mut env = Environment::new();
         let result = warden.call(&mut env);
-        assert!(matches!(
-            result,
-            Err(ref e) if e.to_string().contains("Machines not found")
-        ));
+        assert_eq!(
+            result
+                .err()
+                .map(|e| e.to_string().contains("Machines not found")),
+            Some(true)
+        );
 
         env.typed_data.insert(
             "machines".to_string(),
@@ -1444,10 +1457,12 @@ end
                 as std::sync::Arc<dyn std::any::Any + Send + Sync>,
         );
         let result2 = warden.call(&mut env);
-        assert!(matches!(
-            result2,
-            Err(ref e) if e.to_string().contains("incorrect type")
-        ));
+        assert_eq!(
+            result2
+                .err()
+                .map(|e| e.to_string().contains("incorrect type")),
+            Some(true)
+        );
         Ok(())
     }
 
@@ -2064,15 +2079,9 @@ end
         assert!(action_vmware.call(&mut env_vmware).is_ok());
 
         let vagrant_d = tempdir()?;
-        std::fs::create_dir_all(vagrant_d.path().join("data").join("machine-index"))?;
-        std::fs::write(
-            vagrant_d
-                .path()
-                .join("data")
-                .join("machine-index")
-                .join("index"),
-            "invalid json",
-        )?;
+        let idx_dir = vagrant_d.path().join("data").join("machine-index");
+        std::fs::create_dir_all(&idx_dir)?;
+        std::fs::write(idx_dir.join("index"), "invalid json")?;
 
         let invalid_machine_dir = cwd
             .join(".vagrant")
@@ -2082,7 +2091,36 @@ end
         std::fs::create_dir_all(&invalid_machine_dir)?;
         std::fs::write(invalid_machine_dir.join("id"), "invalid_id")?;
 
-        let invalid_index_mach = crate::config::MachineConfig::default();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let ready_port = listener.local_addr()?.port();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let mut invalid_index_mach = crate::config::MachineConfig::default();
+        invalid_index_mach.ssh.port = ready_port;
+        invalid_index_mach.vm.boot_timeout = Some(1);
+        invalid_index_mach.vm.networks = vec![
+            crate::config::NetworkConfig::ForwardedPort {
+                guest: 80,
+                host: 18080,
+                protocol: Some("tcp".to_string()),
+                auto_correct: false,
+                host_ip: None,
+            },
+            crate::config::NetworkConfig::ForwardedPort {
+                guest: 81,
+                host: 18080,
+                protocol: Some("tcp".to_string()),
+                auto_correct: false,
+                host_ip: None,
+            },
+            crate::config::NetworkConfig::PublicNetwork {
+                ip: None,
+                bridge: None,
+                use_dhcp_assigned_default_route: false,
+            },
+        ];
         let mut machines_invalid_index = std::collections::HashMap::new();
         machines_invalid_index.insert("invalid_index".to_string(), invalid_index_mach);
 
@@ -2092,13 +2130,33 @@ end
             Arc::new(machines_invalid_index) as Arc<dyn std::any::Any + Send + Sync>,
         );
         env_invalid_index.insert_typed("vagrant_home", vagrant_d.path().to_path_buf());
+        let running_vbox_factory: ProviderFactory = Arc::new(|_, id| {
+            Ok(Box::new(
+                crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                    .with_runner(|_| Ok("VMState=\"running\"\n".to_string())),
+            ))
+        });
+        env_invalid_index.insert_typed("provider_factory", running_vbox_factory);
 
         let action_invalid_index = BootMachinesAction {
             cwd: cwd.to_path_buf(),
             provider_name: "virtualbox".to_string(),
             parallel: false,
         };
+        crate::communicator::ssh::mock_ssh::MOCK_STATE.with(|s| {
+            s.borrow_mut().output = b"ok\n".to_vec();
+        });
         assert!(action_invalid_index.call(&mut env_invalid_index).is_ok());
+        crate::communicator::ssh::mock_ssh::MOCK_STATE.with(|s| {
+            s.borrow_mut().output.clear();
+        });
+
+        let prov_running_action = ProvisionMachinesAction {
+            provision: Some(true),
+            provision_with: None,
+            cwd: cwd.to_path_buf(),
+        };
+        assert!(prov_running_action.call(&mut env_invalid_index).is_ok());
 
         Ok(())
     }

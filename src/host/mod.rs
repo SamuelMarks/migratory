@@ -15,6 +15,9 @@ pub mod linux;
 /// Windows host OS capabilities.
 pub mod windows;
 
+/// Function pointer type for executing host commands and returning `(success, stdout)`.
+pub type HostCommandRunner = fn(&str, &[&str]) -> Result<(bool, String), MigratoryError>;
+
 /// Interface for OS-specific host operations.
 pub trait Host: Send + Sync {
     /// Name of the host OS (e.g. "darwin", "linux", "windows", "bsd").

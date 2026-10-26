@@ -647,6 +647,10 @@ mod tests {
         fs::create_dir(&manager.index_path)?;
 
         assert!(manager.prune().is_err());
+        assert_eq!(
+            resolve_global_target_with_home("any", dir.path().to_path_buf())?,
+            None
+        );
         Ok(())
     }
 }

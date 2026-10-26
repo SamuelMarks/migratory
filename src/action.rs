@@ -770,12 +770,14 @@ impl Action for SyncFoldersAction {
     }
 
     fn call(&self, env: &mut Environment) -> Result<ActionResult, MigratoryError> {
-        if let (Some(comm), Some(folders)) = (
-            env.get_typed::<Arc<dyn crate::communicator::Communicator>>("communicator")
-                .cloned(),
-            env.get_typed::<Vec<crate::config::SyncedFolderConfig>>("synced_folders")
-                .cloned(),
-        ) {
+        if let Some((comm, folders)) = env
+            .get_typed::<Arc<dyn crate::communicator::Communicator>>("communicator")
+            .cloned()
+            .zip(
+                env.get_typed::<Vec<crate::config::SyncedFolderConfig>>("synced_folders")
+                    .cloned(),
+            )
+        {
             let machine_id = env
                 .data
                 .get("machine_id")
@@ -811,12 +813,14 @@ impl Action for ProvisionAction {
     }
 
     fn call(&self, env: &mut Environment) -> Result<ActionResult, MigratoryError> {
-        if let (Some(comm), Some(provisioners)) = (
-            env.get_typed::<Arc<dyn crate::communicator::Communicator>>("communicator")
-                .cloned(),
-            env.get_typed::<Vec<crate::config::ProvisionerConfig>>("provisioners")
-                .cloned(),
-        ) {
+        if let Some((comm, provisioners)) = env
+            .get_typed::<Arc<dyn crate::communicator::Communicator>>("communicator")
+            .cloned()
+            .zip(
+                env.get_typed::<Vec<crate::config::ProvisionerConfig>>("provisioners")
+                    .cloned(),
+            )
+        {
             for p_cfg in &provisioners {
                 if p_cfg.name == "shell" {
                     let mut shell = crate::provisioner::shell::ShellProvisioner::new();
@@ -844,9 +848,7 @@ impl Action for PruneNfsExportsAction {
         let _lock = NFS_EXPORTS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Ok(host) = crate::host::detect_host() {
-            let _ = host.prune_nfs_exports();
-        }
+        let _ = crate::host::detect_host().and_then(|host| host.prune_nfs_exports());
         env.data
             .insert("nfs_exports_pruned".to_string(), "true".to_string());
         Ok(ActionResult::Continue)
@@ -1526,14 +1528,59 @@ mod tests {
         assert!(val_action.call(&mut env).is_err());
         env.data.remove("config_error");
 
+        let mut empty_env = Environment::new();
+        assert_eq!(
+            (BoxCheckOutdatedAction {
+                box_name: "b".to_string()
+            })
+            .call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+        assert_eq!(
+            (HandleBoxAction {
+                box_name: "b".to_string()
+            })
+            .call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+        assert_eq!(
+            HandleForwardedPortCollisionsAction.call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+        assert_eq!(
+            (SetHostnameAction {
+                hostname: "h".to_string()
+            })
+            .call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+        assert_eq!(
+            (WaitForCommunicatorAction {
+                timeout: std::time::Duration::from_secs(1)
+            })
+            .call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+        assert_eq!(
+            GenerateKeyPairAction.call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+        assert_eq!(
+            SyncFoldersAction.call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+        assert_eq!(
+            ProvisionAction.call(&mut empty_env)?,
+            ActionResult::Continue
+        );
+
         let temp_home = tempfile::tempdir()?;
-        std::fs::create_dir_all(
-            temp_home
-                .path()
-                .join("boxes")
-                .join("ubuntu-VAGRANTSLASH-focal64")
-                .join("1.0.0"),
-        )?;
+        let box_v_dir = temp_home
+            .path()
+            .join("boxes")
+            .join("ubuntu-VAGRANTSLASH-focal64")
+            .join("1.0.0");
+        std::fs::create_dir_all(box_v_dir)?;
         env.insert_typed("vagrant_home", temp_home.path().to_path_buf());
 
         // BoxCheckOutdatedAction

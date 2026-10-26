@@ -427,6 +427,9 @@ pub fn ensure_insecure_private_key(dir: &Path) -> Result<PathBuf, MigratoryError
     Ok(key_path)
 }
 
+/// Function pointer type for SSH keypair generation.
+pub type KeygenFn = fn() -> Result<(String, String), MigratoryError>;
+
 impl SshCommunicator {
     /// Generates a fresh keypair for replacing default insecure keys.
     ///
@@ -487,9 +490,7 @@ impl SshCommunicator {
             ])
             .output();
 
-        if let Ok(out) = output
-            && out.status.success()
-        {
+        if output.is_ok_and(|out| out.status.success()) {
             let priv_key = std::fs::read_to_string(&key_path)?;
             let pub_path = temp_dir.path().join("id_ed25519.pub");
             let pub_key = std::fs::read_to_string(&pub_path)?;
@@ -533,14 +534,11 @@ impl SshCommunicator {
     /// # Errors
     ///
     /// Returns a `MigratoryError` on failure.
-    pub fn replace_insecure_key_with<K>(
+    pub fn replace_insecure_key_with(
         &self,
         new_private_key_path: &Path,
-        mut keygen: K,
-    ) -> Result<(), MigratoryError>
-    where
-        K: FnMut() -> Result<(String, String), MigratoryError>,
-    {
+        keygen: KeygenFn,
+    ) -> Result<(), MigratoryError> {
         let (priv_key, pub_key) = keygen()?;
         if let Some(parent) = new_private_key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1066,7 +1064,7 @@ pub(crate) mod mock_ssh {
                 return Err(Error("mock exec check error".into()));
             }
             if command.contains("echo dir") {
-                if command.contains("sub' &&") || command.contains("sub\" &&") {
+                if command.contains("sub' &&") {
                     self.output = b"dir\n".to_vec();
                 } else {
                     self.output = b"file\n".to_vec();
@@ -2326,5 +2324,9 @@ mod tests {
                 .format_command("dir")
                 .starts_with("powershell -ExecutionPolicy")
         );
+
+        let comm_openssh = SshCommunicator::new(SshConfig::default()).with_ssh_bin("echo");
+        assert!(comm_openssh.execute_via_openssh("echo hi").is_ok());
+        assert!(comm_openssh.replace_insecure_key(Path::new("")).is_err());
     }
 }

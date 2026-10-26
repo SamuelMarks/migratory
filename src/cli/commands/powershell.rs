@@ -714,15 +714,20 @@ end
         let temp_dir = tempdir()?;
 
         let res = session.start(temp_dir.path());
-        assert!(matches!(res, Err(ref e) if e.to_string().contains("status 42")));
+        assert_eq!(
+            res.err().map(|e| e.to_string().contains("status 42")),
+            Some(true)
+        );
 
         let session_sig =
             PowerShellSession::new("win".to_string(), config, false, None).with_mock_signal(true);
         let res_sig = session_sig.start(temp_dir.path());
-        assert!(matches!(
-            res_sig,
-            Err(ref e) if e.to_string().contains("interrupted by signal")
-        ));
+        assert_eq!(
+            res_sig
+                .err()
+                .map(|e| e.to_string().contains("interrupted by signal")),
+            Some(true)
+        );
 
         Ok(())
     }

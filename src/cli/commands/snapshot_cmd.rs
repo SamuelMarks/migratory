@@ -72,6 +72,19 @@ pub fn execute_with_provider<F>(
 where
     F: FnMut(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError>,
 {
+    execute_with_provider_dyn(cmd, cwd, &mut provider_factory)
+}
+
+/// Dynamic factory closure type for instantiating providers in snapshot operations.
+type ProviderFactory<'a> =
+    dyn FnMut(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError> + 'a;
+
+/// Non-generic inner implementation of `execute_with_provider`.
+fn execute_with_provider_dyn(
+    cmd: &SnapshotCommands,
+    cwd: &Path,
+    provider_factory: &mut ProviderFactory<'_>,
+) -> Result<(), MigratoryError> {
     let env_config = config::load_environment_config(cwd)?;
 
     let base_ui = crate::ui::default_ui();
@@ -321,11 +334,8 @@ mod tests {
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config|\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
@@ -416,12 +426,8 @@ end",
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-  config.vm.define 'node1'
-end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config|\n  config.vm.define 'node1'\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
         let state_dir = cwd.join(".vagrant").join("machines").join("node1");
         std::fs::create_dir_all(&state_dir)?;
         std::fs::write(state_dir.join("id"), "12345")?;
@@ -446,11 +452,8 @@ end",
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config|\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
@@ -528,13 +531,8 @@ end",
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-  config.vm.define 'node1'
-  config.vm.define 'node2'
-end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config|\n  config.vm.define 'node1'\n  config.vm.define 'node2'\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
 
         for name in &["node1", "node2"] {
             let state_dir = cwd
@@ -586,11 +584,8 @@ end",
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config|\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
@@ -661,12 +656,8 @@ end",
         let dir = tempdir()?;
         let cwd = dir.path();
 
-        std::fs::write(
-            cwd.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-  config.vm.provider 'virtualbox'
-end",
-        )?;
+        let vf = "Vagrant.configure('2') do |config|\n  config.vm.provider 'virtualbox'\nend";
+        std::fs::write(cwd.join("Vagrantfile"), vf)?;
         let state_dir = cwd
             .join(".vagrant")
             .join("machines")
@@ -699,11 +690,8 @@ end",
     {
         let dir1 = tempdir()?;
         let cwd1 = dir1.path();
-        std::fs::write(
-            cwd1.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-end",
-        )?;
+        let vf1 = "Vagrant.configure('2') do |config|\nend";
+        std::fs::write(cwd1.join("Vagrantfile"), vf1)?;
         let id_dir = cwd1
             .join(".vagrant")
             .join("machines")
@@ -735,12 +723,9 @@ end",
 
         let dir2 = tempdir()?;
         let cwd2 = dir2.path();
-        std::fs::write(
-            cwd2.join("Vagrantfile"),
-            "Vagrant.configure('2') do |config|
-  config.vm.provider 'unsupported_provider'
-end",
-        )?;
+        let vf2 =
+            "Vagrant.configure('2') do |config|\n  config.vm.provider 'unsupported_provider'\nend";
+        std::fs::write(cwd2.join("Vagrantfile"), vf2)?;
         let state_dir2 = cwd2
             .join(".vagrant")
             .join("machines")

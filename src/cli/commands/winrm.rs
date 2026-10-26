@@ -411,7 +411,10 @@ end
             shell: false,
         };
         let result = execute_with_options(cwd, &args, false, None, Some(5));
-        assert!(matches!(result, Err(ref e) if e.to_string().contains("code 5")));
+        assert_eq!(
+            result.err().map(|e| e.to_string().contains("code 5")),
+            Some(true)
+        );
         Ok(())
     }
 

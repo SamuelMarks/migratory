@@ -279,18 +279,15 @@ impl Provider for VirtualBoxProvider {
 
         let mut boot_mode = "headless";
         for provider in &config.providers {
-            if provider.name == "virtualbox"
-                && let Ok(crate::config::options::TypedProviderOptions::VirtualBox {
-                    boot_mode: cfg_mode,
-                    separate,
-                    gui,
-                    vrde,
-                    vrdeport,
-                    memory: cfg_mem,
-                    cpus: cfg_cpus,
-                    ..
-                }) = provider.as_virtualbox()
-            {
+            if provider.name == "virtualbox" {
+                let _ = provider.as_virtualbox();
+                let cfg_mode = provider.options.get("boot_mode").map(String::as_str);
+                let separate = provider.options.get("separate").map(String::as_str) == Some("true");
+                let gui = provider.options.get("gui").map(String::as_str) == Some("true");
+                let vrde = provider.options.get("vrde").map(String::as_str) == Some("true");
+                let vrdeport = provider.options.get("vrdeport");
+                let cfg_mem = provider.options.get("memory");
+                let cfg_cpus = provider.options.get("cpus");
                 if let Some(mode) = cfg_mode {
                     boot_mode = if mode == "gui" {
                         "gui"
@@ -363,10 +360,9 @@ impl Provider for VirtualBoxProvider {
         let vbox_env = std::env::var("VAGRANT_VBOX_LINKED_CLONE").unwrap_or_default();
         let mig_env = std::env::var("MIGRATORY_VBOX_LINKED_CLONE").unwrap_or_default();
         let is_linked = self.linked_clone
-            || vbox_env == "true"
-            || vbox_env == "1"
-            || mig_env == "true"
-            || mig_env == "1";
+            || [vbox_env.as_str(), mig_env.as_str()]
+                .iter()
+                .any(|v| ["true", "1"].contains(v));
 
         let mut args = vec!["clonevm", base_machine_id, "--name", vm_name, "--register"];
 
@@ -564,11 +560,12 @@ impl VirtualBoxProvider {
             .run_vboxmanage(&["guestproperty", "get", id, "/VirtualBox/GuestAdd/Version"])
             .unwrap_or_default();
 
-        if let Some(stripped) = out.strip_prefix("Value:")
-            && !stripped.trim().is_empty()
-            && stripped.trim() != "No value set!"
+        if let Some(val) = out
+            .strip_prefix("Value:")
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "No value set!")
         {
-            return Ok(Some(stripped.trim().to_string()));
+            return Ok(Some(val.to_string()));
         }
 
         Ok(None)
@@ -715,10 +712,12 @@ impl VirtualBoxProvider {
     /// Returns a `MigratoryError` if creation fails.
     pub fn create_hostonly_interface(&self) -> Result<String, MigratoryError> {
         let out = self.run_vboxmanage(&["hostonlyif", "create"])?;
-        if let Some(start) = out.find('\'')
-            && let Some(end) = out[start + 1..].find('\'')
+        if let Some(iface) = out
+            .split_once('\'')
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(name, _)| name.to_string())
         {
-            return Ok(out[start + 1..start + 1 + end].to_string());
+            return Ok(iface);
         }
         Ok("vboxnet0".to_string())
     }
@@ -818,12 +817,11 @@ impl VirtualBoxProvider {
         let out = self.run_vboxmanage(&["guestproperty", "enumerate", id])?;
         let mut props = std::collections::HashMap::new();
         for line in out.lines() {
-            if let Some(name_start) = line.find("Name: ")
-                && let Some(comma) = line[name_start + 6..].find(", value: ")
+            if let Some((prop_name, val_rest)) = line
+                .split_once("Name: ")
+                .and_then(|(_, rest)| rest.split_once(", value: "))
             {
-                let rest = &line[name_start + 6..];
-                let prop_name = rest[..comma].trim();
-                let val_rest = &rest[comma + 9..];
+                let prop_name = prop_name.trim();
                 let prop_val = match val_rest.find(", timestamp:") {
                     Some(ts) => val_rest[..ts].trim(),
                     None => val_rest.trim(),
@@ -1551,6 +1549,14 @@ mod tests {
         });
         cfg_root_sf.providers.push(crate::config::ProviderConfig {
             name: crate::config::ProviderKind::VirtualBox,
+            options: std::collections::HashMap::new(),
+        });
+        cfg_root_sf.providers.push(crate::config::ProviderConfig {
+            name: crate::config::ProviderKind::VirtualBox,
+            options: std::iter::once(("cpus".to_string(), "2".to_string())).collect(),
+        });
+        cfg_root_sf.providers.push(crate::config::ProviderConfig {
+            name: crate::config::ProviderKind::VirtualBox,
             options: std::iter::once(("boot_mode".to_string(), "gui".to_string())).collect(),
         });
         cfg_root_sf.providers.push(crate::config::ProviderConfig {
@@ -1586,6 +1592,15 @@ mod tests {
                 guest_path: std::path::PathBuf::from("/disabled"),
                 folder_type: Some(crate::config::SyncedFolderType::VirtualBox),
                 disabled: true,
+                ..Default::default()
+            });
+        cfg_root_sf
+            .synced_folders
+            .push(crate::config::SyncedFolderConfig {
+                host_path: std::path::PathBuf::from("/tmp"),
+                guest_path: std::path::PathBuf::from("/rsync"),
+                folder_type: Some(crate::config::SyncedFolderType::Rsync),
+                disabled: false,
                 ..Default::default()
             });
         let prov_sf =

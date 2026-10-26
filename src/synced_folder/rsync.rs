@@ -173,22 +173,15 @@ impl RsyncSyncedFolder {
     /// Returns a [`MigratoryError`] if `rsync` execution fails.
     fn execute_mount_command(&self, options: &SyncedFolderOptions) -> Result<(), MigratoryError> {
         let prog = if cfg!(test) { "true" } else { "sh" };
-        self.execute_mount_command_with(options, |cmd_str| {
-            let status = Command::new(prog)
-                .arg("-c")
-                .arg(cmd_str)
-                .status()
-                .map_err(MigratoryError::Io)?;
-            Ok(status.success())
-        })
+        self.execute_mount_command_with_prog(options, prog)
     }
 
-    /// Executes the mount command on the host using a custom shell runner.
+    /// Executes the mount command on the host using the specified shell program.
     ///
     /// # Arguments
     ///
     /// * `options` - Options containing host path, guest path, and mount options.
-    /// * `runner` - Closure executing the built rsync command string.
+    /// * `prog` - Shell binary to invoke with `-c <cmd>` (e.g., `"sh"` or `"true"`).
     ///
     /// # Returns
     ///
@@ -196,17 +189,19 @@ impl RsyncSyncedFolder {
     ///
     /// # Errors
     ///
-    /// Returns a [`MigratoryError`] if `runner` fails or returns `false`.
-    pub fn execute_mount_command_with<F>(
+    /// Returns a [`MigratoryError`] if `prog` fails to spawn or exits with a non-zero status.
+    pub fn execute_mount_command_with_prog(
         &self,
         options: &SyncedFolderOptions,
-        mut runner: F,
-    ) -> Result<(), MigratoryError>
-    where
-        F: FnMut(&str) -> Result<bool, MigratoryError>,
-    {
+        prog: &str,
+    ) -> Result<(), MigratoryError> {
         let cmd_str = Self::build_rsync_command(options);
-        if !runner(&cmd_str)? {
+        let status = Command::new(prog)
+            .arg("-c")
+            .arg(cmd_str)
+            .status()
+            .map_err(MigratoryError::Io)?;
+        if !status.success() {
             return Err(MigratoryError::Generic("Failed to run rsync".to_string()));
         }
         Ok(())
@@ -416,7 +411,17 @@ mod tests {
         assert!(folder.mount(&opts, &comm).is_err());
         assert!(
             folder
-                .execute_mount_command_with(&opts, |_| Ok(false))
+                .execute_mount_command_with_prog(&opts, "false")
+                .is_err()
+        );
+        assert!(
+            folder
+                .execute_mount_command_with_prog(&opts, "true")
+                .is_ok()
+        );
+        assert!(
+            folder
+                .execute_mount_command_with_prog(&opts, "nonexistent_rsync_shell_bin_12345")
                 .is_err()
         );
         Ok(())

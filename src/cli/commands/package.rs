@@ -52,6 +52,19 @@ pub fn execute_with_provider<F>(
 where
     F: FnMut(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError>,
 {
+    execute_with_provider_dyn(cwd, args, &mut provider_factory)
+}
+
+/// Dynamic factory closure type for instantiating a [`provider::Provider`].
+type ProviderFactoryFn<'a> =
+    dyn FnMut(&str, Option<String>) -> Result<Box<dyn provider::Provider>, MigratoryError> + 'a;
+
+/// Non-generic implementation of `package` execution with a dynamic provider factory.
+fn execute_with_provider_dyn(
+    cwd: &Path,
+    args: &PackageArgs,
+    provider_factory: &mut ProviderFactoryFn<'_>,
+) -> Result<(), MigratoryError> {
     let local_state = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
     let mut lock_file = local_state.create_lock_file()?;
     let _guard = lock_file
@@ -115,7 +128,10 @@ where
         let p = provider_factory(&target_provider, Some(machine_id.clone()))?;
         let state = p.status().unwrap_or_default();
 
-        if state != "poweroff" && state != "saved" && state != "not_created" {
+        if state != provider::MachineState::PowerOff
+            && state != provider::MachineState::Saved
+            && state != provider::MachineState::NotCreated
+        {
             ui.info(&target, "Attempting graceful shutdown of VM...");
             let _ = p.halt();
         }
@@ -404,13 +420,31 @@ end
         };
         assert!(execute(cwd, &args_missing).is_err());
 
-        // Test single machine in Vagrantfile without args.name
+        // Test single machine in Vagrantfile without args.name and with matching args.name
         let vf_single = r#"
 Vagrant.configure("2") do |config|
   config.vm.define "web"
 end
 "#;
         fs::write(cwd.join("Vagrantfile"), vf_single)?;
+        let args_named_existing = PackageArgs {
+            base: Some("web-id".to_string()),
+            output: Some("web-named.box".to_string()),
+            include: None,
+            vagrantfile: None,
+            name: Some("web".to_string()),
+            info: false,
+        };
+        assert!(
+            execute_with_provider(cwd, &args_named_existing, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id)
+                        .with_runner(|_| Ok("VMState=\"saved\"\n".to_string())),
+                ))
+            })
+            .is_ok()
+        );
+
         let args_single = PackageArgs {
             base: Some("web-id".to_string()),
             output: Some("web.box".to_string()),
@@ -424,6 +458,20 @@ end
                 Ok(Box::new(
                     crate::provider::virtualbox::VirtualBoxProvider::new(id)
                         .with_runner(|_| Ok("VMState=\"running\"\n".to_string())),
+                ))
+            })
+            .is_ok()
+        );
+        assert!(
+            execute_with_provider(cwd, &args_single, |_, id| {
+                Ok(Box::new(
+                    crate::provider::virtualbox::VirtualBoxProvider::new(id).with_runner(|args| {
+                        if args.first() == Some(&"showvminfo") {
+                            Err(MigratoryError::Generic("no state".to_string()))
+                        } else {
+                            Ok(String::new())
+                        }
+                    }),
                 ))
             })
             .is_ok()

@@ -244,13 +244,25 @@ pub fn ensure_virtualbox_hostonly_adapter(
     })
 }
 
+/// Function pointer type for executing CLI commands with an argument slice.
+pub type NetArgsRunner = fn(&[&str]) -> Result<String, MigratoryError>;
+
+/// Function pointer type for executing a script string.
+pub type NetScriptRunner = fn(&str) -> Result<String, MigratoryError>;
+
+/// Function pointer type for VirtualBox host-only adapter provisioning.
+pub type VboxProvisionFn = fn(&str, &str) -> Result<String, MigratoryError>;
+
+/// Function pointer type for QEMU/libvirt private network provisioning.
+pub type QemuProvisionFn = fn(&str, &str, &str) -> Result<String, MigratoryError>;
+
 /// Ensures a VirtualBox host-only adapter exists using an injectable command runner.
 ///
 /// # Arguments
 ///
 /// * `guest_ip` - Guest IP address.
 /// * `netmask` - Subnet mask.
-/// * `runner` - Closure executing `VBoxManage` with the given arguments.
+/// * `runner` - Callback executing `VBoxManage` with the given arguments.
 ///
 /// # Returns
 ///
@@ -259,18 +271,16 @@ pub fn ensure_virtualbox_hostonly_adapter(
 /// # Errors
 ///
 /// Returns a [`MigratoryError`] if creation fails.
-pub fn ensure_virtualbox_hostonly_adapter_with<F>(
+pub fn ensure_virtualbox_hostonly_adapter_with(
     guest_ip: &str,
     netmask: &str,
-    mut runner: F,
-) -> Result<String, MigratoryError>
-where
-    F: FnMut(&[&str]) -> Result<String, MigratoryError>,
-{
+    runner: NetArgsRunner,
+) -> Result<String, MigratoryError> {
     let host_ip = calculate_host_ip(guest_ip);
 
-    if let Ok(text) = runner(&["list", "hostonlyifs"])
-        && let Some(name) = find_matching_vbox_hostonly(&text, &host_ip)
+    if let Some(name) = runner(&["list", "hostonlyifs"])
+        .ok()
+        .and_then(|text| find_matching_vbox_hostonly(&text, &host_ip))
     {
         return Ok(name);
     }
@@ -325,7 +335,7 @@ pub fn ensure_qemu_private_network(
 /// * `net_name` - Name of the libvirt network.
 /// * `gateway_ip` - Subnet gateway IP address.
 /// * `netmask` - Subnet mask.
-/// * `runner` - Closure executing `virsh` with the given arguments.
+/// * `runner` - Callback executing `virsh` with the given arguments.
 ///
 /// # Returns
 ///
@@ -334,20 +344,16 @@ pub fn ensure_qemu_private_network(
 /// # Errors
 ///
 /// Returns a [`MigratoryError`] if creation fails.
-pub fn ensure_qemu_private_network_with<F>(
+pub fn ensure_qemu_private_network_with(
     net_name: &str,
     gateway_ip: &str,
     netmask: &str,
-    mut runner: F,
-) -> Result<String, MigratoryError>
-where
-    F: FnMut(&[&str]) -> Result<String, MigratoryError>,
-{
-    if let Ok(text) = runner(&["net-list", "--all"])
-        && text
-            .lines()
+    runner: NetArgsRunner,
+) -> Result<String, MigratoryError> {
+    if runner(&["net-list", "--all"]).is_ok_and(|text| {
+        text.lines()
             .any(|line| line.split_whitespace().next() == Some(net_name))
-    {
+    }) {
         let _ = runner(&["net-start", net_name]);
         return Ok(net_name.to_string());
     }
@@ -388,7 +394,7 @@ pub fn ensure_hyperv_internal_switch(switch_name: &str) -> Result<String, Migrat
 /// # Arguments
 ///
 /// * `switch_name` - Name of the virtual switch.
-/// * `runner` - Closure executing PowerShell script.
+/// * `runner` - Callback executing PowerShell script.
 ///
 /// # Returns
 ///
@@ -397,13 +403,10 @@ pub fn ensure_hyperv_internal_switch(switch_name: &str) -> Result<String, Migrat
 /// # Errors
 ///
 /// Returns a [`MigratoryError`] if creation fails.
-pub fn ensure_hyperv_internal_switch_with<F>(
+pub fn ensure_hyperv_internal_switch_with(
     switch_name: &str,
-    mut runner: F,
-) -> Result<String, MigratoryError>
-where
-    F: FnMut(&str) -> Result<String, MigratoryError>,
-{
+    runner: NetScriptRunner,
+) -> Result<String, MigratoryError> {
     let script = format!(
         "if (-not (Get-VMSwitch -Name '{switch_name}' -ErrorAction SilentlyContinue)) {{ New-VMSwitch -Name '{switch_name}' -SwitchType Internal }}"
     );
@@ -461,19 +464,14 @@ pub fn configure_private_network_for_provider(
 /// # Errors
 ///
 /// Returns a [`MigratoryError`] if the IP address is invalid or configuration fails.
-pub fn configure_private_network_for_provider_with<FV, FQ, FH>(
+pub fn configure_private_network_for_provider_with(
     config: &NetworkConfig,
     provider: &str,
     _host_interfaces: &HashMap<String, String>,
-    mut vbox_fn: FV,
-    mut qemu_fn: FQ,
-    mut hyperv_fn: FH,
-) -> Result<String, MigratoryError>
-where
-    FV: FnMut(&str, &str) -> Result<String, MigratoryError>,
-    FQ: FnMut(&str, &str, &str) -> Result<String, MigratoryError>,
-    FH: FnMut(&str) -> Result<String, MigratoryError>,
-{
+    vbox_fn: VboxProvisionFn,
+    qemu_fn: QemuProvisionFn,
+    hyperv_fn: NetScriptRunner,
+) -> Result<String, MigratoryError> {
     if let Some((ip, nm)) = config.as_private_network() {
         if ip.trim().is_empty() {
             let msg = "Private network IP cannot be empty".to_string();
@@ -945,39 +943,33 @@ NetworkMask:     255.255.255.0
         let err_qemu = |_: &str, _: &str, _: &str| Err(MigratoryError::Generic("err".to_string()));
         let err_hyperv = |_: &str| Err(MigratoryError::Generic("err".to_string()));
 
-        assert_eq!(
-            configure_private_network_for_provider_with(
-                &priv_cfg,
-                "virtualbox",
-                &empty_interfaces,
-                ok_vbox,
-                ok_qemu,
-                ok_hyperv,
-            )?,
-            "vboxnet0"
+        let r1 = configure_private_network_for_provider_with(
+            &priv_cfg,
+            "virtualbox",
+            &empty_interfaces,
+            ok_vbox,
+            ok_qemu,
+            ok_hyperv,
         );
-        assert_eq!(
-            configure_private_network_for_provider_with(
-                &priv_cfg,
-                "qemu",
-                &empty_interfaces,
-                ok_vbox,
-                ok_qemu,
-                ok_hyperv,
-            )?,
-            "migratory_private"
+        assert_eq!(r1?, "vboxnet0");
+        let r2 = configure_private_network_for_provider_with(
+            &priv_cfg,
+            "qemu",
+            &empty_interfaces,
+            ok_vbox,
+            ok_qemu,
+            ok_hyperv,
         );
-        assert_eq!(
-            configure_private_network_for_provider_with(
-                &priv_cfg,
-                "hyperv",
-                &empty_interfaces,
-                ok_vbox,
-                ok_qemu,
-                ok_hyperv,
-            )?,
-            "Migratory_Private"
+        assert_eq!(r2?, "migratory_private");
+        let r3 = configure_private_network_for_provider_with(
+            &priv_cfg,
+            "hyperv",
+            &empty_interfaces,
+            ok_vbox,
+            ok_qemu,
+            ok_hyperv,
         );
+        assert_eq!(r3?, "Migratory_Private");
         assert_eq!(
             configure_private_network_for_provider(&priv_cfg, "docker", &empty_interfaces)?,
             "private_net"
@@ -1045,26 +1037,24 @@ NetworkMask:     255.255.255.0
         let matched =
             ensure_virtualbox_hostonly_adapter_with("192.168.56.10", "255.255.255.0", |_| {
                 Ok("Name: vboxnet0\nIPAddress: 192.168.56.1\n".to_string())
-            })?;
-        assert_eq!(matched, "vboxnet0");
+            });
+        assert_eq!(matched?, "vboxnet0");
 
         let created =
             ensure_virtualbox_hostonly_adapter_with("192.168.56.10", "255.255.255.0", |args| {
-                if args.first() == Some(&"list") {
-                    Ok(String::new())
-                } else if args.first() == Some(&"hostonlyif") && args.get(1) == Some(&"create") {
+                if args == ["hostonlyif", "create"] {
                     Ok("Interface 'vboxnet5' was successfully created".to_string())
                 } else {
                     Ok(String::new())
                 }
-            })?;
-        assert_eq!(created, "vboxnet5");
+            });
+        assert_eq!(created?, "vboxnet5");
 
         let fallback =
             ensure_virtualbox_hostonly_adapter_with("192.168.56.10", "255.255.255.0", |_| {
                 Err(MigratoryError::Generic("err".to_string()))
-            })?;
-        assert_eq!(fallback, "vboxnet0");
+            });
+        assert_eq!(fallback?, "vboxnet0");
 
         // 6. Direct unit tests for ensure_qemu_private_network_with & ensure_qemu_private_network
         let existing_qemu = ensure_qemu_private_network_with(
@@ -1078,16 +1068,16 @@ NetworkMask:     255.255.255.0
                     Ok(String::new())
                 }
             },
-        )?;
-        assert_eq!(existing_qemu, "migratory_private");
+        );
+        assert_eq!(existing_qemu?, "migratory_private");
 
         let new_qemu = ensure_qemu_private_network_with(
             "migratory_private",
             "192.168.56.1",
             "255.255.255.0",
             |_| Ok("default   active   yes\n".to_string()),
-        )?;
-        assert_eq!(new_qemu, "migratory_private");
+        );
+        assert_eq!(new_qemu?, "migratory_private");
         let _ = ensure_qemu_private_network("migratory_private", "192.168.56.1", "255.255.255.0");
 
         // 7. Direct unit tests for ensure_hyperv_internal_switch_with & ensure_hyperv_internal_switch

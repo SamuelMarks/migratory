@@ -115,13 +115,14 @@ impl VmwareProvider {
         for path in &self.lease_files {
             if let Ok(content) = std::fs::read_to_string(path) {
                 for line in content.lines() {
-                    if let Some(rest) = line.trim().strip_prefix("lease ")
-                        && let Some(ip_raw) = rest.strip_suffix('{')
+                    if let Some(ip) = line
+                        .trim()
+                        .strip_prefix("lease ")
+                        .and_then(|rest| rest.strip_suffix('{'))
+                        .map(str::trim)
+                        .filter(|ip| !ip.is_empty())
                     {
-                        let ip = ip_raw.trim();
-                        if !ip.is_empty() {
-                            return Ok(Some(ip.to_string()));
-                        }
+                        return Ok(Some(ip.to_string()));
                     }
                 }
             }
@@ -772,7 +773,8 @@ mod tests {
 
         let bin_str = bin.to_string_lossy().to_string();
         let vmx_file = temp_dir.path().join("machine.vmx");
-        std::fs::write(&vmx_file, "uuid.bios = \"123\"\nconfig.version = \"8\"\n")?;
+        let vmx_content = "uuid.bios = \"123\"\nuuid.location = \"456\"\nethernet0.generatedAddress = \"00:0c:29\"\nconfig.version = \"8\"\n";
+        std::fs::write(&vmx_file, vmx_content)?;
 
         let provider = VmwareProvider::new(Some(vmx_file.to_string_lossy().to_string()))
             .with_vmrun_bin(&bin_str);
@@ -1147,6 +1149,16 @@ malformed line without equal
         // Test get_guest_ip via vmrun_bin and via lease_files
         let prov_ip = VmwareProvider::new(Some("192.168.99.10".to_string())).with_vmrun_bin("echo");
         assert!(prov_ip.get_guest_ip()?.is_some());
+
+        let prov_empty_ip = VmwareProvider::new(Some(String::new()))
+            .with_vmrun_bin("true")
+            .with_lease_files(vec![]);
+        assert_eq!(prov_empty_ip.get_guest_ip()?, None);
+
+        let prov_err_ip = VmwareProvider::new(Some("Error: Tools.not.running".to_string()))
+            .with_vmrun_bin("echo")
+            .with_lease_files(vec![]);
+        assert_eq!(prov_err_ip.get_guest_ip()?, None);
 
         let empty_lease_path = temp_dir.path().join("empty.leases");
         std::fs::write(&empty_lease_path, "lease   {\n}\n")?;

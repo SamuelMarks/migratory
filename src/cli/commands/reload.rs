@@ -185,17 +185,15 @@ end
             name: None,
         };
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf = r#"
 Vagrant.configure("2") do |config|
   config.vm.define "default" do |node|
     node.vm.provider "virtualbox" do |vb|
     end
   end
 end
-"#,
-        )?;
+"#;
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let id_dir = cwd
             .join(".vagrant")
@@ -330,14 +328,12 @@ end
         let cwd = dir.path();
         let args = mock_args();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf = r#"
 Vagrant.configure("2") do |config|
   config.vm.box = "base"
 end
-        "#,
-        )?;
+        "#;
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let state_dir = cwd.join(".vagrant").join("machines").join("default");
         fs::create_dir_all(&state_dir)?;
@@ -368,14 +364,12 @@ end
         let cwd = dir.path();
         let args = mock_args();
 
-        fs::write(
-            cwd.join("Vagrantfile"),
-            r#"
+        let vf = r#"
 Vagrant.configure("2") do |config|
   config.vm.provider "docker"
 end
-        "#,
-        )?;
+        "#;
+        fs::write(cwd.join("Vagrantfile"), vf)?;
 
         let state_mgr = crate::state::local::LocalStateManager::new(cwd.join(".vagrant"));
         state_mgr.write_id("default", "docker", "docker-id-reload")?;

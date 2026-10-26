@@ -1213,7 +1213,14 @@ mod tests {
         assert!(blocked_parent_state.create_machine_lock().is_err());
         assert!(blocked_parent_state.create_action_lock().is_err());
 
-        // 8. lock_process_environment and create_dotlock on non-existent dir
+        // 8. Empty ssh_port and empty forwarded_ports files return None / empty Vec
+        let clean_state = LocalMachineState::new(dir.path(), "empty_files", "virtualbox");
+        clean_state.write_file("ssh_port", "")?;
+        assert_eq!(clean_state.get_ssh_port()?, None);
+        clean_state.write_file("forwarded_ports", "")?;
+        assert!(clean_state.get_forwarded_ports()?.is_empty());
+
+        // 9. lock_process_environment and create_dotlock on non-existent dir
         let fresh_dir = dir.path().join("fresh_dot_vagrant");
         let fresh_mgr = LocalStateManager::new(fresh_dir.clone());
         assert!(fresh_mgr.create_dotlock().is_ok());
