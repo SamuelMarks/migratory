@@ -571,6 +571,10 @@ mod tests {
         assert!(p.snapshot_list().is_err());
         assert!(p.snapshot_delete("test").is_err());
         assert!(p.export(std::path::Path::new("/dummy")).is_err());
+        assert_eq!(
+            MachineState::from_raw("not_created"),
+            MachineState::NotCreated
+        );
         let running_str = "running".to_string();
         assert!(MachineState::Running == running_str);
     }

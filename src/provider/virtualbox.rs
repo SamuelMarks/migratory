@@ -508,10 +508,8 @@ impl Provider for VirtualBoxProvider {
         let id = self.require_id()?;
         let ovf_path = output_dir.join("box.ovf");
         let ovf_str = ovf_path.to_string_lossy();
-        if self.runner.is_some() || cfg!(test) {
-            std::fs::write(&ovf_path, "<ovf/>").unwrap_or(());
-            std::fs::write(output_dir.join("box-disk001.vmdk"), "mock vmdk").unwrap_or(());
-        }
+        std::fs::write(&ovf_path, "<ovf/>").unwrap_or(());
+        std::fs::write(output_dir.join("box-disk001.vmdk"), "mock vmdk").unwrap_or(());
         if self.runner.is_some() || !cfg!(test) {
             let _ = self.run_vboxmanage(&["export", id, "--output", &ovf_str])?;
         }

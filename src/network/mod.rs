@@ -230,18 +230,11 @@ pub fn ensure_virtualbox_hostonly_adapter(
     guest_ip: &str,
     netmask: &str,
 ) -> Result<String, MigratoryError> {
-    ensure_virtualbox_hostonly_adapter_with(guest_ip, netmask, |args| {
-        let out = std::process::Command::new("VBoxManage")
-            .args(args)
-            .output()?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).to_string())
-        } else {
-            Err(MigratoryError::Generic(
-                String::from_utf8_lossy(&out.stderr).to_string(),
-            ))
-        }
-    })
+    ensure_virtualbox_hostonly_adapter_with(
+        guest_ip,
+        netmask,
+        crate::provider::virtualbox::execute_vboxmanage,
+    )
 }
 
 /// Function pointer type for executing CLI commands with an argument slice.

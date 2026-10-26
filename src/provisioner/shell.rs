@@ -78,9 +78,14 @@ fn download_remote_script(url: &str) -> Result<tempfile::NamedTempFile, Migrator
     Ok(temp)
 }
 
+/// Returns the reboot sleep duration in milliseconds.
+fn reboot_sleep_millis(is_test: bool) -> u64 {
+    if is_test { 1 } else { 5000 }
+}
+
 /// Sleeps briefly to allow the connection to drop during reboot.
 fn sleep_for_reboot() {
-    let millis = if cfg!(test) { 1 } else { 5000 };
+    let millis = reboot_sleep_millis(cfg!(test));
     std::thread::sleep(std::time::Duration::from_millis(millis));
 }
 
@@ -440,6 +445,8 @@ mod tests {
 
     #[test]
     fn test_shell_provisioner_numeric_flags() {
+        assert_eq!(reboot_sleep_millis(true), 1);
+        assert_eq!(reboot_sleep_millis(false), 5000);
         let mut prov = ShellProvisioner::default();
         let mut config = HashMap::new();
         config.insert("powershell".to_string(), "1".to_string());

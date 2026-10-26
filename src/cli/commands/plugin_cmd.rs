@@ -71,6 +71,11 @@ fn execute_gem_command_with(
     Ok(())
 }
 
+/// Resolves the `gem` binary name based on whether tests are running.
+fn resolve_gem_bin(is_test: bool) -> &'static str {
+    if is_test { "echo" } else { "gem" }
+}
+
 /// Executes the `plugin` command.
 ///
 /// # Arguments
@@ -90,7 +95,7 @@ pub fn execute(cmd: &PluginCommands, out: &mut dyn Write) -> Result<(), Migrator
         std::env::var("VAGRANT_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     );
-    let gem_bin = if cfg!(test) { "echo" } else { "gem" };
+    let gem_bin = resolve_gem_bin(cfg!(test));
     execute_with_config(cmd, out, &home_dir, gem_bin)
 }
 
@@ -699,6 +704,8 @@ mod tests {
 
     #[test]
     fn test_execute_plugin_all_branches() {
+        assert_eq!(resolve_gem_bin(true), "echo");
+        assert_eq!(resolve_gem_bin(false), "gem");
         let mut out = Vec::new();
 
         assert!(

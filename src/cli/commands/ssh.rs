@@ -11,7 +11,10 @@ use std::process::Command;
 
 /// Runs an SSH command process and returns whether it exited with success.
 fn run_ssh_command(mut ssh_cmd: Command) -> Result<bool, MigratoryError> {
-    Ok(cfg!(test) || ssh_cmd.status()?.success())
+    if cfg!(test) && ssh_cmd.get_program() == "ssh" {
+        return Ok(true);
+    }
+    Ok(ssh_cmd.status()?.success())
 }
 
 /// Executes the `ssh` command.
@@ -201,6 +204,8 @@ mod tests {
 
     #[test]
     fn test_execute_ssh_missing() -> Result<(), MigratoryError> {
+        assert!(run_ssh_command(Command::new("true"))?);
+        assert!(!run_ssh_command(Command::new("false"))?);
         let dir = tempdir()?;
         let cwd = dir.path();
         let args = SshArgs {

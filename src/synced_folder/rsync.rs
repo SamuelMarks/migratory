@@ -158,6 +158,11 @@ impl RsyncSyncedFolder {
         cmd
     }
 
+    /// Resolves the shell executable used to run `rsync`.
+    fn resolve_rsync_shell_prog(is_test: bool) -> &'static str {
+        if is_test { "true" } else { "sh" }
+    }
+
     /// Executes the mount command on the host.
     ///
     /// # Arguments
@@ -172,7 +177,7 @@ impl RsyncSyncedFolder {
     ///
     /// Returns a [`MigratoryError`] if `rsync` execution fails.
     fn execute_mount_command(&self, options: &SyncedFolderOptions) -> Result<(), MigratoryError> {
-        let prog = if cfg!(test) { "true" } else { "sh" };
+        let prog = Self::resolve_rsync_shell_prog(cfg!(test));
         self.execute_mount_command_with_prog(options, prog)
     }
 
@@ -400,6 +405,8 @@ mod tests {
 
     #[test]
     fn test_rsync_folder_empty_guest_path() -> Result<(), MigratoryError> {
+        assert_eq!(RsyncSyncedFolder::resolve_rsync_shell_prog(true), "true");
+        assert_eq!(RsyncSyncedFolder::resolve_rsync_shell_prog(false), "sh");
         let dir = tempdir()?;
         let folder = RsyncSyncedFolder;
         let opts = SyncedFolderOptions {
